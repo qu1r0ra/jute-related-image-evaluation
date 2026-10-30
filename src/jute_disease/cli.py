@@ -60,7 +60,7 @@ from jute_disease.training import (
     subprocess_launcher,
     verify_stack,
 )
-from jute_disease.training.engines.ml.predict import predict_ml
+from jute_disease.training.engines.ml import predict_ml
 
 Handler = Callable[[argparse.Namespace], None]
 
@@ -232,7 +232,7 @@ def _queue_run(args: argparse.Namespace) -> None:
 
 
 def _evaluate_aggregate(args: argparse.Namespace) -> None:
-    aggregate_metrics(args.exp_names, args.output)
+    aggregate_metrics(args.fit_ids, args.output, args.runs_dir)
 
 
 def _bounds(text: str) -> tuple[int, int]:
@@ -366,8 +366,13 @@ def build_parser() -> argparse.ArgumentParser:
         "aggregate", help="Write the experiment summary CSV."
     )
     aggregate.add_argument(
-        "--exp-names", nargs="+", required=True, help="Experiment log names."
+        "--exp-names",
+        dest="fit_ids",
+        nargs="+",
+        required=True,
+        help="Fit ids, for example cnn/mobilenet_v2_direct/seed-42.",
     )
+    aggregate.add_argument("--runs-dir", type=Path, default=RUNS_DIR)
     aggregate.add_argument(
         "--output",
         type=Path,

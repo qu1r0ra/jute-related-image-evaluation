@@ -278,6 +278,25 @@ def test_a_probe_showing_plantdoc_is_too_slow_omits_it(harness: Harness) -> None
     assert report.arms == {"plantvillage": "complete", "plantdoc": "omitted"}
 
 
+def test_a_failed_probe_omits_the_optional_stage_instead_of_aborting(
+    harness: Harness,
+) -> None:
+    _known_timings(harness, hours=1.0)
+    harness.probe_hours = {}
+    real_probe = harness.probe
+
+    def failing(fit: FitSpec) -> float:
+        if fit.stage == "plantdoc":
+            raise RuntimeError("probe child crashed")
+        return real_probe(fit)
+
+    harness.probe = failing  # type: ignore[method-assign]
+    report = harness.run(500)
+    assert report.arms["plantdoc"] == "omitted"
+    assert any("probe child crashed" in d["reason"] for d in report.decisions)
+    assert report.outcomes["cnn/mobilenet_v2_direct/seed-42"] == RunState.COMPLETED
+
+
 def test_classical_fits_run_under_the_per_fit_limit(harness: Harness) -> None:
     _known_timings(harness)
     harness.run(500)

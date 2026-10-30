@@ -304,7 +304,20 @@ class _Queue:
         for index, fit in enumerate(fits):
             if allowed:
                 rest = fits[index:]
-                upper = self.remaining_upper(rest)
+                try:
+                    upper = self.remaining_upper(rest)
+                except Exception as error:  # a probe that cannot time a stage
+                    allowed, reason = False, f"timing probe failed: {error}"
+                    self.report.decisions.append(
+                        {
+                            "stage": stage.name,
+                            "at": self.clock.now().isoformat(),
+                            "admitted": False,
+                            "reason": reason,
+                        }
+                    )
+                    self.save()
+                    upper = 0.0
                 if upper > 0:
                     decision = admit_optional(
                         self.clock.now(),

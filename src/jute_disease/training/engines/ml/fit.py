@@ -18,25 +18,25 @@ from sklearn.metrics import accuracy_score, f1_score
 from sklearn.utils.class_weight import compute_sample_weight
 
 from jute_disease.data import (
+    Manifest,
     ManifestDataset,
     classical_pipeline,
     file_sha256,
     load_manifest,
 )
-from jute_disease.data.manifest import Manifest
 from jute_disease.models.ml import (
     FEATURE_EXTRACTORS,
     ML_CLASSIFIERS,
     BaseFeatureExtractor,
     RawPixelFeatureExtractor,
     extract_features,
+    feature_cache_key,
 )
-from jute_disease.models.ml.features import feature_cache_key
 from jute_disease.training.benchmark import FitSpec, Recipe
 from jute_disease.training.inputs import DataInputs
 from jute_disease.training.results import FitResult
 
-PARTITIONS = ("train", "val")
+FIT_PARTITIONS = ("train", "val")
 MODEL_FILE = "model.joblib"
 WEIGHTING = "balanced"
 
@@ -92,7 +92,7 @@ def prepare_features(
     for name in FEATURE_EXTRACTORS:
         features[name] = {
             partition: _matrix(manifest, partition, name, recipe, data, cache)[2]
-            for partition in PARTITIONS
+            for partition in FIT_PARTITIONS
         }
     return FitResult(
         {

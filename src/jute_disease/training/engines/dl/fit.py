@@ -17,12 +17,12 @@ from lightning import Callback, Trainer
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 
 from jute_disease.data import DataModule, file_sha256, load_manifest
-from jute_disease.models.dl.backbone import (
+from jute_disease.models.dl import (
+    Classifier,
     TimmBackbone,
     read_checkpoint_state,
     state_digest,
 )
-from jute_disease.models.dl.classifier import Classifier
 from jute_disease.training.benchmark import FitKind, FitSpec, Recipe
 from jute_disease.training.inputs import DataInputs
 from jute_disease.training.logger import (

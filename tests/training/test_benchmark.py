@@ -155,3 +155,13 @@ def test_unknown_configuration_keys_are_rejected(tmp_path) -> None:
     path.write_text(text, encoding="utf-8")
     with pytest.raises(ValueError, match="mystery"):
         load_benchmark(path)
+
+
+def test_compilation_cannot_be_enabled(tmp_path) -> None:
+    text = BENCHMARK_CONFIG.read_text(encoding="utf-8").replace(
+        '"compile_model": false', '"compile_model": true', 1
+    )
+    path = tmp_path / "benchmark.json"
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match="compile"):
+        load_benchmark(path)

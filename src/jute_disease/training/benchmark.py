@@ -150,6 +150,8 @@ def load_benchmark(path: Path | str) -> Benchmark:
     recipe_raw = _checked("recipe", raw["recipe"], Recipe)
     recipe_raw["seeds"] = tuple(recipe_raw["seeds"])
     recipe = Recipe(**recipe_raw)
+    if recipe.compile_model:
+        raise ValueError("Benchmark recipe must keep compile_model off on this stack")
     limits = QueueLimits(**_checked("queue", raw["queue"], QueueLimits))
     systems = raw["cnn_systems"]
     for name, definition in systems.items():
