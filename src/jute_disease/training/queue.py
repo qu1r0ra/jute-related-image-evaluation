@@ -7,7 +7,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 def check_deadline(config: dict[str, Any], now: str) -> dict[str, Any]:
-    """Check the configured deadline before considering work for admission."""
+    """Check a forecast using a default and minimum two-hour reserve.
+
+    The cutoff, its timezone and verification evidence must be explicit.
+    A passing forecast does not start or admit a run.
+    """
     if (
         not config.get("cutoff")
         or config.get("verified") is not True
@@ -30,15 +34,15 @@ def check_deadline(config: dict[str, Any], now: str) -> dict[str, Any]:
         raise ValueError("cutoff offset does not match timezone")
     seconds = []
     for key in ("mandatory_seconds", "optional_seconds", "finalization_seconds"):
-        value = config.get(key)
+        value = config.get(key, 2 * 3600 if key == "finalization_seconds" else None)
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError(f"{key} must be a nonnegative finite number")
         if not math.isfinite(value) or value < 0:
             raise ValueError(f"{key} must be a nonnegative finite number")
         seconds.append(value)
     mandatory, optional, reserve = seconds
-    if reserve < 8 * 3600:
-        raise ValueError("finalization reserve must be at least eight hours")
+    if reserve < 2 * 3600:
+        raise ValueError("finalization reserve must be at least two hours")
     projected = current.astimezone(UTC) + timedelta(
         seconds=mandatory + optional + reserve
     )

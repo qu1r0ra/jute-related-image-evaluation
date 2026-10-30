@@ -35,7 +35,7 @@ def test_queue_refuses_missing_verified_cutoff(tmp_path: Path) -> None:
     assert "verified cutoff" in result.stderr.lower()
 
 
-def test_queue_forecast_reserves_eight_hours(tmp_path: Path) -> None:
+def test_queue_forecast_reserves_two_hours(tmp_path: Path) -> None:
     config = tmp_path / "queue.json"
     config.write_text(
         json.dumps(
@@ -45,8 +45,7 @@ def test_queue_forecast_reserves_eight_hours(tmp_path: Path) -> None:
                 "verified": True,
                 "verification": "owner operational cutoff",
                 "mandatory_seconds": 7200,
-                "optional_seconds": 7201,
-                "finalization_seconds": 28800,
+                "optional_seconds": 28801,
             }
         ),
         encoding="utf-8",
@@ -55,8 +54,14 @@ def test_queue_forecast_reserves_eight_hours(tmp_path: Path) -> None:
     assert result.returncode != 0
     assert "finalization" in result.stderr.lower()
     payload = json.loads(config.read_text(encoding="utf-8"))
-    payload["optional_seconds"] = 7200
+    payload["optional_seconds"] = 28800
     config.write_text(json.dumps(payload), encoding="utf-8")
     admitted = run_check(config)
     assert admitted.returncode == 0, admitted.stderr
     assert json.loads(admitted.stdout)["forecast_fits"] is True
+
+    payload["finalization_seconds"] = 7199
+    config.write_text(json.dumps(payload), encoding="utf-8")
+    too_small = run_check(config)
+    assert too_small.returncode != 0
+    assert "at least two hours" in too_small.stderr
