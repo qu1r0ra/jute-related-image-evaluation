@@ -38,7 +38,7 @@ from jute_disease.data import (
 from jute_disease.models.dl.classifier import Classifier
 from jute_disease.models.ml import FEATURE_EXTRACTORS, ML_CLASSIFIERS
 from jute_disease.reporting.tables import aggregate_metrics
-from jute_disease.training import pretrain_main
+from jute_disease.training import check_deadline, pretrain_main
 from jute_disease.training.baselines import CONFIGS_DIR, run_all_dl
 from jute_disease.training.cross_validation import run_cross_validation
 from jute_disease.training.engines.ml.predict import predict_ml
@@ -71,6 +71,14 @@ def _data_synthetic(args: argparse.Namespace) -> None:
 
 def _print_json(payload: object) -> None:
     sys.stdout.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def _queue_check(args: argparse.Namespace) -> None:
+    try:
+        config = json.loads(args.config.read_text(encoding="utf-8"))
+        _print_json(check_deadline(config, args.now))
+    except (OSError, ValueError) as error:
+        raise SystemExit(f"queue blocked: {error}") from error
 
 
 def _freeze_target(args: argparse.Namespace) -> None:
@@ -296,9 +304,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     # planned commands owned by open tickets
     _add_freeze(commands)
-    commands.add_parser(
-        "queue", help="Run the resumable training queue (planned)."
-    ).set_defaults(run=_planned("queue", "#720"))
+    queue = commands.add_parser("queue", help="Inspect the training queue deadline.")
+    queue.set_defaults(run=_planned("queue", "#720"))
+    queue_actions = queue.add_subparsers(dest="queue_action")
+    check = queue_actions.add_parser(
+        "check", help="Check a simulated deadline forecast."
+    )
+    check.add_argument("--config", type=Path, required=True)
+    check.add_argument("--now", required=True)
+    check.set_defaults(run=_queue_check)
     commands.add_parser(
         "profile", help="Profile inference on the desktop (planned)."
     ).set_defaults(run=_planned("profile", "#721"))
