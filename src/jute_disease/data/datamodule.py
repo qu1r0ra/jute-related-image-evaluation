@@ -10,7 +10,8 @@ from torch.utils.data import DataLoader, Dataset, Subset, random_split
 from torchvision.datasets import ImageFolder
 
 from jute_disease.config import BATCH_SIZE, DEFAULT_SEED, IMAGE_SIZE, NUM_WORKERS
-from jute_disease.data.manifest import Manifest, load_manifest
+from jute_disease.data.freeze import load_source_manifest
+from jute_disease.data.manifest import FreezeBlockedError, Manifest, load_manifest
 from jute_disease.data.readers import ManifestDataset
 from jute_disease.data.sampling import balanced_sampler, loader_generator, seed_worker
 from jute_disease.data.transforms import PreprocessingSpec, create_pipeline
@@ -36,6 +37,7 @@ class DataModule(LightningDataModule):
         data_dir: Path | str | None = None,
         manifest_dir: Path | str | None = None,
         image_root: Path | str | None = None,
+        target_manifest_dir: Path | str | None = None,
         cache_root: Path | str | None = None,
         val_split: float | None = None,
         batch_size: int = BATCH_SIZE,
@@ -60,6 +62,9 @@ class DataModule(LightningDataModule):
         self.data_dir = None if data_dir is None else Path(data_dir).resolve()
         self.manifest_dir = None if manifest_dir is None else Path(manifest_dir)
         self.image_root = None if image_root is None else Path(image_root)
+        self.target_manifest_dir = (
+            None if target_manifest_dir is None else Path(target_manifest_dir)
+        )
         self.cache_root = None if cache_root is None else Path(cache_root)
 
         self.jute_train: Dataset | None = None
@@ -115,7 +120,20 @@ class DataModule(LightningDataModule):
             self._setup_folders(stage)
 
     def _setup_manifest(self, stage: str | None) -> None:
-        self.manifest = load_manifest(self.manifest_dir)  # type: ignore[arg-type]
+        assert self.manifest_dir is not None
+        manifest = load_manifest(self.manifest_dir)
+        if "source_inventory" in dict(manifest.dependencies):
+            if self.target_manifest_dir is None:
+                raise FreezeBlockedError(
+                    "Source manifests require target_manifest_dir for "
+                    "readiness verification"
+                )
+            assert self.image_root is not None
+            self.manifest = load_source_manifest(
+                self.manifest_dir, self.image_root, self.target_manifest_dir
+            )
+        else:
+            self.manifest = manifest
         self._classes = list(self.manifest.labels)
         if stage in ("fit", None):
             if self.hparams.k_fold > 1:

@@ -222,6 +222,8 @@ def load_source_manifest(
         raise FreezeBlockedError("Source intake version differs from the pinned source")
     if report.get("source_url") != f"https://www.kaggle.com/datasets/{spec.kaggle_id}":
         raise FreezeBlockedError("Source intake URL differs from the pinned source")
+    if report.get("package_inventory_digest") != spec.expected_inventory_digest:
+        raise FreezeBlockedError("Source intake differs from the tracked content pin")
     if report.get("package_inventory_digest") != dependencies["source_inventory"]:
         raise FreezeBlockedError("Source intake inventory differs from its manifest")
     if blockers := readiness_blockers(spec):
@@ -237,7 +239,7 @@ def load_source_manifest(
 def _check_package_identity(
     spec: SourceSpec, package_version: int, package_digest: str
 ) -> str:
-    """Validate the caller's package pin and return the normalized digest."""
+    """Validate the package inputs against the tracked version and content pin."""
     if package_version != spec.version:
         raise SourceMismatchError(
             f"{spec.name} package version {package_version} differs from "
@@ -247,6 +249,12 @@ def _check_package_identity(
     if not _SHA256.fullmatch(digest):
         raise SourceMismatchError(
             f"Package digest must be a 64-character hex SHA-256: {package_digest!r}"
+        )
+    if spec.expected_inventory_digest is None:
+        raise FreezeBlockedError(f"{spec.name} has no tracked source inventory SHA-256")
+    if digest != spec.expected_inventory_digest.lower():
+        raise SourceMismatchError(
+            f"{spec.name} package digest differs from its tracked content pin"
         )
     return digest
 
@@ -276,9 +284,9 @@ def intake_source(
 ) -> dict:
     """Record a source package and check it against the frozen target.
 
-    The package version and inventory digest are required and checked before the
-    source is scanned. They pin the package bytes only; publisher identity and
-    terms stay a separate readiness gate recorded in the report.
+    The package version and inventory digest are checked against the tracked
+    source spec before scanning. Owner approval permits internal research use;
+    unresolved publisher identity and terms remain explicit report caveats.
 
     Raises:
         KeyError: ``name`` is not a known source.

@@ -12,6 +12,7 @@ from jute_disease.data import (
     PLANTDOC,
     SOURCES,
     TARGET_DIR,
+    DataModule,
     FreezeBlockedError,
     SourceMismatchError,
     SyntheticPlan,
@@ -65,9 +66,7 @@ def test_source_data_module_rejects_changed_content_and_target_overlap(
     spec = replace(
         PLANTDOC,
         expected=tuple(sorted(observed_counts(records).items())),
-        publisher_identity_evidence=("synthetic fixture",),
-        publisher_identity_verified=True,
-        terms_verified=True,
+        expected_inventory_digest=inventory_digest(records),
     )
     monkeypatch.setitem(SOURCES, "plantdoc", spec)
     intake_source(
@@ -77,6 +76,14 @@ def test_source_data_module_rejects_changed_content_and_target_overlap(
         package_version=7,
         package_digest=inventory_digest(records),
     )
+
+    with pytest.raises(FreezeBlockedError, match="target_manifest_dir"):
+        DataModule(
+            manifest_dir=output / "source_plantdoc",
+            image_root=package,
+            batch_size=4,
+            seed=42,
+        ).setup("fit")
 
     data_module = source_data_module(
         output / "source_plantdoc", package, output / TARGET_DIR, 4, 42
@@ -104,7 +111,7 @@ def test_source_data_module_rejects_changed_content_and_target_overlap(
         )
 
 
-def test_source_pretraining_blocks_unverified_publisher_identity(
+def test_source_pretraining_blocks_missing_owner_authorization(
     synthetic: SyntheticPlan,
     rules_path: Path,
     tmp_path: Path,
@@ -118,7 +125,13 @@ def test_source_pretraining_blocks_unverified_publisher_identity(
     for duplicate in (package / "test").rglob("*bytecopy.png"):
         duplicate.unlink()
     records = build_inventory(package, workers=2)
-    spec = replace(PLANTDOC, expected=tuple(sorted(observed_counts(records).items())))
+    spec = replace(
+        PLANTDOC,
+        expected=tuple(sorted(observed_counts(records).items())),
+        expected_inventory_digest=inventory_digest(records),
+        owner_internal_use_authorized=False,
+        owner_authorization_record="",
+    )
     monkeypatch.setitem(SOURCES, "plantdoc", spec)
     intake_source(
         "plantdoc",
@@ -128,7 +141,7 @@ def test_source_pretraining_blocks_unverified_publisher_identity(
         package_digest=inventory_digest(records),
     )
 
-    with pytest.raises(FreezeBlockedError, match="independently verified"):
+    with pytest.raises(FreezeBlockedError, match="Owner authorization"):
         source_data_module(
             output / "source_plantdoc", package, output / TARGET_DIR, 4, 42
         )

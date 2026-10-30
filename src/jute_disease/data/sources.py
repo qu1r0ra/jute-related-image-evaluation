@@ -47,6 +47,9 @@ class SourceSpec:
     version: int
     expected: tuple[tuple[str, PartitionCounts], ...]
     license_evidence: tuple[str, ...]
+    expected_inventory_digest: str | None = None
+    owner_internal_use_authorized: bool = False
+    owner_authorization_record: str = ""
     # References that establish the Kaggle package identity independently.
     publisher_identity_evidence: tuple[str, ...] = ()
     publisher_identity_verified: bool = False
@@ -69,12 +72,16 @@ PLANTDOC = SourceSpec(
         ("train", PartitionCounts(classes=28, images=2670)),
         ("test", PartitionCounts(classes=27, images=252)),
     ),
+    expected_inventory_digest="06f9782c9be1e9d6c707845c3f07b183c75e7421dbb112a88d60cb2d512ad1fd",
     license_evidence=(
         "Kaggle metadata record: CC0",
         "Kaggle description: CC BY 4.0",
-        "The two statements conflict; use is authorised by the project owner and "
-        "the conflict is recorded rather than resolved.",
+        "The project owner authorized internal research use for #717. The two "
+        "license statements conflict and remain unresolved; redistribution is "
+        "not authorized.",
     ),
+    owner_internal_use_authorized=True,
+    owner_authorization_record="Owner instruction for #717 implementation, 2026-10-30",
     publisher_identity_evidence=(),
     publisher_identity_verified=False,
     terms_verified=False,
@@ -88,12 +95,15 @@ PLANTVILLAGE = SourceSpec(
         ("train", PartitionCounts(classes=38, images=43444)),
         ("val", PartitionCounts(classes=38, images=10861)),
     ),
+    expected_inventory_digest="d6db080933a47f289fb15bc60c8c42ef1c17c7656d3700d4133e6d313fdf471a",
     license_evidence=(
         "Upstream dataset card declares cc-by-sa-3.0; the upstream repository has "
         "no LICENSE file and its README states no license.",
-        "The local Kagglehub download marker identifies package version 1; the "
-        "Kaggle re-package's own terms were not independently verified.",
+        "The project owner authorized internal research use for #717. The Kaggle "
+        "re-package's terms remain unverified; redistribution is not authorized.",
     ),
+    owner_internal_use_authorized=True,
+    owner_authorization_record="Owner instruction for #717 implementation, 2026-10-30",
     publisher_identity_evidence=(),
     publisher_identity_verified=False,
     terms_verified=False,
@@ -101,17 +111,13 @@ PLANTVILLAGE = SourceSpec(
 
 
 def readiness_blockers(spec: SourceSpec) -> tuple[str, ...]:
-    """Return what still prevents a source from feeding pretraining.
-
-    A caller-supplied package version and digest only show that the bytes match
-    the expected package; they never establish the publisher's identity or the
-    terms. Both stay blocked until the tracked spec carries that evidence.
-    """
+    """Return what still prevents owner-authorized internal pretraining use."""
     blockers = []
-    if not spec.publisher_identity_verified or not spec.publisher_identity_evidence:
-        blockers.append("Publisher identity has not been independently verified")
-    if not spec.terms_verified:
-        blockers.append("Source terms have not been verified")
+    digest = spec.expected_inventory_digest
+    if digest is None or re.fullmatch(r"[0-9a-f]{64}", digest.lower()) is None:
+        blockers.append("Expected source inventory SHA-256 is not pinned")
+    if not spec.owner_internal_use_authorized or not spec.owner_authorization_record:
+        blockers.append("Owner authorization for internal research use is not recorded")
     return tuple(blockers)
 
 
@@ -452,6 +458,12 @@ def provenance(
             f"{spec.name} version {observed_version} differs from pinned {spec.version}"
         )
     keys = [leaf_key(r.path) for r in records]
+    owner_authorized = bool(
+        spec.owner_internal_use_authorized and spec.owner_authorization_record
+    )
+    publisher_identity_verified = bool(
+        spec.publisher_identity_verified and spec.publisher_identity_evidence
+    )
     return {
         "source": spec.to_json(),
         "version_recorded": version,
@@ -461,7 +473,26 @@ def provenance(
         "split": split.summary(),
         "readiness": {
             "ready": not readiness_blockers(spec),
+            "scope": "internal_research_only",
+            "owner_authorized": owner_authorized,
+            "publisher_identity_verified": publisher_identity_verified,
+            "terms_verified": spec.terms_verified,
             "blockers": list(readiness_blockers(spec)),
+            "caveats": [
+                caveat
+                for unresolved, caveat in (
+                    (
+                        not publisher_identity_verified,
+                        "Publisher identity remains unverified",
+                    ),
+                    (
+                        not spec.terms_verified,
+                        "Source terms remain unverified; owner approval does not "
+                        "grant redistribution rights",
+                    ),
+                )
+                if unresolved
+            ],
         },
         "overlap": None if overlap is None else overlap.summary(),
         "leaf_map": None

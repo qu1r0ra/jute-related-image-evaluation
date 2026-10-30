@@ -43,6 +43,48 @@ def test_groups_never_span_partitions_and_constraints_hold(frozen: Manifest) -> 
         assert partition[left] == partition[right]
 
 
+def test_source_manifest_allows_missing_classes_in_published_held_out_partitions(
+    frozen: Manifest,
+) -> None:
+    label = frozen.labels[0]
+    entries = tuple(
+        entry
+        for entry in frozen.entries
+        if entry.label != label or entry.partition == "train"
+    )
+    ids = {entry.image_id for entry in entries}
+    source = replace(
+        frozen,
+        entries=entries,
+        constraints=tuple(pair for pair in frozen.constraints if set(pair) <= ids),
+        dependencies=tuple(
+            sorted((*frozen.dependencies, ("source_inventory", "a" * 64)))
+        ),
+    )
+
+    validate_manifest(source, min_support=1)
+
+
+def test_target_manifest_still_requires_each_class_in_every_partition(
+    frozen: Manifest,
+) -> None:
+    label = frozen.labels[0]
+    entries = tuple(
+        entry
+        for entry in frozen.entries
+        if entry.label != label or entry.partition == "train"
+    )
+    ids = {entry.image_id for entry in entries}
+    target = replace(
+        frozen,
+        entries=entries,
+        constraints=tuple(pair for pair in frozen.constraints if set(pair) <= ids),
+    )
+
+    with pytest.raises(FreezeBlockedError, match="in val; need 1"):
+        validate_manifest(target, min_support=1)
+
+
 def test_excluded_quarantined_and_merged_files_are_not_in_any_partition(
     frozen: Manifest, synthetic
 ) -> None:

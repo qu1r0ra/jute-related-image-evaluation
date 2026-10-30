@@ -1,5 +1,6 @@
 """Source intake: pinned counts, leaf map, grouped validation and overlap quarantine."""
 
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -16,11 +17,13 @@ from jute_disease.data import (
     derive_validation,
     drop_overlap,
     find_source_root,
+    inventory_digest,
     leaf_constraints,
     leaf_key,
     make_synthetic_data,
     observed_counts,
     provenance,
+    readiness_blockers,
     scan_source,
     verify_counts,
 )
@@ -198,30 +201,39 @@ def test_provenance_records_identity_counts_and_version_rules(
         provenance(spec, records, 4, split, None)
 
 
-def test_provenance_keeps_unverified_identity_and_terms_as_blockers(
+def test_provenance_requires_an_inventory_pin_and_owner_authorization(
     records: list[InventoryRecord], spec: SourceSpec
 ) -> None:
     split = derive_validation(records, seed=42)
     blocked = provenance(spec, records, 3, split, None)["readiness"]
     assert blocked["ready"] is False
     assert blocked["blockers"] == [
-        "Publisher identity has not been independently verified",
-        "Source terms have not been verified",
+        "Expected source inventory SHA-256 is not pinned",
+        "Owner authorization for internal research use is not recorded",
     ]
-    cleared = replace(
+    authorized = replace(
         spec,
-        publisher_identity_evidence=("fixture evidence",),
-        publisher_identity_verified=True,
-        terms_verified=True,
+        expected_inventory_digest=inventory_digest(records),
+        owner_internal_use_authorized=True,
+        owner_authorization_record="fixture owner authorization",
     )
-    assert provenance(cleared, records, 3, split, None)["readiness"] == {
+    assert provenance(authorized, records, 3, split, None)["readiness"] == {
         "ready": True,
+        "scope": "internal_research_only",
+        "owner_authorized": True,
+        "publisher_identity_verified": False,
+        "terms_verified": False,
         "blockers": [],
+        "caveats": [
+            "Publisher identity remains unverified",
+            "Source terms remain unverified; owner approval does not grant redistribution rights",
+        ],
     }
     claimed = replace(spec, publisher_identity_verified=True)
-    assert provenance(claimed, records, 3, split, None)["readiness"]["blockers"][
-        0
-    ].startswith("Publisher identity")
+    assert (
+        provenance(claimed, records, 3, split, None)["readiness"]["blockers"][0]
+        == "Expected source inventory SHA-256 is not pinned"
+    )
 
 
 def test_a_source_with_an_empty_partition_is_a_mismatch(
@@ -240,3 +252,42 @@ def _near_copy(record: InventoryRecord, tmp_path: Path) -> InventoryRecord:
         pixel_sha256="e" * 64,
         path=str(tmp_path / "near.png"),
     )
+
+
+def test_downloaded_sources_are_content_pinned_and_owner_authorized_for_internal_use() -> (
+    None
+):
+    for source in (PLANTDOC, PLANTVILLAGE):
+        assert re.fullmatch(r"[0-9a-f]{64}", source.expected_inventory_digest)
+        assert source.owner_internal_use_authorized is True
+        assert source.owner_authorization_record
+        assert source.publisher_identity_verified is False
+        assert source.terms_verified is False
+        assert readiness_blockers(source) == ()
+
+
+def test_internal_authorization_does_not_claim_publisher_or_terms_verification(
+    records: list[InventoryRecord], spec: SourceSpec
+) -> None:
+    authorized = replace(
+        spec,
+        expected_inventory_digest=inventory_digest(records),
+        owner_internal_use_authorized=True,
+        owner_authorization_record="Owner authorized internal research use",
+    )
+    split = derive_validation(records, seed=42)
+
+    readiness = provenance(authorized, records, 3, split, None)["readiness"]
+
+    assert readiness == {
+        "ready": True,
+        "scope": "internal_research_only",
+        "owner_authorized": True,
+        "publisher_identity_verified": False,
+        "terms_verified": False,
+        "blockers": [],
+        "caveats": [
+            "Publisher identity remains unverified",
+            "Source terms remain unverified; owner approval does not grant redistribution rights",
+        ],
+    }

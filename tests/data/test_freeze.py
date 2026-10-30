@@ -131,7 +131,7 @@ def test_source_intake_requires_a_completed_freeze(tmp_path: Path) -> None:
             tmp_path,
             tmp_path,
             package_version=7,
-            package_digest="0" * 64,
+            package_digest=PLANTDOC.expected_inventory_digest,
         )
 
 
@@ -173,7 +173,7 @@ def test_source_intake_rejects_an_unreadable_leaf_map(
             tmp_path / "missing-package",
             output,
             package_version=7,
-            package_digest="0" * 64,
+            package_digest=PLANTDOC.expected_inventory_digest,
             leaf_map_path=leaf_map,
         )
 
@@ -191,7 +191,7 @@ def test_source_intake_rejects_a_package_with_other_counts(
             package,
             tmp_path / "freeze",
             package_version=7,
-            package_digest="0" * 64,
+            package_digest=PLANTDOC.expected_inventory_digest,
         )
     assert not (tmp_path / "freeze" / "source_plantdoc.json").exists()
 
@@ -225,22 +225,33 @@ def test_source_freeze_excludes_target_overlap_and_pins_content(
     overlap_path = next((package / "train" / "a").glob("*.png"))
     copyfile(synthetic.root / target.partition("val")[0].path, overlap_path)
     records = build_inventory(package, workers=2)
+    digest = inventory_digest(records)
     spec = replace(
         PLANTDOC,
         expected=tuple(sorted(observed_counts(records).items())),
-        publisher_identity_evidence=("synthetic fixture",),
-        publisher_identity_verified=True,
-        terms_verified=True,
+        expected_inventory_digest=digest,
     )
     monkeypatch.setitem(SOURCES, "plantdoc", spec)
-    digest = inventory_digest(records)
-    with pytest.raises(SourceMismatchError, match="digest mismatch"):
+    with pytest.raises(SourceMismatchError, match="tracked content pin"):
         intake_source(
             "plantdoc", package, output, package_version=7, package_digest="0" * 64
         )
     report = intake_source(
         "plantdoc", package, output, package_version=7, package_digest=digest
     )
+    assert report["package_inventory_digest"] == digest
+    assert report["readiness"] == {
+        "ready": True,
+        "scope": "internal_research_only",
+        "owner_authorized": True,
+        "publisher_identity_verified": False,
+        "terms_verified": False,
+        "blockers": [],
+        "caveats": [
+            "Publisher identity remains unverified",
+            "Source terms remain unverified; owner approval does not grant redistribution rights",
+        ],
+    }
     frozen = load_manifest(output / "source_plantdoc")
     verified = load_source_manifest(
         output / "source_plantdoc", package, output / TARGET_DIR

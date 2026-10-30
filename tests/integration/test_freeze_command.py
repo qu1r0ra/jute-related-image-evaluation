@@ -152,6 +152,10 @@ def test_source_command_requires_both_package_pins(inputs: dict[str, Path]) -> N
     [
         (("--package-version", "6", "--package-digest", "0" * 64), "pinned version"),
         (("--package-version", "7", "--package-digest", "xyz"), "digest"),
+        (
+            ("--package-version", "7", "--package-digest", "0" * 64),
+            "tracked content pin",
+        ),
     ],
 )
 def test_source_command_rejects_invalid_pins_before_scanning(

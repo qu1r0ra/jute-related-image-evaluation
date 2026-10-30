@@ -159,8 +159,8 @@ To retrain the models from the command line instead of the notebooks:
    just freeze --image-root <path-to-original-images>   # curation, identity groups, manifest and receipt
    just freeze-cache                                      # optional bounded train/val image cache and its decision
    just data-download                                      # optional source-package acquisition
-   just freeze-source plantdoc data/external/plantdoc --package-version 7 --package-digest <pinned-inventory-sha256>
-   just freeze-source plantvillage data/external/plantvillage --package-version 1 --package-digest <pinned-inventory-sha256>
+   just freeze-source plantdoc data/external/plantdoc --package-version 7 --package-digest 06f9782c9be1e9d6c707845c3f07b183c75e7421dbb112a88d60cb2d512ad1fd
+   just freeze-source plantvillage data/external/plantvillage --package-version 1 --package-digest d6db080933a47f289fb15bc60c8c42ef1c17c7656d3700d4133e6d313fdf471a
    ```
 
    The freeze writes `artifacts/freeze/target/` (manifest plus a receipt that hashes every input). Training reads partitions only through that manifest, and a directory without its receipt is never treated as a completed freeze. The target candidate audit and its unresolved human-review limitation are recorded in [`results/corrected/identity-audit.md`](results/corrected/identity-audit.md).
@@ -185,7 +185,7 @@ To retrain the models from the command line instead of the notebooks:
 
 Deep learning runs can also be driven directly through the Lightning CLI, for example `uv run jute-disease train dl fit --config configs/historical/baselines/mobilenet_v2.yaml`. On Windows without a C++ compiler, `torch.compile` fails; add `--model.compile_model=false` to that command.
 
-Checkpoints are written to `artifacts/checkpoints/` and CSV logs to `artifacts/logs/`. Source intake requires the pinned Kaggle version and an expected inventory digest. The digest and version are caller-supplied pins that check package bytes only; they do not establish who published the package. The intake report's `readiness` block lists any open blockers, and the tracked source record must also contain independent publisher-identity evidence and verified terms before a source manifest can be opened for pretraining. PlantDoc and PlantVillage currently lack that evidence, so `just pretrain` is blocked for both optional arms. At execution, the loader also rechecks the tracked source pin, intake lineage, target manifest and retained training/validation bytes. Training on a GPU is recommended for the deep learning runs; the classical ML pipeline runs on CPU.
+Checkpoints are written to `artifacts/checkpoints/` and CSV logs to `artifacts/logs/`. Source intake checks the package version and inventory SHA-256 against tracked PlantDoc and PlantVillage pins, then checks target overlap and records its source manifest. The owner authorized both downloaded packages for internal research use in this project. Their intake reports retain the unresolved publisher-identity and terms caveats; this approval does not establish a publisher or license, and it does not authorize redistribution. At execution, the loader rechecks the tracked source pin, owner-use readiness, intake lineage, target manifest and retained training/validation bytes. Training on a GPU is recommended for the deep learning runs; the classical ML pipeline runs on CPU.
 
 ## 6. Benchmarked Performance
 

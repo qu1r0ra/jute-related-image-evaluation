@@ -194,6 +194,10 @@ def _assign_label(
 def validate_manifest(manifest: Manifest, min_support: int) -> None:
     """Check every invariant of a manifest.
 
+    Target manifests require every label in every partition. Source manifests
+    retain publisher-held partitions as published, so only training support is
+    required for every source label.
+
     Raises:
         FreezeBlockedError: an invariant is violated, naming the first failures.
     """
@@ -228,8 +232,11 @@ def validate_manifest(manifest: Manifest, min_support: int) -> None:
         elif partition[left] != partition[right]:
             problems.append(f"constraint {left[:12]}/{right[:12]} is violated")
     support = manifest.support()
+    required_partitions = (
+        ("train",) if "source_inventory" in dict(manifest.dependencies) else PARTITIONS
+    )
     for label in manifest.labels:
-        for name in PARTITIONS:
+        for name in required_partitions:
             have = support[name].get(label, 0)
             if have < min_support:
                 problems.append(

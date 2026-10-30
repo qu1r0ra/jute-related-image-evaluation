@@ -16,13 +16,13 @@ def source_data_module(
     batch_size: int,
     seed: int,
 ) -> DataModule:
-    """Open source partitions only after pin, identity, terms and bytes verify."""
-    from jute_disease.data import DataModule, load_source_manifest
+    """Open source partitions after pin, owner authorization, and byte checks."""
+    from jute_disease.data import DataModule
 
-    load_source_manifest(manifest_dir, image_root, target_manifest_dir)
     data_module = DataModule(
         manifest_dir=manifest_dir,
         image_root=image_root,
+        target_manifest_dir=target_manifest_dir,
         batch_size=batch_size,
         seed=seed,
     )
