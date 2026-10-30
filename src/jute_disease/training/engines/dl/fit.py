@@ -73,7 +73,10 @@ def _data_module(
     fit: FitSpec, recipe: Recipe, data: DataInputs, pin_memory: bool
 ) -> tuple[DataModule, dict[str, str]]:
     if fit.kind is FitKind.SOURCE:
+        from jute_disease.data import find_source_root
+
         manifest_dir, image_root = data.sources[fit.stage]
+        image_root = find_source_root(image_root)
         target_dir: Path | None = data.target_dir
     else:
         manifest_dir, image_root, target_dir = (

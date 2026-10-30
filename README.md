@@ -176,6 +176,8 @@ To retrain the models from the command line instead of the notebooks:
 
    The queue runs the six direct CNN fits, then the eleven classical fits, then the PlantVillage and PlantDoc stages. It runs one heavy fit at a time, each in its own process. It starts an optional stage only when a conservative forecast leaves at least eight hours before the cutoff and every seed can finish. A mandatory shortfall is recorded as an escalation rather than a smaller scope. `--cutoff-basis` is `owner-operational` by default; pass `verified` only when the deadline has been confirmed.
 
+   Keep `queue.json` with the run directory when resuming: it records cumulative classical fitting time. An interrupted classical attempt is conservatively charged its reserved limit. A previous run with classical attempts but no budget record is blocked until its accounting is resolved.
+
    Every fit is one `jute-disease train fit` child, so the per-model, per-resolution and check variants are configuration in [`configs/benchmark.json`](configs/benchmark.json), not separate commands. Two notebooks, [`notebooks/train_classical.ipynb`](notebooks/train_classical.ipynb) and [`notebooks/train_cnn.ipynb`](notebooks/train_cnn.ipynb), run bounded checks of the same children.
 
 5. Optional: experiment tracking. W&B is off by default. Set `--wandb offline` or `--wandb online` on `queue run` to log; an unreachable service is recorded in the receipt and never stops training.

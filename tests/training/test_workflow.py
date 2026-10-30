@@ -5,6 +5,7 @@ body in this process, so the same code paths run without a process per fit.
 """
 
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -129,6 +130,34 @@ def test_workspace_round_trips_through_its_file(workspace: Workspace) -> None:
     assert Workspace.load(path) == workspace
 
 
+def test_unavailable_plantdoc_does_not_prevent_workspace_or_plantvillage(
+    inputs: Inputs, tmp_path: Path
+) -> None:
+    missing = tmp_path / "missing-plantdoc"
+    data = DataInputs(
+        image_root=inputs.image_root,
+        target_dir=inputs.target_dir,
+        sources={**inputs.sources, "plantdoc": (missing / "manifest", missing)},
+    )
+    workspace = open_workspace(
+        benchmark_path=_benchmark_json(tmp_path / "benchmark.json"),
+        data=data,
+        runs_dir=tmp_path / "runs",
+        cache_dir=tmp_path / "cache",
+        pretrained=False,
+        require_cuda=False,
+        accelerator="cpu",
+    )
+    store = RunStore(workspace.runs_dir)
+    execute = make_executor(
+        workspace, store, make_identity(workspace, store), InProcess(workspace)
+    )
+    assert (
+        execute(_fit(workspace, "source/plantvillage"), 1800).state
+        is RunState.COMPLETED
+    )
+
+
 def test_execute_completes_prepare_then_a_classical_fit(workspace: Workspace) -> None:
     store = RunStore(workspace.runs_dir)
     launcher = InProcess(workspace)
@@ -146,6 +175,38 @@ def test_execute_completes_prepare_then_a_classical_fit(workspace: Workspace) ->
     assert receipt["results"]["test_accessed"] is False
     assert receipt["results"]["stack"]["compile_enabled"] is False
     assert receipt["artifacts"]["model"]["sha256"]
+
+
+def test_missing_prepared_cache_invalidates_receipt_and_blocks_fit(
+    workspace: Workspace,
+) -> None:
+    store = RunStore(workspace.runs_dir)
+    launcher = InProcess(workspace)
+    identity = make_identity(workspace, store)
+    execute = make_executor(workspace, store, identity, launcher)
+    prepare = _fit(workspace, "classical/prepare")
+    assert execute(prepare, 1800).state is RunState.COMPLETED
+    next(workspace.cache_dir.glob("*_X.npy")).unlink()
+    assert store.state(prepare.fit_id) is RunState.INTERRUPTED
+    count = len(launcher.jobs)
+    outcome = execute(_fit(workspace, "classical/lr-raw"), 1800)
+    assert outcome.state is RunState.FAILED
+    assert len(launcher.jobs) == count
+    assert execute(prepare, 1800).state is RunState.COMPLETED
+    assert (
+        execute(_fit(workspace, "classical/lr-raw"), 1800).state is RunState.COMPLETED
+    )
+
+
+def test_changing_cache_location_invalidates_preparation_identity(
+    workspace: Workspace,
+) -> None:
+    prepare = _fit(workspace, "classical/prepare")
+    store = RunStore(workspace.runs_dir)
+    other = replace(workspace, cache_dir=workspace.cache_dir / "other")
+    assert make_identity(workspace, store)(prepare) != make_identity(other, store)(
+        prepare
+    )
 
 
 def test_timeout_is_recorded_and_never_reused(workspace: Workspace) -> None:
@@ -303,12 +364,21 @@ def test_probe_scales_a_bounded_run_to_a_full_epoch(workspace: Workspace) -> Non
     probe = make_probe(workspace, launcher)
     chained = _fit(workspace, "cnn/tiny_chained/seed-42")
 
-    seconds = probe(chained)
+    seconds = probe(chained, 900.0)
     assert seconds > 0
     job = launcher.jobs[-1]
     assert job.bounds is not None
     assert job.upstream_checkpoint is None  # a probe never needs the chain
     assert not store.run_dir(chained.fit_id).exists()  # probes are not fits
+
+
+def test_probe_respects_a_shorter_deadline(workspace: Workspace) -> None:
+    launcher = InProcess(workspace)
+    launcher.override = ChildResult(1, True, 12.0, "deadline")
+    probe = make_probe(workspace, launcher)
+    with pytest.raises(RuntimeError, match="probe"):
+        probe(_fit(workspace, "cnn/tiny_direct/seed-42"), 12.0)
+    assert launcher.limits[-1] == 12.0
 
 
 def test_queue_runs_resumes_and_skips_end_to_end(workspace: Workspace) -> None:

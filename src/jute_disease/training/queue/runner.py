@@ -7,6 +7,8 @@ and re-checked before every fit, so a slow fit stops the arm instead of the
 finalization reservation. Nothing here reads a validation or test outcome.
 """
 
+import json
+import math
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -42,7 +44,7 @@ class Outcome:
 
 
 Executor = Callable[[FitSpec, float | None], Outcome]
-Probe = Callable[[FitSpec], float]
+Probe = Callable[[FitSpec, float], float]
 IdentityFor = Callable[[FitSpec], str]
 
 
@@ -123,10 +125,31 @@ class _Queue:
         self.book = TimingBook(benchmark.recipe.max_epochs, self.limits.forecast_margin)
         self.plan: tuple[Stage, ...] = build_plan(benchmark)
         self.report = QueueReport()
-        self.classical_spent = 0.0
-        self.shortfall_noted = False
+        self.classical_spent = self._load_classical_spent()
 
     # -- persistence -------------------------------------------------------
+
+    def _load_classical_spent(self) -> float:
+        if not self.report_path.exists():
+            if any(
+                any(self.store.run_dir(fit.fit_id).glob("attempt-*"))
+                for fit in self.benchmark.fits()
+                if fit.kind is FitKind.CLASSICAL
+            ):
+                raise ValueError(
+                    "Classical budget receipt missing for existing attempts"
+                )
+            return 0.0
+        try:
+            payload = json.loads(self.report_path.read_text(encoding="utf-8"))
+            spent = float(payload["classical_spent_seconds"])
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            raise ValueError(
+                "Classical budget receipt is missing or invalid"
+            ) from error
+        if not math.isfinite(spent) or spent < 0:
+            raise ValueError("Classical budget receipt is invalid")
+        return spent
 
     def save(self) -> None:
         report = self.report
@@ -139,6 +162,7 @@ class _Queue:
                     "record": self.cutoff.record,
                 },
                 "reserve_hours": self.limits.reserve_hours,
+                "classical_spent_seconds": self.classical_spent,
                 "updated_at": self.clock.now().isoformat(),
                 "outcomes": {k: v.value for k, v in report.outcomes.items()},
                 "reasons": report.reasons,
@@ -160,7 +184,12 @@ class _Queue:
         """Probe each unknown timing key once, serially, before it is relied on."""
         for fit in fits:
             if fit.kind in TIMED_KINDS and self.book.per_epoch(timing_key(fit)) is None:
-                self.book.record_probe(timing_key(fit), self.probe(fit))
+                remaining = (
+                    self.cutoff.at - self.reserve - self.clock.now()
+                ).total_seconds()
+                if remaining <= 0:
+                    raise MandatoryShortfallError(max(0.0, -remaining))
+                self.book.record_probe(timing_key(fit), self.probe(fit, remaining))
 
     def observe_receipt(self, fit: FitSpec) -> None:
         if fit.kind not in TIMED_KINDS:
@@ -207,22 +236,21 @@ class _Queue:
         room = max(0.0, self.limits.classical_aggregate_seconds - self.classical_spent)
         return total + min(classical * self.limits.classical_fit_seconds, room)
 
-    def check_mandatory(self, fatal: bool) -> None:
+    def check_mandatory(self) -> None:
         fits = [fit for stage in self.plan if stage.mandatory for fit in stage.fits]
         try:
+            upper = self.remaining_upper(fits)
             admit_optional(
                 self.clock.now(),
                 self.cutoff,
                 self.reserve,
-                self.remaining_upper(fits),
+                upper,
                 (),
             )
         except MandatoryShortfallError as error:
             self.escalate(str(error))
             self.save()
-            if fatal:
-                raise
-            self.shortfall_noted = True
+            raise
 
     # -- running -----------------------------------------------------------
 
@@ -242,7 +270,13 @@ class _Queue:
         ):
             self.omit(fit, f"upstream {upstream} did not complete")
             return
-        identity = self.identity_for(fit)
+        try:
+            identity = self.identity_for(fit)
+        except (OSError, ValueError, KeyError) as error:
+            if mandatory:
+                raise
+            self.omit(fit, reason or f"source input unavailable: {error}")
+            return
         if self.store.resolve(fit.fit_id, identity) is Resume.SKIP:
             self.report.skipped.append(fit.fit_id)
             self.report.outcomes[fit.fit_id] = RunState.COMPLETED
@@ -252,9 +286,18 @@ class _Queue:
         if not allowed:
             self.omit(fit, reason)
             return
-        timeout: float | None = None
+        remaining = (self.cutoff.at - self.reserve - self.clock.now()).total_seconds()
+        if remaining <= 0:
+            if mandatory:
+                error = MandatoryShortfallError(max(0.0, -remaining))
+                self.escalate(str(error))
+                self.save()
+                raise error
+            self.omit(fit, "finalization reservation reached")
+            return
+        timeout: float = remaining
         if fit.kind is FitKind.PREPARE:
-            timeout = self.limits.shared_preparation_seconds
+            timeout = min(timeout, self.limits.shared_preparation_seconds)
         elif fit.kind is FitKind.CLASSICAL:
             room = self.limits.classical_aggregate_seconds - self.classical_spent
             if room <= 0:
@@ -265,17 +308,27 @@ class _Queue:
                 self.escalate(f"{message}; {fit.fit_id} was not run")
                 self.omit(fit, message)
                 return
-            timeout = min(self.limits.classical_fit_seconds, room)
+            timeout = min(timeout, self.limits.classical_fit_seconds, room)
         self.launch(fit, identity, timeout, mandatory)
 
     def launch(
         self, fit: FitSpec, identity: str, timeout: float | None, mandatory: bool
     ) -> None:
+        reserved = (
+            timeout if fit.kind is FitKind.CLASSICAL and timeout is not None else 0.0
+        )
+        if reserved:
+            # Charge the full limit first. An interrupted queue cannot recover
+            # unaccounted time by restarting; normal completion settles actual use.
+            self.classical_spent += reserved
+            self.save()
         try:
             outcome = self.execute(fit, timeout)
         except Exception as error:
             self.store.settle(fit.fit_id)
-            outcome = Outcome(RunState.FAILED, 0.0, f"{type(error).__name__}: {error}")
+            outcome = Outcome(
+                RunState.FAILED, reserved, f"{type(error).__name__}: {error}"
+            )
         state, reason = outcome.state, outcome.reason
         if (
             state is RunState.COMPLETED
@@ -283,7 +336,7 @@ class _Queue:
         ):
             state, reason = RunState.FAILED, "ended without a valid receipt"
         if fit.kind is FitKind.CLASSICAL:
-            self.classical_spent += outcome.seconds
+            self.classical_spent += max(0.0, outcome.seconds) - reserved
         self.report.outcomes[fit.fit_id] = state
         self.report.reasons[fit.fit_id] = reason
         if state is RunState.COMPLETED:
@@ -294,8 +347,7 @@ class _Queue:
 
     def run_mandatory(self, stage: Stage) -> None:
         for fit in stage.fits:
-            if not self.shortfall_noted:
-                self.check_mandatory(fatal=False)
+            self.check_mandatory()
             self.process(fit, True, "", mandatory=True)
 
     def run_optional(self, stage: Stage) -> None:
@@ -319,16 +371,23 @@ class _Queue:
                     self.save()
                     upper = 0.0
                 if upper > 0:
-                    decision = admit_optional(
-                        self.clock.now(),
-                        self.cutoff,
-                        self.reserve,
-                        0.0,
-                        (OptionalChain(stage.name, upper),),
-                    )
-                    if not decision.admitted:
+                    now = self.clock.now()
+                    if now >= self.cutoff.at - self.reserve:
                         allowed = False
-                        reason = decision.omitted.get(stage.name, "not admitted")
+                        reason = "finalization reservation reached"
+                        slack = 0.0
+                    else:
+                        decision = admit_optional(
+                            now,
+                            self.cutoff,
+                            self.reserve,
+                            0.0,
+                            (OptionalChain(stage.name, upper),),
+                        )
+                        slack = decision.slack_seconds
+                        if not decision.admitted:
+                            allowed = False
+                            reason = decision.omitted.get(stage.name, "not admitted")
                     if first or not allowed:
                         self.report.decisions.append(
                             {
@@ -337,7 +396,7 @@ class _Queue:
                                 "admitted": allowed,
                                 "upper_seconds": upper,
                                 "reason": reason,
-                                "slack_seconds": decision.slack_seconds,
+                                "slack_seconds": slack,
                             }
                         )
                         self.save()
@@ -346,7 +405,7 @@ class _Queue:
 
     def run(self) -> QueueReport:
         self.cutoff.require_launchable()
-        self.check_mandatory(fatal=True)
+        self.check_mandatory()
         for stage in self.plan:
             if stage.mandatory:
                 self.run_mandatory(stage)
@@ -374,15 +433,15 @@ def run_queue(
     """Run the whole benchmark serially and resumably.
 
     ``execute`` runs one fit and must have started and ended its run in ``store``.
-    ``probe`` returns bounded seconds-per-epoch for a fit whose timing is unknown.
+    ``probe`` returns seconds-per-epoch and accepts the remaining deadline as a
+    hard upper bound in seconds for a fit whose timing is unknown.
     ``identity_for`` is the compatibility identity of a fit; it is called after the
     fit's upstream has been settled, so it can cover that upstream's checkpoint.
 
     Raises:
         CutoffUnverifiedError: the cutoff is neither verified nor owner operational.
         MandatoryShortfallError: mandatory work cannot finish before the
-            finalization reservation; nothing is run and the report holds the
-            escalation.
+            finalization reservation; the queue stops and records the escalation.
     """
     queue = _Queue(
         benchmark,

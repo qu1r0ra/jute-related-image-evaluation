@@ -58,6 +58,7 @@ def _matrix(
     recipe: Recipe,
     data: DataInputs,
     cache_dir: Path,
+    require_cache: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     dataset = ManifestDataset(
         manifest,
@@ -66,7 +67,9 @@ def _matrix(
         transform=classical_pipeline(recipe.image_size),
     )
     extractor = _extractor(features, recipe)
-    x, y = extract_features(dataset, extractor, cache_dir=cache_dir)
+    x, y = extract_features(
+        dataset, extractor, cache_dir=cache_dir, require_cache=require_cache
+    )
     info = {
         "key": feature_cache_key(dataset.identity, extractor, len(dataset)),
         "rows": int(x.shape[0]),
@@ -94,6 +97,12 @@ def prepare_features(
             partition: _matrix(manifest, partition, name, recipe, data, cache)[2]
             for partition in FIT_PARTITIONS
         }
+    artifacts = {
+        f"{name}-{partition}-{suffix}": cache / f"{entry['key']}{extension}"
+        for name, partitions in features.items()
+        for partition, entry in partitions.items()
+        for suffix, extension in (("x", "_X.npy"), ("y", "_y.npy"), ("meta", ".json"))
+    }
     return FitResult(
         {
             "fit": fit.fit_id,
@@ -103,7 +112,7 @@ def prepare_features(
             "seconds": time.perf_counter() - started,
             "test_accessed": False,
         },
-        {},
+        artifacts,
     )
 
 
@@ -113,6 +122,8 @@ def fit_classical(
     data: DataInputs,
     attempt_dir: Path | str,
     cache_dir: Path | str,
+    *,
+    require_cache: bool = False,
 ) -> FitResult:
     """Fit one estimator on one feature set and describe exactly what happened.
 
@@ -129,9 +140,11 @@ def fit_classical(
     cache = Path(cache_dir)
     manifest = load_manifest(data.target_dir)
     x_train, y_train, train_info = _matrix(
-        manifest, "train", fit.features, recipe, data, cache
+        manifest, "train", fit.features, recipe, data, cache, require_cache
     )
-    x_val, y_val, val_info = _matrix(manifest, "val", fit.features, recipe, data, cache)
+    x_val, y_val, val_info = _matrix(
+        manifest, "val", fit.features, recipe, data, cache, require_cache
+    )
 
     model = ML_CLASSIFIERS[fit.estimator](random_state=fit.seed)
     weights = compute_sample_weight(WEIGHTING, y_train)

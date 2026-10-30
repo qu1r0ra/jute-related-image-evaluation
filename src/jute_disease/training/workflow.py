@@ -27,7 +27,7 @@ from jute_disease.training.benchmark import (
 from jute_disease.training.inputs import DataInputs
 from jute_disease.training.process import ChildResult, run_child
 from jute_disease.training.queue import Executor, IdentityFor, Outcome, Probe
-from jute_disease.training.receipts import RunState, RunStore, write_json_atomic
+from jute_disease.training.receipts import Resume, RunState, RunStore, write_json_atomic
 from jute_disease.training.stack import verify_stack
 
 RESULT_FILE = "result.json"
@@ -118,12 +118,21 @@ def open_workspace(
     accelerator: str = "auto",
     wandb_mode: str = "off",
 ) -> Workspace:
-    """Resolve every path to absolute, create the output roots, and validate.
+    """Resolve paths to absolute and create the output roots.
 
     A source package root may be the download folder; the manifest paths are
-    relative to the folder that holds the partitions, which is found here.
+    relative to the folder that holds the partitions, which is found when
+    available. An unavailable optional source is validated at its own stage.
     """
-    from jute_disease.data import find_source_root
+    from jute_disease.data import SourceMismatchError, find_source_root
+
+    def source_root(root: Path | str) -> Path:
+        path = Path(root).resolve()
+        try:
+            return find_source_root(path).resolve()
+        except (OSError, SourceMismatchError):
+            # Optional inputs are checked when their own stage is attempted.
+            return path
 
     runs = Path(runs_dir).resolve()
     cache = Path(cache_dir).resolve()
@@ -135,7 +144,7 @@ def open_workspace(
             image_root=Path(data.image_root).resolve(),
             target_dir=Path(data.target_dir).resolve(),
             sources={
-                name: (Path(manifest).resolve(), find_source_root(Path(root)).resolve())
+                name: (Path(manifest).resolve(), source_root(root))
                 for name, (manifest, root) in data.sources.items()
             },
         ),
@@ -230,7 +239,16 @@ def run_job(workspace: Workspace, job: Job) -> None:
     if fit.kind is FitKind.PREPARE:
         result = prepare_features(fit, recipe, data, workspace.cache_dir)
     elif fit.kind is FitKind.CLASSICAL:
-        result = fit_classical(fit, recipe, data, job.attempt_dir, workspace.cache_dir)
+        store = RunStore(workspace.runs_dir)
+        prepare = find_fit(workspace, "classical/prepare")
+        if (
+            store.resolve(prepare.fit_id, make_identity(workspace, store)(prepare))
+            is not Resume.SKIP
+        ):
+            raise ValueError("Prepared feature cache has no valid compatible receipt")
+        result = fit_classical(
+            fit, recipe, data, job.attempt_dir, workspace.cache_dir, require_cache=True
+        )
     else:
         bounded: dict[str, Any] = {}
         if job.bounds is not None:
@@ -300,6 +318,8 @@ def make_identity(workspace: Workspace, store: RunStore) -> IdentityFor:
         except UpstreamError:
             sha = "unavailable"
         environment: dict[str, Any] = {}
+        if fit.kind is FitKind.PREPARE:
+            environment["cache_dir"] = str(workspace.cache_dir.resolve())
         if fit.kind in CNN_KINDS:
             environment = {
                 "pretrained": workspace.pretrained,
@@ -322,6 +342,14 @@ def make_executor(
     """Run one fit as a child, bounded by ``timeout``, and receipt the result."""
 
     def execute(fit: FitSpec, timeout: float | None) -> Outcome:
+        if fit.kind is FitKind.CLASSICAL:
+            prepare = find_fit(workspace, "classical/prepare")
+            if store.resolve(prepare.fit_id, identity(prepare)) is not Resume.SKIP:
+                return Outcome(
+                    RunState.FAILED,
+                    0.0,
+                    "Prepared feature cache has no valid compatible receipt",
+                )
         try:
             upstream = _upstream_checkpoint(store, fit)
         except UpstreamError as error:
@@ -381,14 +409,16 @@ def make_probe(workspace: Workspace, launcher: Launcher) -> Probe:
         ProbeError: the probe failed, timed out or reported no usable timing.
     """
 
-    def probe(fit: FitSpec) -> float:
+    def probe(fit: FitSpec, deadline_seconds: float) -> float:
         root = workspace.runs_dir / PROBE_DIR
         root.mkdir(parents=True, exist_ok=True)
         directory = Path(
             tempfile.mkdtemp(prefix=fit.fit_id.replace("/", "-"), dir=root)
         )
         job = Job(fit.fit_id, directory, directory / RESULT_FILE, bounds=PROBE_BATCHES)
-        child = launcher(job, PROBE_SECONDS, directory / LOG_FILE)
+        child = launcher(
+            job, min(PROBE_SECONDS, deadline_seconds), directory / LOG_FILE
+        )
         if child.timed_out or child.returncode != 0:
             raise ProbeError(f"probe of {fit.fit_id} failed: {child.tail}")
         try:

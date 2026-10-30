@@ -99,9 +99,14 @@ class ActiveRun:
         """Hash the artifacts, write the receipt, then mark the run completed."""
         recorded: dict[str, dict[str, Any]] = {}
         for name, path in artifacts.items():
-            path = Path(path)
+            path = Path(path).resolve()
+            try:
+                recorded_path = path.relative_to(self.run_dir.resolve()).as_posix()
+            except ValueError:
+                # Shared preparation artifacts live in the configured cache.
+                recorded_path = str(path)
             recorded[name] = {
-                "path": path.relative_to(self.run_dir).as_posix(),
+                "path": recorded_path,
                 "sha256": _sha256(path),
                 "bytes": path.stat().st_size,
             }

@@ -209,6 +209,8 @@ def extract_features(
     extractor: BaseFeatureExtractor,
     cache: bool = True,
     cache_dir: Path | str | None = None,
+    *,
+    require_cache: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Extract features with the provided extractor.
 
@@ -235,6 +237,9 @@ def extract_features(
         if cached is not None:
             logger.info(f"Loading cached features: {key[:12]}")
             return cached
+
+    if require_cache:
+        raise FileNotFoundError("Prepared feature cache is missing or invalid")
 
     features_list = []
     labels_list = []
