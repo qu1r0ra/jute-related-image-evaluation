@@ -7,9 +7,8 @@ import pytest
 import torch
 from PIL import Image
 
-from jute_disease.data import DataModule, Manifest, write_manifest
-from jute_disease.data.manifest import RECEIPT_FILE
-from jute_disease.data.synthetic import SyntheticPlan
+from jute_disease.data import DataModule, Manifest, SyntheticPlan
+from jute_disease.data.manifest import RECEIPT_FILE, write_manifest
 
 
 @pytest.fixture
@@ -209,7 +208,7 @@ def test_manifest_folds_are_group_aware_and_cover_train_and_val(
 def test_manifest_loaders_repeat_for_a_seed_and_differ_for_another(
     frozen_dir: Path, synthetic: SyntheticPlan
 ) -> None:
-    def first_batch(seed: int):
+    def first_batch(seed: int) -> tuple[torch.Tensor, torch.Tensor]:
         dm = _manifest_module(frozen_dir, synthetic, seed=seed)
         dm.setup(stage="fit")
         return next(iter(dm.train_dataloader()))

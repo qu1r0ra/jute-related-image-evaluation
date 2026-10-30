@@ -171,7 +171,7 @@ def test_queue_run_passes_the_declared_cutoff_basis(
     monkeypatch.setattr(cli, "make_probe", lambda *a: None)
     monkeypatch.setattr(cli, "subprocess_launcher", lambda *a: None)
 
-    def fake_queue(benchmark, store, **kwargs):
+    def fake_queue(benchmark, store, **kwargs) -> cli.QueueReport:
         captured.update(kwargs)
         return cli.QueueReport()
 

@@ -19,7 +19,7 @@ from jute_disease.training import (
     prepare_features,
 )
 
-from .conftest import Inputs
+from ...conftest import Inputs
 
 
 @pytest.fixture(scope="module")
@@ -55,7 +55,7 @@ def test_prepare_extracts_both_feature_sets_for_train_and_validation_only(
     opened: list[str] = []
     original = ManifestDataset.__init__
 
-    def spy(self, manifest, partition, *args, **kwargs):
+    def spy(self, manifest, partition, *args, **kwargs) -> None:
         opened.append(partition)
         original(self, manifest, partition, *args, **kwargs)
 
@@ -78,7 +78,7 @@ def test_fit_after_prepare_reads_only_the_cache(
     cache = tmp_path / "cache"
     prepare_features(PREPARE, recipe, data, cache)
 
-    def forbidden(self, img):
+    def forbidden(self, img) -> None:
         raise AssertionError("features must come from the prepared cache")
 
     for extractor in FEATURE_EXTRACTORS.values():
@@ -165,7 +165,7 @@ def test_classical_fits_never_open_the_test_partition(
     opened: list[str] = []
     original = DataModule._manifest_dataset
 
-    def spy(self, partition, train):
+    def spy(self, partition, train) -> object:
         opened.append(partition)
         return original(self, partition, train)
 

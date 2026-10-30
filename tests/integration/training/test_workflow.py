@@ -20,6 +20,7 @@ from jute_disease.training import (
     FitKind,
     FitSpec,
     Job,
+    QueueReport,
     RunState,
     RunStore,
     SystemClock,
@@ -389,7 +390,7 @@ def test_queue_runs_resumes_and_skips_end_to_end(workspace: Workspace) -> None:
         at=datetime.now() + timedelta(days=30), basis="owner-operational", record="n"
     )
 
-    def go():
+    def go() -> QueueReport:
         return run_queue(
             workspace.benchmark,
             store,

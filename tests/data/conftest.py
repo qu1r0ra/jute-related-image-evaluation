@@ -5,10 +5,16 @@ from pathlib import Path
 import pytest
 
 from jute_disease.config import CURATION_RULES_PATH
-from jute_disease.data.curation import CurationRules, load_rules
-from jute_disease.data.inventory import InventoryRecord, build_inventory
-from jute_disease.data.manifest import Manifest, build_manifest
-from jute_disease.data.synthetic import SyntheticPlan, make_synthetic_data
+from jute_disease.data import (
+    CurationRules,
+    InventoryRecord,
+    Manifest,
+    SyntheticPlan,
+    build_inventory,
+    build_manifest,
+    load_rules,
+    make_synthetic_data,
+)
 
 
 @pytest.fixture(scope="session")

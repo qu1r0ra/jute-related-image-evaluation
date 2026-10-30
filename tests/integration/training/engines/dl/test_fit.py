@@ -9,10 +9,11 @@ import torch
 
 from jute_disease.config import BENCHMARK_CONFIG
 from jute_disease.data import DataModule, file_sha256
-from jute_disease.models.dl.backbone import TimmBackbone, state_digest
+from jute_disease.models.dl import TimmBackbone, state_digest
 from jute_disease.training import (
     DataInputs,
     FitKind,
+    FitResult,
     FitSpec,
     Recipe,
     fit_cnn,
@@ -20,7 +21,7 @@ from jute_disease.training import (
     training_callbacks,
 )
 
-from .conftest import Inputs
+from ...conftest import Inputs
 
 
 @pytest.fixture(scope="module")
@@ -67,8 +68,14 @@ def _source(stage: str) -> FitSpec:
     )
 
 
-def _fit(spec: FitSpec, recipe: Recipe, data: DataInputs, tmp_path: Path, **kw):
-    return fit_cnn(spec, recipe, data, tmp_path, pretrained=False, **kw)
+def _fit(
+    spec: FitSpec,
+    recipe: Recipe,
+    data: DataInputs,
+    tmp_path: Path,
+    **kwargs: object,
+) -> FitResult:
+    return fit_cnn(spec, recipe, data, tmp_path, pretrained=False, **kwargs)
 
 
 def test_callbacks_follow_the_declared_selection_rule(recipe: Recipe) -> None:
@@ -120,7 +127,7 @@ def test_fit_never_opens_or_reports_the_test_partition(
     opened: list[str] = []
     original = DataModule._manifest_dataset
 
-    def spy(self: DataModule, partition: str, train: bool):
+    def spy(self: DataModule, partition: str, train: bool) -> object:
         opened.append(partition)
         return original(self, partition, train)
 

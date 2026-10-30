@@ -6,6 +6,7 @@ import pytest
 
 from jute_disease.config import BENCHMARK_CONFIG
 from jute_disease.training import (
+    Benchmark,
     FitKind,
     build_plan,
     fit_identity,
@@ -14,7 +15,7 @@ from jute_disease.training import (
 
 
 @pytest.fixture(scope="module")
-def benchmark():
+def benchmark() -> Benchmark:
     return load_benchmark(BENCHMARK_CONFIG)
 
 

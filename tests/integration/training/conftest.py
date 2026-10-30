@@ -1,4 +1,4 @@
-"""Frozen tiny fixtures shared by the training and queue tests.
+"""Frozen tiny fixtures for end-to-end training and queue tests.
 
 The target is the structured synthetic dataset frozen with the real command; the
 sources are two small synthetic packages registered under the pinned names, so

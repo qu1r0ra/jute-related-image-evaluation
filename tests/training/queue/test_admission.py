@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from jute_disease.training import (
+from jute_disease.training.queue import (
     Cutoff,
     CutoffUnverifiedError,
     MandatoryShortfallError,

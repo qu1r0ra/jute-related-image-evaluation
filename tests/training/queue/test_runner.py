@@ -14,15 +14,18 @@ import pytest
 
 from jute_disease.config import BENCHMARK_CONFIG
 from jute_disease.training import (
-    Cutoff,
-    CutoffUnverifiedError,
     FitKind,
     FitSpec,
-    MandatoryShortfallError,
-    Outcome,
     RunState,
     RunStore,
     load_benchmark,
+)
+from jute_disease.training.queue import (
+    Cutoff,
+    CutoffUnverifiedError,
+    MandatoryShortfallError,
+    Outcome,
+    QueueReport,
     run_queue,
     timing_key,
 )
@@ -109,7 +112,7 @@ class Harness:
         hours_to_cutoff: float,
         basis: str = "owner-operational",
         aggregate_seconds: float | None = None,
-    ):
+    ) -> QueueReport:
         benchmark = load_benchmark(BENCHMARK_CONFIG)
         if aggregate_seconds is not None:
             benchmark = replace(

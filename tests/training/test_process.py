@@ -70,7 +70,7 @@ def test_an_interrupted_wait_kills_the_child(
     original = subprocess.Popen.wait
     calls = {"n": 0}
 
-    def interrupt(self, timeout=None):
+    def interrupt(self, timeout=None) -> int:
         calls["n"] += 1
         if calls["n"] == 1:
             raise KeyboardInterrupt

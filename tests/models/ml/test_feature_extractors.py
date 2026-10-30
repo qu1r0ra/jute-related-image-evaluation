@@ -69,7 +69,7 @@ class _Dataset:
     def __len__(self) -> int:
         return self.length
 
-    def __getitem__(self, index: int):
+    def __getitem__(self, index: int) -> tuple[np.ndarray, int]:
         self.reads += 1
         return np.full((8, 8, 3), index, dtype=np.uint8), index % 2
 
@@ -195,7 +195,7 @@ def test_feature_cache_publishes_the_sidecar_last(tmp_path, monkeypatch) -> None
     order: list[str] = []
     real_save = np.save
 
-    def spy(path, array, *args, **kwargs):
+    def spy(path, array, *args, **kwargs) -> None:
         order.append(f"npy:{'X' if '_X' in str(path) else 'y'}")
         real_save(path, array, *args, **kwargs)
 
@@ -211,7 +211,7 @@ def test_feature_cache_publishes_the_sidecar_last(tmp_path, monkeypatch) -> None
 def test_an_interrupted_write_leaves_no_valid_cache(tmp_path, monkeypatch) -> None:
     import jute_disease.models.ml.features as features_module
 
-    def boom(*args, **kwargs):
+    def boom(*args, **kwargs) -> None:
         raise OSError("disk full")
 
     monkeypatch.setattr(features_module.os, "replace", boom)
