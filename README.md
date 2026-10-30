@@ -73,6 +73,10 @@ A high-level overview of the repository organization:
 
 For a detailed look at the internal design, public APIs, and architectural decisions, see [architecture.md](docs/architecture.md).
 
+The corrected training queue is still under development. Its deadline forecast
+requires an explicitly verified cutoff and timezone, and reserves at least two
+hours for finalization by default. A successful forecast does not start a run.
+
 ## 3. Getting Started
 
 ### 3.1. Technical Prerequisites
