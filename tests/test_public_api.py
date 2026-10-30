@@ -25,6 +25,7 @@ def test_data_api() -> None:
         TARGET_DIR,
         DataModule,
         FreezeBlockedError,
+        ManifestContentVerifier,
         ManifestDataset,
         OverlapReport,
         SourceMismatchError,
@@ -54,6 +55,7 @@ def test_data_api() -> None:
         readiness_blockers,
         scan_source,
         verify_counts,
+        verify_manifest_content,
         write_manifest,
     )
 
@@ -63,6 +65,7 @@ def test_data_api() -> None:
         DECISION_FILE,
         DataModule,
         FreezeBlockedError,
+        ManifestContentVerifier,
         INVENTORY_FILE,
         ManifestDataset,
         OverlapReport,
@@ -98,6 +101,7 @@ def test_data_api() -> None:
         readiness_blockers,
         scan_source,
         verify_counts,
+        verify_manifest_content,
         write_manifest,
     ):
         assert name is not None

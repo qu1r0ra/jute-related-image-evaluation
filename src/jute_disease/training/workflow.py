@@ -280,14 +280,27 @@ def run_job(workspace: Workspace, job: Job) -> None:
     )
 
 
-def _manifest_digests(workspace: Workspace, fit: FitSpec) -> dict[str, str]:
-    from jute_disease.data import load_manifest
+def _manifest_digests(
+    workspace: Workspace, fit: FitSpec, verifier: Any
+) -> dict[str, str]:
+    from jute_disease.data import load_manifest, load_source_manifest
 
-    digests = {"target": load_manifest(workspace.data.target_dir).digest()}
+    target = load_manifest(workspace.data.target_dir)
+    digests = {
+        "target": target.digest(),
+        "target_content": verifier.verify(
+            target, workspace.data.image_root, ("train", "val")
+        ),
+    }
     if fit.kind is FitKind.SOURCE:
-        digests[fit.stage] = load_manifest(
-            workspace.data.sources[fit.stage][0]
-        ).digest()
+        manifest_dir, image_root = workspace.data.sources[fit.stage]
+        source = load_source_manifest(
+            manifest_dir,
+            image_root,
+            workspace.data.target_dir,
+            content_verifier=verifier,
+        )
+        digests[fit.stage] = source.digest()
     return digests
 
 
@@ -307,11 +320,12 @@ def make_identity(workspace: Workspace, store: RunStore) -> IdentityFor:
     An upstream with no verified checkpoint yields the marker ``unavailable``, so
     a fit never matches a receipt made from a checkpoint that cannot be checked.
     """
-    manifests: dict[str, dict[str, str]] = {}
+    from jute_disease.data import ManifestContentVerifier
+
+    verifier = ManifestContentVerifier()
 
     def identity(fit: FitSpec) -> str:
-        if fit.fit_id not in manifests:
-            manifests[fit.fit_id] = _manifest_digests(workspace, fit)
+        manifests = _manifest_digests(workspace, fit, verifier)
         try:
             upstream = _upstream_checkpoint(store, fit)
             sha = None if upstream is None else upstream[1]
@@ -328,7 +342,7 @@ def make_identity(workspace: Workspace, store: RunStore) -> IdentityFor:
         return fit_identity(
             fit,
             workspace.benchmark.recipe,
-            manifests[fit.fit_id],
+            manifests,
             sha,
             environment,
         )

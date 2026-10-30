@@ -1,5 +1,7 @@
 """Manifest-backed dataset: the only reader of frozen partitions."""
 
+import hashlib
+import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -9,8 +11,84 @@ from torch.utils.data import Dataset
 
 from jute_disease.config import MANIFEST_DIR, SOURCE_INVENTORY_DIR
 from jute_disease.data.cache import cached_path
+from jute_disease.data.fingerprints import file_sha256
 from jute_disease.data.manifest import Manifest, ManifestEntry, load_manifest
 from jute_disease.data.transforms import PreprocessingSpec
+
+
+class ManifestContentVerifier:
+    """Verify manifest files, rehashing any path whose file signature changes."""
+
+    def __init__(self) -> None:
+        self._verified: dict[Path, tuple[tuple[int, int, int, int], str]] = {}
+
+    def verify(
+        self,
+        manifest: Manifest,
+        image_root: Path | str,
+        partitions: tuple[str, ...],
+    ) -> str:
+        """Verify live files against frozen hashes for selected partitions.
+
+        The caller selects partitions explicitly so training can verify train
+        and validation without opening the held-out test partition.
+
+        Raises:
+            FileNotFoundError: a manifest file is missing.
+            ValueError: a path escapes the image root or its content hash changed.
+        """
+        root = Path(image_root).resolve()
+        entries = sorted(
+            (entry for name in partitions for entry in manifest.partition(name)),
+            key=lambda entry: entry.image_id,
+        )
+        content: list[tuple[str, str]] = []
+        for entry in entries:
+            path = (root / entry.path).resolve()
+            if not path.is_relative_to(root):
+                raise ValueError(f"Manifest path escapes image root: {entry.path!r}")
+            before = path.stat()
+            signature = (
+                before.st_size,
+                before.st_mtime_ns,
+                before.st_ctime_ns,
+                before.st_ino,
+            )
+            cached = self._verified.get(path)
+            if cached is not None and cached[0] == signature:
+                observed = cached[1]
+            else:
+                observed = file_sha256(path)
+                after = path.stat()
+                after_signature = (
+                    after.st_size,
+                    after.st_mtime_ns,
+                    after.st_ctime_ns,
+                    after.st_ino,
+                )
+                if signature != after_signature:
+                    raise ValueError(
+                        f"Manifest content changed while verifying {entry.path!r}"
+                    )
+                self._verified[path] = (signature, observed)
+            if observed != entry.image_id:
+                raise ValueError(
+                    f"Manifest content hash mismatch for {entry.path!r}: "
+                    f"expected {entry.image_id}, found {observed}"
+                )
+            content.append((entry.image_id, observed))
+        return hashlib.sha256(
+            json.dumps(content, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+
+def verify_manifest_content(
+    manifest: Manifest,
+    image_root: Path | str,
+    partitions: tuple[str, ...],
+) -> str:
+    """Verify selected manifest partitions against their original-file hashes."""
+    return ManifestContentVerifier().verify(manifest, image_root, partitions)
 
 
 class ManifestDataset(Dataset):
@@ -39,11 +117,15 @@ class ManifestDataset(Dataset):
         self.image_ids = [e.image_id for e in self.entries]
         self.groups = [e.group for e in self.entries]
         self.image_root = Path(image_root)
+        self.content_digest = ManifestContentVerifier().verify(
+            manifest, self.image_root, (partition,)
+        )
         self.transform = transform
         self.cache_root = None if cache_root is None else Path(cache_root)
         self.identity = {
             "manifest": manifest.digest(),
             "partition": partition,
+            "content": self.content_digest,
             "source": "original"
             if cache_root is None
             else f"cache:{(spec or PreprocessingSpec()).digest()}",

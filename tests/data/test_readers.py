@@ -28,6 +28,7 @@ def test_dataset_serves_a_partition_in_stable_order(
     assert dataset.classes[target] == frozen.partition("val")[0].label
     assert dataset.identity["source"] == "original"
     assert dataset.identity["deterministic"] == "false"
+    assert dataset.identity["content"] == dataset.content_digest
 
 
 def test_an_unknown_partition_is_rejected(
@@ -35,6 +36,20 @@ def test_an_unknown_partition_is_rejected(
 ) -> None:
     with pytest.raises(ValueError, match="Unknown partition"):
         ManifestDataset(frozen, "nonexistent", synthetic.root)
+
+
+def test_a_manifest_reader_rejects_changed_image_bytes(
+    frozen: Manifest, synthetic: SyntheticPlan
+) -> None:
+    entry = frozen.partition("train")[0]
+    path = synthetic.root / entry.path
+    original = path.read_bytes()
+    try:
+        path.write_bytes(original + b"changed")
+        with pytest.raises(ValueError, match="content hash"):
+            ManifestDataset(frozen, "train", synthetic.root)
+    finally:
+        path.write_bytes(original)
 
 
 def test_a_requested_cache_never_falls_back_to_the_original(

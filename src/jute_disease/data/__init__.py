@@ -63,7 +63,12 @@ from jute_disease.data.manifest import (
     validate_manifest,
     write_manifest,
 )
-from jute_disease.data.readers import ManifestDataset, open_partition
+from jute_disease.data.readers import (
+    ManifestContentVerifier,
+    ManifestDataset,
+    open_partition,
+    verify_manifest_content,
+)
 from jute_disease.data.sampling import balanced_sampler, loader_generator, seed_worker
 from jute_disease.data.sources import (
     PLANTDOC,
@@ -112,6 +117,7 @@ __all__ = [
     "ImageFingerprint",
     "InventoryRecord",
     "Manifest",
+    "ManifestContentVerifier",
     "ManifestDataset",
     "ManifestEntry",
     "OverlapReport",
@@ -164,6 +170,7 @@ __all__ = [
     "seed_worker",
     "stage_source",
     "validate_manifest",
+    "verify_manifest_content",
     "verify_counts",
     "write_decision",
     "write_inventory",

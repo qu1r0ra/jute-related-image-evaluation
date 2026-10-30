@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from jute_disease.config import BENCHMARK_CONFIG
-from jute_disease.data import file_sha256
+from jute_disease.data import file_sha256, load_manifest
 from jute_disease.training import (
     ChildResult,
     Cutoff,
@@ -411,6 +411,44 @@ def test_queue_runs_resumes_and_skips_end_to_end(workspace: Workspace) -> None:
     again = go()
     assert set(again.skipped) == expected
     assert len(launcher.jobs) == ran  # a resumed queue launches nothing
+
+
+def test_queue_refuses_to_resume_after_target_bytes_change(
+    workspace: Workspace,
+) -> None:
+    store = RunStore(workspace.runs_dir)
+    launcher = InProcess(workspace)
+    identity = make_identity(workspace, store)
+    benchmark = replace(workspace.benchmark, systems={}, estimators=(), features=())
+    cutoff = Cutoff(
+        at=datetime.now() + timedelta(days=30), basis="owner-operational", record="n"
+    )
+
+    def go() -> QueueReport:
+        return run_queue(
+            benchmark,
+            store,
+            clock=SystemClock(),
+            cutoff=cutoff,
+            execute=make_executor(workspace, store, identity, launcher),
+            probe=make_probe(workspace, launcher),
+            identity_for=identity,
+            report_path=workspace.runs_dir / "queue.json",
+        )
+
+    first = go()
+    assert first.outcomes["classical/prepare"] is RunState.COMPLETED
+    ran = len(launcher.jobs)
+    manifest = load_manifest(workspace.data.target_dir)
+    path = workspace.data.image_root / manifest.partition("train")[0].path
+    original = path.read_bytes()
+    try:
+        path.write_bytes(original + b"changed")
+        with pytest.raises(ValueError, match="content hash"):
+            go()
+        assert len(launcher.jobs) == ran
+    finally:
+        path.write_bytes(original)
 
 
 def test_benchmark_declares_the_fits_the_workspace_runs(workspace: Workspace) -> None:

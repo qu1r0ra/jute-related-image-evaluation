@@ -110,14 +110,24 @@ PLANTVILLAGE = SourceSpec(
 )
 
 
-def readiness_blockers(spec: SourceSpec) -> tuple[str, ...]:
-    """Return what still prevents owner-authorized internal pretraining use."""
+def readiness_blockers(
+    spec: SourceSpec,
+    *,
+    required_labels: tuple[str, ...] = (),
+    validation_labels: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    """Return what still prevents valid owner-authorized internal pretraining."""
     blockers = []
     digest = spec.expected_inventory_digest
     if digest is None or re.fullmatch(r"[0-9a-f]{64}", digest.lower()) is None:
         blockers.append("Expected source inventory SHA-256 is not pinned")
     if not spec.owner_internal_use_authorized or not spec.owner_authorization_record:
         blockers.append("Owner authorization for internal research use is not recorded")
+    validation = set(validation_labels)
+    blockers.extend(
+        f"Source validation has no support for class {label!r}"
+        for label in sorted(set(required_labels) - validation)
+    )
     return tuple(blockers)
 
 
@@ -461,6 +471,17 @@ def provenance(
     owner_authorized = bool(
         spec.owner_internal_use_authorized and spec.owner_authorization_record
     )
+    required_labels = tuple(
+        sorted(
+            {record.label for record in records if record.source_partition == "train"}
+        )
+    )
+    validation_labels = tuple(sorted({record.label for record in split.val}))
+    blockers = readiness_blockers(
+        spec,
+        required_labels=required_labels,
+        validation_labels=validation_labels,
+    )
     publisher_identity_verified = bool(
         spec.publisher_identity_verified and spec.publisher_identity_evidence
     )
@@ -472,12 +493,12 @@ def provenance(
         },
         "split": split.summary(),
         "readiness": {
-            "ready": not readiness_blockers(spec),
+            "ready": not blockers,
             "scope": "internal_research_only",
             "owner_authorized": owner_authorized,
             "publisher_identity_verified": publisher_identity_verified,
             "terms_verified": spec.terms_verified,
-            "blockers": list(readiness_blockers(spec)),
+            "blockers": list(blockers),
             "caveats": [
                 caveat
                 for unresolved, caveat in (
