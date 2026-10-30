@@ -39,7 +39,7 @@ from jute_disease.data import (
 from jute_disease.models.dl.classifier import Classifier
 from jute_disease.models.ml import FEATURE_EXTRACTORS, ML_CLASSIFIERS
 from jute_disease.reporting.tables import aggregate_metrics
-from jute_disease.training import check_deadline, pretrain_main
+from jute_disease.training import check_deadline, pretrain_main, with_training_config
 from jute_disease.training.baselines import CONFIGS_DIR, run_all_dl
 from jute_disease.training.cross_validation import run_cross_validation
 from jute_disease.training.engines.ml.predict import predict_ml
@@ -182,7 +182,7 @@ def _train_dl(lightning_args: list[str]) -> None:
         model_class=Classifier,
         datamodule_class=DataModule,
         save_config_kwargs={"overwrite": True},
-        args=lightning_args,
+        args=with_training_config(lightning_args),
     )
 
 

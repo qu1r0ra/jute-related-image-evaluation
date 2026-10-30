@@ -33,3 +33,4 @@ trainer:
     - class_path: lightning.pytorch.callbacks.TQDMProgressBar
       init_args:
         refresh_rate: 50
+    - class_path: jute_disease.training.callbacks.BestCheckpointRecord

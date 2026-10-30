@@ -44,7 +44,7 @@ def load_training_values(path: Path | str = TRAINING_CONFIG) -> TrainingValues:
     config: dict[str, Any] = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     model = config.get("model", {})
     callbacks = {
-        item["class_path"].removeprefix(_CALLBACKS): item["init_args"]
+        item["class_path"].removeprefix(_CALLBACKS): item.get("init_args", {})
         for item in config.get("trainer", {}).get("callbacks", [])
     }
     stopping = callbacks.get("EarlyStopping", {})

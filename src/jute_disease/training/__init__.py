@@ -1,3 +1,4 @@
+from jute_disease.training.callbacks import BestCheckpointRecord
 from jute_disease.training.logger import flatten_log_version, get_logger, setup_wandb
 from jute_disease.training.queue import (
     QueueEscalationError,
@@ -25,6 +26,7 @@ def pretrain_main(argv: list[str] | None = None) -> None:
 
 
 __all__ = [
+    "BestCheckpointRecord",
     "TRAINING_CONFIG",
     "QueueEscalationError",
     "QueueNotAdmittedError",
