@@ -232,41 +232,6 @@ def run_grid_search(
                     logger.error(f"Error running Phase 2 experiment lr{lr}_wd{wd}: {e}")
                     continue
 
-                logger.info(f"Testing Phase 2 experiment {exp_name}...")
-
-                ckpt_dir = CHECKPOINTS_DIR / exp_name
-                # Locate the newly trained model checkpoint
-                ckpts = list(ckpt_dir.glob("*.ckpt"))
-                if not ckpts:
-                    logger.error(
-                        f"No checkpoint found for Phase 2 {exp_name} in {ckpt_dir}."
-                    )
-                    continue
-
-                best_ckpt = ckpts[0]
-
-                test_cmd = [
-                    sys.executable,
-                    "-m",
-                    "jute_disease.cli",
-                    "train",
-                    "dl",
-                    "test",
-                    "--config",
-                    str(exp_config_path),
-                    "--ckpt_path",
-                    str(best_ckpt),
-                ]
-
-                logger.info(f"Command (Test): {' '.join(test_cmd)}")
-                try:
-                    subprocess.run(test_cmd, env=env, check=True)
-                    flatten_log_version(
-                        LOGS_DIR / log_group / exp_name, "test-metrics.csv"
-                    )
-                except subprocess.CalledProcessError as e:
-                    logger.error(f"Error testing Phase 2 experiment {exp_name}: {e}")
-
         if run_exp_names:
             _aggregate_metrics(
                 run_exp_names,
@@ -346,39 +311,6 @@ def run_grid_search(
             except subprocess.CalledProcessError as e:
                 logger.error(f"Fit failed for {exp_name}: {e}")
                 continue
-
-            logger.info(f"Testing Phase 1 experiment {exp_name}...")
-
-            ckpt_dir = CHECKPOINTS_DIR / exp_name
-            # Identify best checkpoint for evaluation
-            ckpts = list(ckpt_dir.glob("*.ckpt"))
-            if not ckpts:
-                logger.error(
-                    f"No checkpoint found for Phase 1 {exp_name} in {ckpt_dir}."
-                )
-                continue
-
-            best_ckpt = ckpts[0]
-
-            test_cmd = [
-                sys.executable,
-                "-m",
-                "jute_disease.cli",
-                "train",
-                "dl",
-                "test",
-                "--config",
-                str(exp_config_path),
-                "--ckpt_path",
-                str(best_ckpt),
-            ]
-
-            logger.info(f"Command (Test): {' '.join(test_cmd)}")
-            try:
-                subprocess.run(test_cmd, env=env, check=True)
-                flatten_log_version(LOGS_DIR / log_group / exp_name, "test-metrics.csv")
-            except subprocess.CalledProcessError as e:
-                logger.error(f"Error testing Phase 1 experiment {exp_name}: {e}")
 
     _aggregate_metrics(
         run_exp_names,

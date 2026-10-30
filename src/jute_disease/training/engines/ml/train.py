@@ -1,11 +1,19 @@
 import os
+from pathlib import Path
 
 import numpy as np
 import torch
 import wandb
 
-from jute_disease.config import DEFAULT_SEED, WANDB_ENTITY, WANDB_PROJECT
-from jute_disease.data import classical_pipeline, open_partition
+from jute_disease.config import (
+    DEFAULT_SEED,
+    MANIFEST_DIR,
+    ML_MODELS_DIR,
+    SOURCE_INVENTORY_DIR,
+    WANDB_ENTITY,
+    WANDB_PROJECT,
+)
+from jute_disease.data import classical_pipeline
 from jute_disease.evaluation.metrics import EVAL_METRICS, format_metrics
 from jute_disease.models.ml import (
     FEATURE_EXTRACTORS,
@@ -13,6 +21,7 @@ from jute_disease.models.ml import (
     extract_features,
 )
 from jute_disease.training.logger import get_logger, setup_wandb
+from jute_disease.training.partitions import open_training_partition
 from jute_disease.training.seed import seed_everything
 
 logger = get_logger(__name__)
@@ -23,7 +32,15 @@ def train_ml(
     feature_type: str = "crafted",
     balanced: bool = True,
     seed: int = DEFAULT_SEED,
-) -> None:
+    manifest_dir: Path = MANIFEST_DIR,
+    image_root: Path = SOURCE_INVENTORY_DIR,
+    output_dir: Path = ML_MODELS_DIR,
+) -> Path:
+    """Fit one classical model on the train partition and score validation.
+
+    The test partition is never opened here; the final evaluator owns it.
+    Returns the saved model path.
+    """
     seed_everything(seed)
 
     if os.getenv("WANDB_MODE") != "disabled":
@@ -46,13 +63,13 @@ def train_ml(
 
     # Classical features use the same deterministic preprocessing in every
     # partition; the frozen manifest alone decides which image is where.
-    train_ds, val_ds, test_ds = (
-        open_partition(name, classical_pipeline()) for name in ("train", "val", "test")
+    train_ds, val_ds = (
+        open_training_partition(name, classical_pipeline(), manifest_dir, image_root)
+        for name in ("train", "val")
     )
 
     X_train, y_train = extract_features(train_ds, extractor=extractor)
     X_val, y_val = extract_features(val_ds, extractor=extractor)
-    X_test, y_test = extract_features(test_ds, extractor=extractor)
 
     logger.info(f"Training {classifier}...")
     classifier_cls = ML_CLASSIFIERS[classifier]
@@ -77,19 +94,7 @@ def train_ml(
     logger.info(f"Validation Accuracy: {val_metrics['val_acc']:.4f}")
     logger.info(f"Validation F1 Macro: {val_metrics['val_f1']:.4f}")
 
-    y_test_pred = model.predict(X_test)
-    test_out = evaluator(torch.tensor(y_test_pred), torch.tensor(y_test))
-    test_metrics = format_metrics(test_out, prefix="test_")
-
-    logger.info(f"Test Accuracy: {test_metrics['test_acc']:.4f}")
-    logger.info(f"Test F1 Macro: {test_metrics['test_f1']:.4f}")
-
     if os.getenv("WANDB_MODE") != "disabled":
-        class_names = test_ds.classes
-        wandb_logs = {**val_metrics, **test_metrics}
-        wandb_logs["test_conf_mat"] = wandb.plot.confusion_matrix(
-            preds=y_test_pred, y_true=y_test, class_names=class_names
-        )
-        wandb.log(wandb_logs)
+        wandb.log(val_metrics)
         wandb.finish()
-    model.save(f"{classifier}_{feature_type}")
+    return model.save(f"{classifier}_{feature_type}", directory=output_dir)

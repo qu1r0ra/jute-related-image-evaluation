@@ -63,17 +63,13 @@ def test_run_grid_search_phase1(
         "jute_disease.training.grid_search._aggregate_metrics", mock_agg
     )
 
-    mock_glob = MagicMock(return_value=[CHECKPOINTS_DIR / "dummy" / "best.ckpt"])
-    monkeypatch.setattr(Path, "glob", mock_glob)
-
     base_config = tmp_path / "mobilenet_v2.yaml"
     base_config.touch()
 
     run_grid_search(phase_1_grid, base_config)
 
-    assert mock_run.call_count == 2
+    assert mock_run.call_count == 1
     fit_cmd = mock_run.call_args_list[0][0][0]
-    test_cmd = mock_run.call_args_list[1][0][0]
 
     # Check that appropriate phase 1 args are passed
     assert "jute_disease.cli" in fit_cmd
@@ -83,9 +79,8 @@ def test_run_grid_search_phase1(
     assert any("pretrained=True" in c for c in fit_cmd)
     assert any("checkpoint_path=null" in c for c in fit_cmd)
 
-    # Check test args
-    assert "test" in test_cmd
-    assert "--ckpt_path" in test_cmd
+    # The held-out partition is never scored here
+    assert "test" not in fit_cmd
 
     # Check aggregation
     assert mock_agg.call_count == 1
@@ -102,17 +97,13 @@ def test_run_grid_search_phase2(
         "jute_disease.training.grid_search._aggregate_metrics", mock_agg
     )
 
-    mock_glob = MagicMock(return_value=[CHECKPOINTS_DIR / "dummy" / "best.ckpt"])
-    monkeypatch.setattr(Path, "glob", mock_glob)
-
     base_config = tmp_path / "mobilenet_v2.yaml"
     base_config.touch()
 
     run_grid_search(phase_2_grid, base_config)
 
-    assert mock_run.call_count == 2
+    assert mock_run.call_count == 1
     fit_cmd = mock_run.call_args_list[0][0][0]
-    test_cmd = mock_run.call_args_list[1][0][0]
 
     # Check that appropriate phase 2 args are passed
     assert "jute_disease.cli" in fit_cmd
@@ -126,9 +117,8 @@ def test_run_grid_search_phase2(
     assert any("lr=0.005" in c for c in fit_cmd)
     assert any("weight_decay=0.1" in c for c in fit_cmd)
 
-    # Check test args
-    assert "test" in test_cmd
-    assert "--ckpt_path" in test_cmd
+    # The held-out partition is never scored here
+    assert "test" not in fit_cmd
 
     # Check aggregation
     assert mock_agg.call_count == 1

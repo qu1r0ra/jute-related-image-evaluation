@@ -1,5 +1,7 @@
 from typing import Any
 
+from pathlib import Path
+
 import joblib
 import numpy as np
 from sklearn.base import ClassifierMixin
@@ -63,12 +65,14 @@ class SklearnClassifier:
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         return self.model.predict_proba(X)
 
-    def save(self, name: str | None = None) -> None:
-        ML_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    def save(self, name: str | None = None, directory: Path | None = None) -> Path:
+        target = ML_MODELS_DIR if directory is None else directory
+        target.mkdir(parents=True, exist_ok=True)
         model_name = name or self.__class__.__name__.lower()
-        path = str(ML_MODELS_DIR / f"{model_name}.joblib")
-        joblib.dump(self.model, path)
+        path = target / f"{model_name}.joblib"
+        joblib.dump(self.model, str(path))
         logger.info(f"Model saved to {path}")
+        return path
 
     @classmethod
     def load(cls, name: str | None = None) -> "SklearnClassifier | None":

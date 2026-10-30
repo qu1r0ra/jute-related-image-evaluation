@@ -13,7 +13,6 @@ from jute_disease.config import (
     ML_SPLIT_DIR,
     NUM_WORKERS,
     ROOT_DIR,
-    SEEDS,
     SPLITS,
     WANDB_ENTITY,
     WANDB_PROJECT,
@@ -55,9 +54,12 @@ def test_numeric_constants_are_positive() -> None:
     assert NUM_WORKERS >= 0
 
 
-def test_seeds_contains_default() -> None:
-    assert DEFAULT_SEED in SEEDS
-    assert len(SEEDS) > 0
+def test_single_target_seed_is_42() -> None:
+    """Owner decision: one target seed; the seed stays a command parameter."""
+    from jute_disease import config
+
+    assert DEFAULT_SEED == 42
+    assert not hasattr(config, "SEEDS")
 
 
 def test_image_extensions_are_strings() -> None:

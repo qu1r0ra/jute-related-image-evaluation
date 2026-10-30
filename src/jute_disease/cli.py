@@ -43,9 +43,9 @@ from jute_disease.training.baselines import CONFIGS_DIR, run_all_dl
 from jute_disease.training.cross_validation import run_cross_validation
 from jute_disease.training.engines.ml.predict import predict_ml
 from jute_disease.training.engines.ml.sweep import run_all_ml
-from jute_disease.training.engines.ml.test import test_ml
 from jute_disease.training.engines.ml.train import train_ml
 from jute_disease.training.grid_search import run_grid_search
+from jute_disease.training.partitions import HELD_OUT_SUBCOMMANDS
 
 Handler = Callable[[argparse.Namespace], None]
 
@@ -127,6 +127,11 @@ def _freeze_source(args: argparse.Namespace) -> None:
 
 
 def _train_dl(lightning_args: list[str]) -> None:
+    if held_out := HELD_OUT_SUBCOMMANDS.intersection(lightning_args):
+        raise SystemExit(
+            f"train dl {sorted(held_out)[0]} would read the held-out test "
+            "partition; scoring it is owned by the final evaluator (#721)."
+        )
     load_dotenv()
     LightningCLI(
         model_class=Classifier,
@@ -162,14 +167,6 @@ def _train_grid(args: argparse.Namespace) -> None:
 
 def _evaluate_aggregate(args: argparse.Namespace) -> None:
     aggregate_metrics(args.exp_names, args.output)
-
-
-def _evaluate_ml(args: argparse.Namespace) -> None:
-    test_ml(
-        classifier=args.classifier,
-        feature_type=args.feature_type,
-        seed=args.seed,
-    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -245,7 +242,7 @@ def build_parser() -> argparse.ArgumentParser:
     ml.set_defaults(run=_train_ml)
 
     baselines = train_actions.add_parser(
-        "baselines", help="Run every DL baseline config (fit, then test)."
+        "baselines", help="Fit every DL baseline config (no test scoring)."
     )
     baselines.add_argument("--configs-dir", type=Path, default=CONFIGS_DIR)
     baselines.add_argument(
@@ -291,14 +288,14 @@ def build_parser() -> argparse.ArgumentParser:
     aggregate.set_defaults(run=_evaluate_aggregate)
 
     evaluate_ml = evaluate_actions.add_parser(
-        "ml", help="Test one trained classical model."
+        "ml", help="Test one trained classical model (final evaluator, planned)."
     )
     evaluate_ml.add_argument("--classifier", default="rf", choices=list(ML_CLASSIFIERS))
     evaluate_ml.add_argument(
         "--feature_type", default="crafted", choices=list(FEATURE_EXTRACTORS)
     )
     evaluate_ml.add_argument("--seed", type=int, default=DEFAULT_SEED)
-    evaluate_ml.set_defaults(run=_evaluate_ml)
+    evaluate_ml.set_defaults(run=_planned("evaluate ml", "#721"))
 
     evaluate_actions.add_parser("predict", help="Classify one image (forwarded).")
 

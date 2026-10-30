@@ -1,4 +1,4 @@
-"""Run all DL baseline experiments sequentially."""
+"""Fit every DL baseline config sequentially; test scoring is the evaluator's."""
 
 import os
 import subprocess
@@ -8,7 +8,6 @@ from pathlib import Path
 import wandb
 import yaml
 
-from jute_disease.config import CHECKPOINTS_DIR
 from jute_disease.training.logger import flatten_log_version, get_logger
 
 logger = get_logger(__name__)
@@ -76,37 +75,6 @@ def run_all_dl(
                 f"{model_name} failed during fit with exit code {result.returncode}."
             )
         flatten_log_version(log_dir, "train-metrics.csv")
-
-        logger.info(f"Testing {model_name}...")
-
-        ckpt_dir = CHECKPOINTS_DIR / model_name
-        ckpts = list(ckpt_dir.glob("*.ckpt"))
-        if not ckpts:
-            raise FileNotFoundError(
-                f"No checkpoint found for {model_name} in {ckpt_dir}."
-            )
-
-        # Pick the best checkpoint from the training stage
-        best_ckpt = ckpts[0]
-
-        test_cmd = [
-            sys.executable,
-            "-m",
-            "jute_disease.cli",
-            "train",
-            "dl",
-            "test",
-            "--config",
-            str(config),
-            "--ckpt_path",
-            str(best_ckpt),
-        ]
-        result = subprocess.run(test_cmd, env=env)
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"{model_name} failed during test with exit code {result.returncode}."
-            )
-        flatten_log_version(log_dir, "test-metrics.csv")
 
         logger.info(f"Finished {model_name}.")
 
