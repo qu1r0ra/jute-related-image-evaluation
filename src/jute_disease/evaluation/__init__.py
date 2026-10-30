@@ -17,6 +17,11 @@ from jute_disease.evaluation.scores import (
     score_run,
     summarize_seeds,
 )
+from jute_disease.evaluation.validation import (
+    FixtureEvaluationError,
+    FixtureEvaluationOutput,
+    evaluate_fixture_runs,
+)
 
 __all__ = [
     "CONFIDENCE_LEVEL",
@@ -26,12 +31,15 @@ __all__ = [
     "TRAIN_METRICS",
     "ClassScore",
     "Evaluation",
+    "FixtureEvaluationError",
+    "FixtureEvaluationOutput",
     "Interval",
     "PredictionSet",
     "Resampling",
     "RunScores",
     "SeedSummary",
     "evaluate_predictions",
+    "evaluate_fixture_runs",
     "format_metrics",
     "resample_metrics",
     "score_run",
