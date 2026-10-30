@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from jute_disease import config as config_module
 from jute_disease.config import (
     BATCH_SIZE,
     BY_CLASS_DIR,
@@ -56,10 +57,18 @@ def test_numeric_constants_are_positive() -> None:
 
 def test_single_target_seed_is_42() -> None:
     """Owner decision: one target seed; the seed stays a command parameter."""
-    from jute_disease import config
-
     assert DEFAULT_SEED == 42
-    assert not hasattr(config, "SEEDS")
+
+
+def test_corrected_path_does_not_read_the_historical_seed_list() -> None:
+    """SEEDS stays as published history; no source module reads it."""
+    package = Path(config_module.__file__).parent
+    readers = [
+        path.relative_to(package).as_posix()
+        for path in sorted(package.rglob("*.py"))
+        if path.name != "config.py" and "SEEDS" in path.read_text(encoding="utf-8")
+    ]
+    assert readers == []
 
 
 def test_image_extensions_are_strings() -> None:

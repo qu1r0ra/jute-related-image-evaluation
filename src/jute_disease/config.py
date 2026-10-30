@@ -37,7 +37,9 @@ SPLITS = {"train": 0.7, "val": 0.15, "test": 0.15}
 # Execution defaults
 BATCH_SIZE = 32
 NUM_WORKERS = 4
-# One seed drives every run; commands take it as a parameter.
+# Historical list from the submitted study; the corrected path does not read it.
+SEEDS = [42, 1337, 7, 1234, 99]
+# The corrected path runs one seed; commands take it as a parameter.
 DEFAULT_SEED = 42
 DEFAULT_LR = 0.001
 DEFAULT_WEIGHT_DECAY = 0.01
