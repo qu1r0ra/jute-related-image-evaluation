@@ -146,11 +146,30 @@ def test_models_ml_api() -> None:
 
 
 def test_evaluation_api() -> None:
-    from jute_disease.evaluation import EVAL_METRICS, TRAIN_METRICS, format_metrics
+    from jute_disease import evaluation
+    from jute_disease.evaluation import (
+        CONFIDENCE_LEVEL,
+        EVAL_METRICS,
+        EVAL_SEED,
+        RESAMPLES,
+        TRAIN_METRICS,
+        PredictionSet,
+        evaluate_predictions,
+        format_metrics,
+        resample_metrics,
+        score_run,
+    )
 
     assert EVAL_METRICS is not None
     assert TRAIN_METRICS is not None
     assert format_metrics is not None
+    assert PredictionSet is not None
+    assert evaluate_predictions is not None
+    assert resample_metrics is not None
+    assert score_run is not None
+    assert (RESAMPLES, EVAL_SEED, CONFIDENCE_LEVEL) == (10_000, 42, 0.95)
+    assert all(hasattr(evaluation, name) for name in evaluation.__all__)
+    assert len(set(evaluation.__all__)) == len(evaluation.__all__)
 
 
 def test_training_api() -> None:
