@@ -73,9 +73,26 @@ A high-level overview of the repository organization:
 
 For a detailed look at the internal design, public APIs, and architectural decisions, see [architecture.md](docs/architecture.md).
 
-The corrected training queue is still under development. Its deadline forecast
-requires an explicitly verified cutoff and timezone, and reserves at least two
-hours for finalization by default. A successful forecast does not start a run.
+The corrected training queue runs one target seed, 42, which stays a command
+parameter. `jute-disease queue plan` writes the ordered stages (core CNN fits,
+the ten classical fits, then the optional PlantVillage and PlantDoc arms) and
+starts nothing. `jute-disease queue run --plan <file> --config <file> --admit`
+runs or resumes them and refuses without `--admit`; a successful deadline
+forecast never admits a run. Each stage writes an atomic receipt under the queue
+state directory that binds the command, input contents and upstream stages, so a
+resume skips only compatible completed stages and rejects partial outputs. A
+classical fit stops at 30 minutes and the classical fits share a five-hour
+allowance. The deadline forecast requires an explicitly verified cutoff and
+timezone and reserves at least two hours for finalization. A mandatory shortfall
+escalates instead of reducing the benchmark. When the forecast cannot hold the
+reserve, the PlantDoc arm is dropped first, then PlantVillage. An arm whose
+source reports a readiness blocker (an unpinned inventory digest or missing owner
+authorization) is omitted with that cause. No other source check applies.
+
+Corrected training commands read the train and validation partitions only,
+through the frozen manifest. Test pixels belong to the final evaluator (#721):
+`train dl test` and `train dl predict` are refused and `evaluate ml` is deferred
+to it.
 
 ## 3. Getting Started
 
@@ -172,7 +189,7 @@ To retrain the models from the command line instead of the notebooks:
    just train-dl-check                 # one-batch fast_dev_run (MobileNetV2)
    just train-dl                       # all six deep learning baselines
    just train-dl-single mobilenet_v2   # one baseline by config name
-   just train-ml                       # handcrafted features + classical ML
+   just train-ml                       # handcrafted features + classical ML (fit and validation only)
    ```
 
 5. Reproduce the MobileNetV2 tuning in the paper (phase 1: transfer-learning/dropout; phase 2: learning rate and weight decay) and the 512 px experiment:

@@ -39,8 +39,15 @@ pretrain *args:
 train-ml:
     uv run jute-disease train ml --all
 
-test-ml classifier="rf" feature="crafted":
-    uv run jute-disease evaluate ml --classifier {{classifier}} --feature_type {{feature}}
+# Corrected training queue: plan writes stages and starts nothing; run needs --admit
+queue-check *args:
+    uv run jute-disease queue check {{args}}
+
+queue-plan *args:
+    uv run jute-disease queue plan {{args}}
+
+queue-run *args:
+    uv run jute-disease queue run {{args}}
 
 # Deep learning
 

@@ -34,10 +34,11 @@ Each subpackage in `src/jute_disease/` (e.g., `models.ml`, `data`, `training`, `
 
 The project exposes a single console entry point, `jute-disease` (`jute_disease.cli:main`), and a `justfile` whose recipes each wrap one of its commands:
 
-- **`jute-disease train dl fit|test`**: The deep learning engine. Arguments are forwarded to the **Lightning CLI**, which drives training and testing from configuration files.
-- **`jute-disease train ml --all`**: Classical ML training over every classifier and feature combination. It drives the pipeline in `src/jute_disease/training/engines/ml/`.
-- **Other commands**: `data` (download, synthetic), `freeze` (target, cache, source), `train` (baselines, cv, grid, pretrain), and `evaluate` (aggregate, ml, predict). `jute-disease --help` lists them all.
-- Commands planned in open issues (`queue`, `profile`, and `evaluate` on its own) exit non-zero and name the issue that owns them.
+- **`jute-disease train dl fit|validate`**: The deep learning engine. Arguments are forwarded to the **Lightning CLI**, which drives training from configuration files. `test` and `predict` are refused because training never opens the test partition.
+- **`jute-disease train ml --all`**: Classical ML training over every classifier and feature combination, fitted on the train partition and scored on validation. It drives the pipeline in `src/jute_disease/training/engines/ml/`.
+- **`jute-disease queue plan|check|run`**: The resumable training queue in `src/jute_disease/training/queue.py`. `plan` writes the ordered stages for the single seed 42, `check` runs the deadline forecast, and `run --admit` executes or resumes the plan with per-stage receipts, a 30-minute limit per classical fit and a two-hour finalization reserve. Neither `plan` nor `check` starts a run.
+- **Other commands**: `data` (download, synthetic), `freeze` (target, cache, source), `train` (baselines, cv, grid, pretrain) and `evaluate` (aggregate, ml, predict). `jute-disease --help` lists them all.
+- Commands planned in open issues (`profile`, `evaluate ml` and `evaluate` on its own) exit non-zero and name the issue that owns them.
 
 ### 3. Deep Learning Service (Lightning + Timm)
 
