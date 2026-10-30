@@ -33,6 +33,10 @@ class FreezeBlockedError(ValueError):
     """The dataset cannot be frozen as specified; nothing was written."""
 
 
+class HeldOutPartitionError(PermissionError):
+    """A training-side caller asked for the held-out test partition."""
+
+
 @dataclass(frozen=True)
 class ManifestEntry:
     """One image assigned to one partition."""

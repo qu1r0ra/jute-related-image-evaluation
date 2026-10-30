@@ -54,6 +54,7 @@ from jute_disease.data.inventory import (
 )
 from jute_disease.data.manifest import (
     FreezeBlockedError,
+    HeldOutPartitionError,
     Manifest,
     ManifestEntry,
     build_manifest,
@@ -106,6 +107,7 @@ __all__ = [
     "CurationRules",
     "DataModule",
     "FreezeBlockedError",
+    "HeldOutPartitionError",
     "IdentityResolution",
     "ImageFingerprint",
     "InventoryRecord",

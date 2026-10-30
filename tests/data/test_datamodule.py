@@ -41,7 +41,9 @@ def test_datamodule_setup_fit(mock_dataset_root: Path) -> None:
 
 
 def test_datamodule_setup_test(mock_dataset_root: Path) -> None:
-    dm = DataModule(data_dir=mock_dataset_root, batch_size=2, pin_memory=False)
+    dm = DataModule(
+        data_dir=mock_dataset_root, batch_size=2, pin_memory=False, allow_test=True
+    )
     dm.setup(stage="test")
 
     assert dm.jute_test is not None
@@ -50,7 +52,9 @@ def test_datamodule_setup_test(mock_dataset_root: Path) -> None:
 
 
 def test_datamodule_dataloaders(mock_dataset_root: Path) -> None:
-    dm = DataModule(data_dir=mock_dataset_root, batch_size=2, pin_memory=False)
+    dm = DataModule(
+        data_dir=mock_dataset_root, batch_size=2, pin_memory=False, allow_test=True
+    )
     dm.setup()
     dm.setup(stage="test")
 
@@ -160,7 +164,7 @@ def _manifest_module(
 def test_manifest_mode_serves_exactly_the_frozen_partitions(
     frozen_dir: Path, synthetic: SyntheticPlan, frozen: Manifest
 ) -> None:
-    dm = _manifest_module(frozen_dir, synthetic)
+    dm = _manifest_module(frozen_dir, synthetic, allow_test=True)
     dm.setup()
     assert len(dm.jute_train) == len(frozen.partition("train"))
     assert len(dm.jute_val) == len(frozen.partition("val"))
