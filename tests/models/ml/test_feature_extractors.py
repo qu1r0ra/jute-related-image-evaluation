@@ -148,3 +148,81 @@ def test_feature_cache_ignores_a_stale_sidecar_and_random_transforms(
     extract(augmented, extractor)
     extract(augmented, extractor)
     assert augmented.reads == 4  # random augmentation is never cached
+
+
+def test_feature_cache_uses_an_explicit_directory(tmp_path, monkeypatch) -> None:
+    import jute_disease.models.ml.features as features_module
+
+    default = tmp_path / "default"
+    explicit = tmp_path / "explicit"
+    monkeypatch.setattr(features_module, "ML_FEATURES_DIR", default)
+    features_module.extract_features(
+        _Dataset(IDENTITY), RawPixelFeatureExtractor(8), cache_dir=explicit
+    )
+    assert list(explicit.glob("*.json"))
+    assert not default.exists()
+
+
+def test_feature_cache_rejects_a_truncated_or_misshapen_matrix(tmp_path) -> None:
+    import numpy as np
+
+    import jute_disease.models.ml.features as features_module
+
+    extractor = RawPixelFeatureExtractor(8)
+    features_module.extract_features(_Dataset(IDENTITY), extractor, cache_dir=tmp_path)
+    (x_path,) = tmp_path.glob("*_X.npy")
+
+    np.save(x_path, np.zeros((1, 8 * 8 * 3), dtype=np.float32))
+    wrong_rows = _Dataset(IDENTITY)
+    x, _ = features_module.extract_features(wrong_rows, extractor, cache_dir=tmp_path)
+    assert wrong_rows.reads == 2 and x.shape[0] == 2
+
+    x_path.write_bytes(b"not an array")
+    corrupt = _Dataset(IDENTITY)
+    features_module.extract_features(corrupt, extractor, cache_dir=tmp_path)
+    assert corrupt.reads == 2
+
+    again = _Dataset(IDENTITY)
+    features_module.extract_features(again, extractor, cache_dir=tmp_path)
+    assert again.reads == 0  # the rewritten cache is whole
+
+
+def test_feature_cache_publishes_the_sidecar_last(tmp_path, monkeypatch) -> None:
+    import numpy as np
+
+    import jute_disease.models.ml.features as features_module
+
+    order: list[str] = []
+    real_save = np.save
+
+    def spy(path, array, *args, **kwargs):
+        order.append(f"npy:{'X' if '_X' in str(path) else 'y'}")
+        real_save(path, array, *args, **kwargs)
+
+    monkeypatch.setattr(features_module.np, "save", spy)
+    features_module.extract_features(
+        _Dataset(IDENTITY), RawPixelFeatureExtractor(8), cache_dir=tmp_path
+    )
+    assert order == ["npy:X", "npy:y"]
+    assert not list(tmp_path.glob("*.part*"))
+    assert len(list(tmp_path.glob("*.json"))) == 1
+
+
+def test_an_interrupted_write_leaves_no_valid_cache(tmp_path, monkeypatch) -> None:
+    import jute_disease.models.ml.features as features_module
+
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(features_module.os, "replace", boom)
+    with pytest.raises(OSError):
+        features_module.extract_features(
+            _Dataset(IDENTITY), RawPixelFeatureExtractor(8), cache_dir=tmp_path
+        )
+    assert not list(tmp_path.glob("*.json"))
+    clean = _Dataset(IDENTITY)
+    monkeypatch.undo()
+    features_module.extract_features(
+        clean, RawPixelFeatureExtractor(8), cache_dir=tmp_path
+    )
+    assert clean.reads == 2

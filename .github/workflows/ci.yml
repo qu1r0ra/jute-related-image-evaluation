@@ -84,16 +84,7 @@ jobs:
           PY
           uv run jute-disease freeze target --image-root artifacts/synthetic --rules artifacts/smoke-curation-rules.json
 
-      - name: Train one batch (fast_dev_run)
-        run: >
-          uv run jute-disease train dl fit
-          --config configs/historical/baselines/mobilenet_v2.yaml
-          --data.data_dir=null
-          --data.manifest_dir=artifacts/freeze/target
-          --data.image_root=artifacts/synthetic
-          --trainer.fast_dev_run=True
-          --trainer.logger=null
-          --trainer.accelerator=cpu
-          --model.feature_extractor.pretrained=false
-          --model.compile_model=false
-          --data.num_workers=0
+      - name: Plan the queue on the frozen manifest
+        run: |
+          uv run jute-disease stack --allow-cpu
+          uv run jute-disease queue plan --allow-cpu --image-root artifacts/synthetic

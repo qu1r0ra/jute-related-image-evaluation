@@ -1,6 +1,8 @@
 import hashlib
 import json
+import os
 from abc import ABC, abstractmethod
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -149,32 +151,90 @@ def feature_cache_key(
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+def _load_cached(
+    x_path: Path, y_path: Path, meta_path: Path, key: str, length: int
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Return a whole cached matrix, or None when anything is missing or wrong."""
+    if not (x_path.is_file() and y_path.is_file() and meta_path.is_file()):
+        return None
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        if meta.get("key") != key or meta.get("length") != length:
+            return None
+        x = np.load(x_path, allow_pickle=False)
+        y = np.load(y_path, allow_pickle=False)
+    except (OSError, ValueError, EOFError):
+        return None
+    if x.ndim != 2 or x.shape[0] != length or y.shape != (length,):
+        return None
+    return x, y
+
+
+def _publish(
+    cache_dir: Path,
+    key: str,
+    x: np.ndarray,
+    y: np.ndarray,
+    identity: dict[str, str],
+) -> None:
+    """Write the matrices atomically and publish the sidecar last.
+
+    A reader only trusts a matrix once its sidecar exists, so an interruption at
+    any point leaves nothing that looks complete.
+    """
+    parts: list[Path] = []
+    try:
+        for name, array in (("X", x), ("y", y)):
+            part = cache_dir / f"{key}_{name}.part{os.getpid()}.npy"
+            parts.append(part)
+            np.save(part, array)
+        meta_part = cache_dir / f"{key}.part{os.getpid()}.json"
+        parts.append(meta_part)
+        meta_part.write_text(
+            json.dumps(
+                {"key": key, "length": len(y), "identity": identity}, sort_keys=True
+            ),
+            encoding="utf-8",
+        )
+        os.replace(parts[0], cache_dir / f"{key}_X.npy")
+        os.replace(parts[1], cache_dir / f"{key}_y.npy")
+        os.replace(meta_part, cache_dir / f"{key}.json")
+    finally:
+        for part in parts:
+            part.unlink(missing_ok=True)
+
+
 def extract_features(
     dataset: Dataset,
     extractor: BaseFeatureExtractor,
     cache: bool = True,
+    cache_dir: Path | str | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Extract features with the provided extractor.
 
     Features are cached only for datasets that expose an ``identity`` mapping
     (such as ``ManifestDataset``). The cache file is named by its identity key
-    and carries a sidecar; a missing sidecar, a different key or a different
-    sample count means recomputation, never reuse.
+    and carries a sidecar; a missing sidecar, a different key, a different
+    sample count or a matrix of the wrong shape means recomputation, never
+    reuse. ``cache_dir`` defaults to the shared features directory.
     """
     identity = getattr(dataset, "identity", None) if cache else None
     if identity is not None and identity.get("deterministic") != "true":
         identity = None
     if identity is not None:
         key = feature_cache_key(identity, extractor, len(dataset))
-        ML_FEATURES_DIR.mkdir(parents=True, exist_ok=True)
-        x_path = ML_FEATURES_DIR / f"{key}_X.npy"
-        y_path = ML_FEATURES_DIR / f"{key}_y.npy"
-        meta_path = ML_FEATURES_DIR / f"{key}.json"
-        if x_path.exists() and y_path.exists() and meta_path.exists():
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            if meta.get("key") == key and meta.get("length") == len(dataset):
-                logger.info(f"Loading cached features: {key[:12]}")
-                return np.load(x_path), np.load(y_path)
+        directory = Path(ML_FEATURES_DIR if cache_dir is None else cache_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+        cached = _load_cached(
+            directory / f"{key}_X.npy",
+            directory / f"{key}_y.npy",
+            directory / f"{key}.json",
+            key,
+            len(dataset),
+        )
+        if cached is not None:
+            logger.info(f"Loading cached features: {key[:12]}")
+            return cached
 
     features_list = []
     labels_list = []
@@ -190,15 +250,7 @@ def extract_features(
     y = np.array(labels_list)
 
     if identity is not None:
-        np.save(x_path, X)
-        np.save(y_path, y)
-        meta_path.write_text(
-            json.dumps(
-                {"key": key, "length": len(dataset), "identity": identity},
-                sort_keys=True,
-            ),
-            encoding="utf-8",
-        )
+        _publish(directory, key, X, y, identity)
         logger.info(f"Saved cached features: {key[:12]}")
 
     return X, y

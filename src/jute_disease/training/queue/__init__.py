@@ -11,7 +11,10 @@ from jute_disease.training.queue.admission import (
 )
 from jute_disease.training.queue.plan import Stage, build_plan
 from jute_disease.training.queue.runner import (
+    Executor,
+    IdentityFor,
     Outcome,
+    Probe,
     QueueReport,
     TimingBook,
     run_queue,
@@ -24,9 +27,12 @@ __all__ = [
     "Clock",
     "Cutoff",
     "CutoffUnverifiedError",
+    "Executor",
+    "IdentityFor",
     "MandatoryShortfallError",
     "OptionalChain",
     "Outcome",
+    "Probe",
     "QueueReport",
     "Stage",
     "SystemClock",

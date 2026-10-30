@@ -138,6 +138,13 @@ def test_identity_is_stable_and_sensitive_to_every_input(benchmark) -> None:
         manifests={"target": "m1"},
         upstream_sha256=None,
     )
+    assert base != fit_identity(
+        fit,
+        benchmark.recipe,
+        manifests={"target": "m1"},
+        upstream_sha256=None,
+        environment={"pretrained": True},
+    )
 
 
 def test_unknown_configuration_keys_are_rejected(tmp_path) -> None:

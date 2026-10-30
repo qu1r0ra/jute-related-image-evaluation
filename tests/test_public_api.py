@@ -161,11 +161,13 @@ def test_training_api() -> None:
         SPLITS,
     )
     from jute_disease.training import (
+        experiment_loggers,
+        fit_classical,
+        fit_cnn,
         get_logger,
-        pretrain_main,
+        run_queue,
         seed_everything,
-        setup_wandb,
-        source_data_module,
+        verify_stack,
     )
 
     assert ROOT_DIR is not None
@@ -177,7 +179,9 @@ def test_training_api() -> None:
     assert isinstance(DEFAULT_SEED, int)
     assert isinstance(SPLITS, dict)
     assert get_logger is not None
-    assert pretrain_main is not None
     assert seed_everything is not None
-    assert setup_wandb is not None
-    assert source_data_module is not None
+    assert experiment_loggers is not None
+    assert fit_classical is not None
+    assert fit_cnn is not None
+    assert run_queue is not None
+    assert verify_stack is not None

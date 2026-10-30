@@ -22,6 +22,7 @@ class SklearnClassifier:
 
     supports_sample_weight: bool = True
     scaler_cls: type = StandardScaler
+    weighting: str = "none"
 
     def __init__(self, sklearn_cls: type[ClassifierMixin], **kwargs: object) -> None:
         if not issubclass(sklearn_cls, ClassifierMixin):
@@ -46,13 +47,16 @@ class SklearnClassifier:
         self, X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None
     ) -> None:
         fit_kwargs = {}
+        self.weighting = "none"
         if sample_weight is not None:
             if not self.supports_sample_weight:
+                self.weighting = "unsupported"
                 logger.warning(
                     f"{self.__class__.__name__} does not support sample_weight. "
                     "Weighting will be ignored."
                 )
             else:
+                self.weighting = "applied"
                 fit_kwargs["clf__sample_weight"] = sample_weight
 
         self.model.fit(X, y, **fit_kwargs)
@@ -90,7 +94,7 @@ class KNearestNeighbors(SklearnClassifier):
 
 class SupportVectorMachine(SklearnClassifier):
     def __init__(self, random_state: int | None = None, **kwargs: object) -> None:
-        kwargs.setdefault("probability", True)
+        kwargs["probability"] = False
         if random_state is not None:
             kwargs["random_state"] = random_state
         super().__init__(SVC, **kwargs)

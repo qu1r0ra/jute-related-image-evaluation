@@ -175,18 +175,21 @@ def fit_identity(
     recipe: Recipe,
     manifests: dict[str, str],
     upstream_sha256: str | None,
+    environment: dict[str, Any] | None = None,
 ) -> str:
     """Digest of everything that makes two runs of ``fit`` interchangeable.
 
-    Covers the fit, the recipe, the manifests it reads, and the exact bytes of the
-    source checkpoint it starts from, so a changed manifest, config or upstream
-    checkpoint never matches an earlier receipt.
+    Covers the fit, the recipe, the manifests it reads, the exact bytes of the
+    source checkpoint it starts from, and run choices outside the recipe such as
+    the initialization, so a changed manifest, config or upstream checkpoint
+    never matches an earlier receipt.
     """
     payload = {
         "fit": asdict(fit),
         "recipe": asdict(recipe),
         "manifests": manifests,
         "upstream_sha256": upstream_sha256,
+        "environment": environment or {},
     }
     text = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(text.encode()).hexdigest()

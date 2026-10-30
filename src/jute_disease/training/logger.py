@@ -1,28 +1,13 @@
 import logging
 import os
-import shutil
 import sys
 from logging import Logger
 from pathlib import Path
+from typing import Any
 
-import wandb
-from dotenv import load_dotenv
-
-
-def flatten_log_version(log_dir: Path, target_name: str) -> None:
-    """Takes the latest parameter's `version_*` folder and flattens
-    its metrics out.
-    """
-    if not log_dir.exists():
-        return
-    versions = sorted([d for d in log_dir.glob("version_*") if d.is_dir()])
-    if not versions:
-        return
-    latest_version = versions[-1]
-    metrics_file = latest_version / "metrics.csv"
-    if metrics_file.exists():
-        shutil.move(str(metrics_file), str(log_dir / target_name))
-    shutil.rmtree(str(latest_version))
+WANDB_MODES = ("off", "offline", "online")
+METRICS_DIR = "metrics"
+METRICS_FILE = "metrics.csv"
 
 
 def setup_logging(level: int = logging.INFO) -> None:
@@ -48,13 +33,61 @@ def get_logger(name: str, level: int = logging.INFO) -> "Logger":
     return logging.getLogger(name)
 
 
-def setup_wandb() -> None:
-    """Load environment variables and login to WandB."""
-    load_dotenv()
-    api_key = os.getenv("WANDB_API_KEY")
-    if api_key:
-        wandb.login(key=api_key)
-    elif os.getenv("WANDB_MODE") in ["disabled", "offline"]:
-        pass
-    else:
-        wandb.login()
+def resolve_wandb_mode(requested: str | None) -> str:
+    """Decide how W&B may run, without touching the network.
+
+    W&B is optional. Only an explicit ``online`` request with a credential in the
+    environment goes online; everything else records locally or not at all, and
+    ``WANDB_MODE=disabled`` always wins.
+
+    Raises:
+        ValueError: ``requested`` is not off, offline, online or None.
+    """
+    if requested is not None and requested not in WANDB_MODES:
+        raise ValueError(f"Unknown wandb mode {requested!r}; use one of {WANDB_MODES}")
+    if requested == "off" or os.getenv("WANDB_MODE") == "disabled":
+        return "off"
+    if requested == "online" and os.getenv("WANDB_API_KEY"):
+        return "online"
+    return "offline"
+
+
+def experiment_loggers(
+    attempt_dir: Path | str,
+    *,
+    wandb_mode: str | None = None,
+    project: str = "jute-disease",
+    name: str = "run",
+) -> tuple[list[Any], str]:
+    """Loggers for one attempt, with a fixed layout and no version folders.
+
+    Metrics always land in ``<attempt>/metrics/version_0/metrics.csv``. A W&B
+    logger is added unless the resolved mode is ``off``. W&B is optional, so a
+    service that cannot start is reported as ``unavailable`` and never fails the
+    run.
+
+    Returns:
+        The loggers and the W&B status: ``off``, ``offline``, ``online`` or
+        ``unavailable``.
+    """
+    from lightning.pytorch.loggers import CSVLogger
+
+    attempt_dir = Path(attempt_dir)
+    loggers: list[Any] = [CSVLogger(attempt_dir, name=METRICS_DIR, version=0)]
+    mode = resolve_wandb_mode(wandb_mode)
+    if mode == "off":
+        return loggers, mode
+    from lightning.pytorch.loggers import WandbLogger
+
+    try:
+        remote = WandbLogger(
+            name=name,
+            project=project,
+            save_dir=str(attempt_dir),
+            offline=mode == "offline",
+            log_model=False,
+        )
+        _ = remote.experiment  # starts the W&B service, which may be unavailable
+    except Exception:
+        return loggers, "unavailable"
+    return [*loggers, remote], mode

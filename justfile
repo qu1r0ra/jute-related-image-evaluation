@@ -29,46 +29,22 @@ freeze-source name root *args:
 synthetic:
     uv run jute-disease data synthetic
 
-# Pretraining on external data
+# Training: the queue runs every declared fit; resume by running it again
 
-pretrain *args:
-    uv run jute-disease train pretrain {{args}}
+# Verify the measured CUDA stack
+stack *args:
+    uv run jute-disease stack {{args}}
 
-# Classical ML
+# Show stages and each fit's run state
+queue-plan *args:
+    uv run jute-disease queue plan {{args}}
 
-train-ml:
-    uv run jute-disease train ml --all
+queue-status *args:
+    uv run jute-disease queue status {{args}}
 
-test-ml classifier="rf" feature="crafted":
-    uv run jute-disease evaluate ml --classifier {{classifier}} --feature_type {{feature}}
-
-# Deep learning
-
-train-dl:
-    uv run jute-disease train baselines
-
-train-dl-single model="mobilenet_v2":
-    uv run jute-disease train baselines --config configs/historical/baselines/{{model}}.yaml
-
-train-dl-check:
-    uv run jute-disease train dl fit --config configs/historical/baselines/mobilenet_v2.yaml --trainer.fast_dev_run=True
-
-train-cv folds="5":
-    uv run jute-disease train cv configs/historical/baselines/mobilenet_v2.yaml --folds {{folds}}
-
-train-dl-512:
-    uv run jute-disease train dl fit --config configs/historical/experiments/mobilenet_v2_512.yaml
-
-# Grid search
-
-grid-search:
-    uv run jute-disease train grid configs/historical/grid/mobilenet_v2_grid.yaml
-
-grid-search-check:
-    uv run jute-disease train grid configs/historical/grid/mobilenet_v2_grid.yaml --fast-dev-run
-
-grid-search-finetune:
-    uv run jute-disease train grid configs/historical/grid/mobilenet_v2_finetune_grid.yaml --base-config configs/historical/baselines/mobilenet_v2.yaml
+# Run or resume the benchmark: just queue-run --cutoff 2026-10-31T14:00 --cutoff-record "<note>"
+queue-run *args:
+    uv run jute-disease queue run {{args}}
 
 # Aggregation
 
@@ -98,4 +74,4 @@ clean:
     rm -rf .coverage htmlcov lightning_logs wandb .pytest_cache .ruff_cache
 
 clean-artifacts:
-    rm -rf artifacts/ml_models artifacts/checkpoints artifacts/features
+    rm -rf artifacts/runs artifacts/features

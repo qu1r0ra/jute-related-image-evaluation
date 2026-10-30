@@ -8,24 +8,29 @@ import argparse
 import json
 import sys
 from collections.abc import Callable, Sequence
+from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
-from lightning.pytorch.cli import LightningCLI
 
 from jute_disease.config import (
     ARTIFACTS_DIR,
+    BENCHMARK_CONFIG,
     CURATION_RULES_PATH,
     DEFAULT_SEED,
     FREEZE_DIR,
     IDENTITY_REVIEWS_PATH,
+    ML_FEATURES_DIR,
+    PLANTDOC_DIR,
+    PLANTVILLAGE_DIR,
+    RUNS_DIR,
     SOURCE_INVENTORY_DIR,
 )
 from jute_disease.data import (
     DEFAULT_BUDGET_SECONDS,
     DEFAULT_MAX_BYTES,
     SOURCES,
-    DataModule,
+    TARGET_DIR,
     FreezeBlockedError,
     SourceMismatchError,
     download_plant_doc,
@@ -35,17 +40,27 @@ from jute_disease.data import (
     make_synthetic_data,
     probe_cache,
 )
-from jute_disease.models.dl.classifier import Classifier
-from jute_disease.models.ml import FEATURE_EXTRACTORS, ML_CLASSIFIERS
 from jute_disease.reporting.tables import aggregate_metrics
-from jute_disease.training import pretrain_main
-from jute_disease.training.baselines import CONFIGS_DIR, run_all_dl
-from jute_disease.training.cross_validation import run_cross_validation
+from jute_disease.training import (
+    WORKSPACE_FILE,
+    Cutoff,
+    DataInputs,
+    Job,
+    QueueReport,
+    RunStore,
+    SystemClock,
+    Workspace,
+    build_plan,
+    make_executor,
+    make_identity,
+    make_probe,
+    open_workspace,
+    run_job,
+    run_queue,
+    subprocess_launcher,
+    verify_stack,
+)
 from jute_disease.training.engines.ml.predict import predict_ml
-from jute_disease.training.engines.ml.sweep import run_all_ml
-from jute_disease.training.engines.ml.test import test_ml
-from jute_disease.training.engines.ml.train import train_ml
-from jute_disease.training.grid_search import run_grid_search
 
 Handler = Callable[[argparse.Namespace], None]
 
@@ -118,50 +133,148 @@ def _freeze_source(args: argparse.Namespace) -> None:
     _print_json(result)
 
 
-def _train_dl(lightning_args: list[str]) -> None:
-    load_dotenv()
-    LightningCLI(
-        model_class=Classifier,
-        datamodule_class=DataModule,
-        save_config_kwargs={"overwrite": True},
-        args=lightning_args,
+def _workspace_from(args: argparse.Namespace) -> Workspace:
+    freeze: Path = args.freeze_dir
+    roots = {"plantvillage": args.plantvillage_root, "plantdoc": args.plantdoc_root}
+    return open_workspace(
+        benchmark_path=args.benchmark,
+        data=DataInputs(
+            image_root=args.image_root,
+            target_dir=freeze / TARGET_DIR,
+            sources={
+                name: (freeze / f"source_{name}", root) for name, root in roots.items()
+            },
+        ),
+        runs_dir=args.runs_dir,
+        cache_dir=args.cache_dir,
+        pretrained=args.pretrained,
+        require_cuda=not args.allow_cpu,
+        accelerator=args.accelerator,
+        wandb_mode=args.wandb,
     )
 
 
-def _train_ml(args: argparse.Namespace) -> None:
-    if args.all:
-        run_all_ml(args.classifiers, args.feature_types, balanced=args.balanced)
-    else:
-        train_ml(
-            classifier=args.classifier,
-            feature_type=args.feature_type,
-            balanced=args.balanced,
-            seed=args.seed,
-        )
+def _train_fit(args: argparse.Namespace) -> None:
+    load_dotenv()
+    job = Job(
+        args.fit_id,
+        args.attempt_dir,
+        args.result,
+        args.upstream_checkpoint,
+        args.bounds,
+    )
+    run_job(Workspace.load(args.workspace), job)
 
 
-def _train_baselines(args: argparse.Namespace) -> None:
-    run_all_dl(configs_dir=args.configs_dir, config_file=args.config)
+def _stack(args: argparse.Namespace) -> None:
+    _print_json(verify_stack(require_cuda=not args.allow_cpu))
 
 
-def _train_cv(args: argparse.Namespace) -> None:
-    run_cross_validation(args.config, args.folds)
+def _queue_plan(args: argparse.Namespace) -> None:
+    workspace = _workspace_from(args)
+    store = RunStore(workspace.runs_dir)
+    _print_json(
+        [
+            {
+                "stage": stage.name,
+                "mandatory": stage.mandatory,
+                "fits": [
+                    {"fit": fit.fit_id, "state": store.state(fit.fit_id).value}
+                    for fit in stage.fits
+                ],
+            }
+            for stage in build_plan(workspace.benchmark)
+        ]
+    )
 
 
-def _train_grid(args: argparse.Namespace) -> None:
-    run_grid_search(args.grid_config, args.base_config, args.fast_dev_run)
+def _queue_status(args: argparse.Namespace) -> None:
+    workspace = _workspace_from(args)
+    store = RunStore(workspace.runs_dir)
+    _print_json(
+        {
+            fit.fit_id: {
+                "state": store.state(fit.fit_id).value,
+                "reason": store.reason(fit.fit_id),
+            }
+            for fit in workspace.benchmark.fits()
+        }
+    )
+
+
+def _queue_run(args: argparse.Namespace) -> None:
+    load_dotenv()
+    workspace = _workspace_from(args)
+    workspace_file = workspace.runs_dir / WORKSPACE_FILE
+    workspace.save(workspace_file)
+    store = RunStore(workspace.runs_dir)
+    launcher = subprocess_launcher(workspace_file)
+    identity = make_identity(workspace, store)
+    report: QueueReport = run_queue(
+        workspace.benchmark,
+        store,
+        clock=SystemClock(),
+        cutoff=Cutoff(args.cutoff, args.cutoff_basis, args.cutoff_record),
+        execute=make_executor(workspace, store, identity, launcher),
+        probe=make_probe(workspace, launcher),
+        identity_for=identity,
+        report_path=workspace.runs_dir / "queue.json",
+    )
+    _print_json(
+        {
+            "outcomes": {k: v.value for k, v in report.outcomes.items()},
+            "arms": report.arms,
+            "escalations": report.escalations,
+        }
+    )
+    if report.escalations:
+        raise SystemExit("queue finished with escalations; see queue.json")
 
 
 def _evaluate_aggregate(args: argparse.Namespace) -> None:
     aggregate_metrics(args.exp_names, args.output)
 
 
-def _evaluate_ml(args: argparse.Namespace) -> None:
-    test_ml(
-        classifier=args.classifier,
-        feature_type=args.feature_type,
-        seed=args.seed,
+def _bounds(text: str) -> tuple[int, int]:
+    try:
+        train, val = (int(part) for part in text.split(","))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("use TRAIN,VAL batch counts") from error
+    if train < 1 or val < 1:
+        raise argparse.ArgumentTypeError("batch counts must be positive")
+    return train, val
+
+
+def _local_time(text: str) -> datetime:
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "use an ISO local time such as 2026-10-31T14:00"
+        ) from error
+
+
+def _add_workspace_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--benchmark", type=Path, default=BENCHMARK_CONFIG)
+    parser.add_argument("--freeze-dir", type=Path, default=FREEZE_DIR)
+    parser.add_argument("--image-root", type=Path, default=SOURCE_INVENTORY_DIR)
+    parser.add_argument("--plantvillage-root", type=Path, default=PLANTVILLAGE_DIR)
+    parser.add_argument("--plantdoc-root", type=Path, default=PLANTDOC_DIR)
+    parser.add_argument("--runs-dir", type=Path, default=RUNS_DIR)
+    parser.add_argument("--cache-dir", type=Path, default=ML_FEATURES_DIR)
+    parser.add_argument("--accelerator", default="auto")
+    parser.add_argument(
+        "--allow-cpu",
+        action="store_true",
+        help="Do not require CUDA (fixtures and smoke runs only).",
     )
+    parser.add_argument(
+        "--pretrained",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Load the declared timm initialization (off for fixtures).",
+    )
+    parser.add_argument("--wandb", choices=("off", "offline", "online"), default="off")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -187,85 +300,66 @@ def build_parser() -> argparse.ArgumentParser:
     synthetic.add_argument("--size", type=int, default=64)
     synthetic.set_defaults(run=_data_synthetic)
 
-    # train: model training and experiment matrices
-    train = commands.add_parser("train", help="Train models and run experiments.")
+    # train: the one fit command the queue launches as a child process
+    train = commands.add_parser("train", help="Run one benchmark fit.")
     train_actions = train.add_subparsers(
         dest="train_action", metavar="ACTION", required=True
     )
-    # Forwarded commands: main() passes their arguments through unparsed.
-    train_actions.add_parser(
-        "dl", help="Lightning CLI for DL (e.g. dl fit --config ...)."
+    fit = train_actions.add_parser(
+        "fit", help="Run one declared fit; the queue launches this as a child."
     )
+    fit.add_argument("--workspace", type=Path, required=True)
+    fit.add_argument("--fit-id", required=True)
+    fit.add_argument("--attempt-dir", type=Path, required=True)
+    fit.add_argument("--result", type=Path, required=True)
+    fit.add_argument("--upstream-checkpoint", type=Path, default=None)
+    fit.add_argument(
+        "--bounds",
+        type=_bounds,
+        default=None,
+        help="TRAIN,VAL batch limits for a timing probe or smoke run.",
+    )
+    fit.set_defaults(run=_train_fit)
 
-    ml = train_actions.add_parser(
-        "ml", help="Train one classical model, or every combination with --all."
-    )
-    ml.add_argument("--all", action="store_true", help="Run every combination.")
-    ml.add_argument(
-        "--classifier",
-        default="rf",
-        choices=list(ML_CLASSIFIERS),
-        help="Classifier to train (single run).",
-    )
-    ml.add_argument(
-        "--feature_type",
-        default="crafted",
-        choices=list(FEATURE_EXTRACTORS),
-        help="Feature type to extract (single run).",
-    )
-    ml.add_argument(
-        "--classifiers",
-        nargs="+",
-        default=list(ML_CLASSIFIERS),
-        choices=list(ML_CLASSIFIERS),
-        help="Classifiers for --all.",
-    )
-    ml.add_argument(
-        "--feature-types",
-        nargs="+",
-        default=list(FEATURE_EXTRACTORS),
-        choices=list(FEATURE_EXTRACTORS),
-        help="Feature types for --all.",
-    )
-    ml.add_argument(
-        "--balanced",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Use balanced sample weights.",
-    )
-    ml.add_argument("--seed", type=int, default=DEFAULT_SEED)
-    ml.set_defaults(run=_train_ml)
+    stack = commands.add_parser("stack", help="Verify the measured CUDA stack.")
+    stack.add_argument("--allow-cpu", action="store_true")
+    stack.set_defaults(run=_stack)
 
-    baselines = train_actions.add_parser(
-        "baselines", help="Run every DL baseline config (fit, then test)."
+    # queue: the resumable, deadline-aware run of the whole benchmark
+    queue = commands.add_parser("queue", help="Plan, run and inspect the queue.")
+    queue_actions = queue.add_subparsers(
+        dest="queue_action", metavar="ACTION", required=True
     )
-    baselines.add_argument("--configs-dir", type=Path, default=CONFIGS_DIR)
-    baselines.add_argument(
-        "--config", type=Path, default=None, help="Run a single baseline config."
+    plan = queue_actions.add_parser("plan", help="Show stages and current run states.")
+    _add_workspace_options(plan)
+    plan.set_defaults(run=_queue_plan)
+    status = queue_actions.add_parser("status", help="Show every fit's state.")
+    _add_workspace_options(status)
+    status.set_defaults(run=_queue_status)
+    run = queue_actions.add_parser(
+        "run", help="Run or resume the benchmark before the cutoff."
     )
-    baselines.set_defaults(run=_train_baselines)
+    _add_workspace_options(run)
+    run.add_argument(
+        "--cutoff",
+        type=_local_time,
+        required=True,
+        help="Hard stop as an ISO local time; the queue reserves 8 h before it.",
+    )
+    run.add_argument(
+        "--cutoff-basis",
+        choices=("verified", "owner-operational"),
+        default="owner-operational",
+    )
+    run.add_argument(
+        "--cutoff-record",
+        required=True,
+        help="Where the cutoff comes from (a note, message or announcement).",
+    )
+    run.set_defaults(run=_queue_run)
 
-    cv = train_actions.add_parser("cv", help="K-fold cross-validation for one config.")
-    cv.add_argument("config", type=Path)
-    cv.add_argument(
-        "--folds", type=int, default=None, help="Overrides k_fold in the config."
-    )
-    cv.set_defaults(run=_train_cv)
-
-    grid = train_actions.add_parser("grid", help="Run a DL grid search.")
-    grid.add_argument("grid_config", help="Grid search YAML.")
-    grid.add_argument(
-        "--base-config", default=None, help="Base model YAML (default: match name)."
-    )
-    grid.add_argument(
-        "--fast-dev-run", action="store_true", help="One batch per stage."
-    )
-    grid.set_defaults(run=_train_grid)
-
-    train_actions.add_parser("pretrain", help="Domain pretraining (forwarded).")
-
-    # evaluate: aggregation, classical test evaluation and inference
-    evaluate = commands.add_parser("evaluate", help="Aggregate, evaluate and predict.")
+    # evaluate: aggregation and inference
+    evaluate = commands.add_parser("evaluate", help="Aggregate and predict.")
     evaluate.set_defaults(run=_planned("evaluate", "#721"))
     evaluate_actions = evaluate.add_subparsers(dest="evaluate_action", metavar="ACTION")
     aggregate = evaluate_actions.add_parser(
@@ -281,24 +375,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output CSV path.",
     )
     aggregate.set_defaults(run=_evaluate_aggregate)
-
-    evaluate_ml = evaluate_actions.add_parser(
-        "ml", help="Test one trained classical model."
-    )
-    evaluate_ml.add_argument("--classifier", default="rf", choices=list(ML_CLASSIFIERS))
-    evaluate_ml.add_argument(
-        "--feature_type", default="crafted", choices=list(FEATURE_EXTRACTORS)
-    )
-    evaluate_ml.add_argument("--seed", type=int, default=DEFAULT_SEED)
-    evaluate_ml.set_defaults(run=_evaluate_ml)
-
     evaluate_actions.add_parser("predict", help="Classify one image (forwarded).")
 
     # planned commands owned by open tickets
     _add_freeze(commands)
-    commands.add_parser(
-        "queue", help="Run the resumable training queue (planned)."
-    ).set_defaults(run=_planned("queue", "#720"))
     commands.add_parser(
         "profile", help="Profile inference on the desktop (planned)."
     ).set_defaults(run=_planned("profile", "#721"))
@@ -359,13 +439,8 @@ def _add_freeze(commands: "argparse._SubParsersAction") -> None:
 
 def main(argv: Sequence[str] | None = None) -> None:
     tokens = list(sys.argv[1:] if argv is None else argv)
-    head = tuple(tokens[:2])
-    # These commands own their argument parsing, so their arguments bypass argparse.
-    if head == ("train", "dl"):
-        _train_dl(tokens[2:])
-    elif head == ("train", "pretrain"):
-        pretrain_main(tokens[2:])
-    elif head == ("evaluate", "predict"):
+    # predict owns its argument parsing, so its arguments bypass argparse.
+    if tuple(tokens[:2]) == ("evaluate", "predict"):
         predict_ml(tokens[2:])
     else:
         args = build_parser().parse_args(tokens)

@@ -53,11 +53,10 @@ A high-level overview of the repository organization:
 
 ```text
 .
-├── configs/
-│   └── historical/     # Lightning CLI and grid search configs for the reported runs
+├── configs/            # benchmark.json (recipe, systems, queue limits) and data rules
 ├── data/               # Dataset storage (git-ignored) and the tracked class list
 ├── docs/               # Architecture notes and the submitted paper
-├── notebooks/
+├── notebooks/          # Local training notebooks and the freeze provenance demo
 │   └── historical/     # Notebooks and Jupytext pairs as run for the paper
 ├── results/
 │   └── submitted/      # Committed logs and figures behind the reported numbers
@@ -68,7 +67,7 @@ A high-level overview of the repository organization:
 ├── tests/              # Unit and API tests
 ├── .env.example        # Environment variables template
 ├── justfile            # Task runner: one recipe per study command
-└── artifacts/          # Runtime output (git-ignored): checkpoints, features, logs
+└── artifacts/          # Runtime output (git-ignored): run receipts, features, smoke receipts
 ```
 
 For a detailed look at the internal design, public APIs, and architectural decisions, see [architecture.md](docs/architecture.md).
@@ -142,7 +141,7 @@ Run through the Jupyter notebooks in `notebooks/historical/` in numerical order.
 > [!NOTE]
 > The notebooks were run on Google Colab (CPU for classical ML, L4 GPU for deep learning), and the Colab badges at the top of each notebook open them there. To run locally, select the **`.venv`** in the project root as your Jupyter kernel and skip the Drive-mounting cells. Each notebook is paired with a `.py` file through Jupytext (`just sync-nb`).
 
-Alternatively, `just` drives the same experiments from the command line (see `just --list`): `just train-dl`, `just grid-search`, `just grid-search-finetune`, `just train-dl-512`, and `just train-ml`. Experiment logs behind the reported deep learning numbers are committed under `results/submitted/logs/`.
+The commands in the next section are the maintained route. Experiment logs behind the reported deep learning numbers are committed under `results/submitted/logs/`.
 
 ## 5. Training from Scratch
 
@@ -161,27 +160,27 @@ To retrain the models from the command line instead of the notebooks:
 
    The freeze writes `artifacts/freeze/target/` (manifest plus a receipt that hashes every input). Training reads partitions only through that manifest, and a directory without its receipt is never treated as a completed freeze. The target candidate audit and its unresolved human-review limitation are recorded in [`results/corrected/identity-audit.md`](results/corrected/identity-audit.md).
 
-3. Point experiment tracking at your own W&B account. The configs log to the `grade-descent` entity, so either edit `entity` in the `WandbLogger` block of the files under `configs/historical/`, or run offline with `WANDB_MODE=offline`.
-4. Smoke-test the pipeline, then train:
+3. Verify the stack. Training needs the locked environment with a CUDA build of PyTorch; the check reports the measured versions and device and fails when CUDA is missing:
 
    ```bash
-   just train-dl-check                 # one-batch fast_dev_run (MobileNetV2)
-   just train-dl                       # all six deep learning baselines
-   just train-dl-single mobilenet_v2   # one baseline by config name
-   just train-ml                       # handcrafted features + classical ML
+   just stack                          # add --allow-cpu to skip the CUDA requirement
    ```
 
-5. Reproduce the MobileNetV2 tuning in the paper (phase 1: transfer-learning/dropout; phase 2: learning rate and weight decay) and the 512 px experiment:
+4. Plan and run the benchmark. One command trains every declared fit in order, enforces the time limits, and resumes where it stopped:
 
    ```bash
-   just grid-search
-   just grid-search-finetune
-   just train-dl-512
+   just queue-plan                     # stages and each fit's run state
+   just queue-run --cutoff 2026-10-31T14:00 --cutoff-record "<where the cutoff comes from>"
+   just queue-status                   # state and reason per fit
    ```
 
-Deep learning runs can also be driven directly through the Lightning CLI, for example `uv run jute-disease train dl fit --config configs/historical/baselines/mobilenet_v2.yaml`. On Windows without a C++ compiler, `torch.compile` fails; add `--model.compile_model=false` to that command.
+   The queue runs the six direct CNN fits, then the eleven classical fits, then the PlantVillage and PlantDoc stages. It runs one heavy fit at a time, each in its own process. It starts an optional stage only when a conservative forecast leaves at least eight hours before the cutoff and every seed can finish. A mandatory shortfall is recorded as an escalation rather than a smaller scope. `--cutoff-basis` is `owner-operational` by default; pass `verified` only when the deadline has been confirmed.
 
-Checkpoints are written to `artifacts/checkpoints/` and CSV logs to `artifacts/logs/`. Source intake checks the package version and inventory SHA-256 against tracked PlantDoc and PlantVillage pins, then checks target overlap and records its source manifest. The owner authorized both downloaded packages for internal research use in this project. Their intake reports retain the unresolved publisher-identity and terms caveats; this approval does not establish a publisher or license, and it does not authorize redistribution. At execution, the loader rechecks the tracked source pin, owner-use readiness, intake lineage, target manifest and retained training/validation bytes. Training on a GPU is recommended for the deep learning runs; the classical ML pipeline runs on CPU.
+   Every fit is one `jute-disease train fit` child, so the per-model, per-resolution and check variants are configuration in [`configs/benchmark.json`](configs/benchmark.json), not separate commands. Two notebooks, [`notebooks/train_classical.ipynb`](notebooks/train_classical.ipynb) and [`notebooks/train_cnn.ipynb`](notebooks/train_cnn.ipynb), run bounded checks of the same children.
+
+5. Optional: experiment tracking. W&B is off by default. Set `--wandb offline` or `--wandb online` on `queue run` to log; an unreachable service is recorded in the receipt and never stops training.
+
+Each fit writes an atomic receipt under `artifacts/runs/<fit id>/` with its identity, results, the callback-selected checkpoint (best validation loss, patience 8, at most 50 epochs) and artifact hashes. A rerun skips a fit only when its receipt is complete and its identity (recipe, manifests, upstream checkpoint, initialization) still matches. Neither training nor the queue opens test images or writes test predictions. Source intake checks the package version and inventory SHA-256 against tracked PlantDoc and PlantVillage pins, then checks target overlap and records its source manifest. The owner authorized both downloaded packages for internal research use in this project. Their intake reports retain the unresolved publisher-identity and terms caveats; this approval does not establish a publisher or license, and it does not authorize redistribution. At execution, the loader rechecks the tracked source pin, owner-use readiness, intake lineage, target manifest and retained training/validation bytes. Training on a GPU is recommended for the deep learning runs; the classical ML pipeline runs on CPU.
 
 ## 6. Benchmarked Performance
 

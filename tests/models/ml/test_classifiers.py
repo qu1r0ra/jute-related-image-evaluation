@@ -39,10 +39,7 @@ def test_classifier_fit_predict(cls: Any, xy: tuple[np.ndarray, np.ndarray]) -> 
     assert set(preds).issubset({0, 1})
 
 
-@pytest.mark.parametrize(
-    "cls",
-    [LogisticRegression, RandomForest, SupportVectorMachine, GaussianNaiveBayes],
-)
+@pytest.mark.parametrize("cls", [LogisticRegression, RandomForest, GaussianNaiveBayes])
 def test_classifier_predict_proba(cls: Any, xy: tuple[np.ndarray, np.ndarray]) -> None:
     X, y = xy
     model = cls()
@@ -71,13 +68,46 @@ def test_knn_ignores_sample_weight(
     assert "does not support sample_weight" in caplog.text
 
 
-def test_svm_has_probability_by_default(xy: tuple[np.ndarray, np.ndarray]) -> None:
-    """SVM must have probability=True so predict_proba works without explicit config."""
+def test_svm_is_never_calibrated(xy: tuple[np.ndarray, np.ndarray]) -> None:
+    """The fixed SVC has no Platt calibration: no internal CV, no probabilities."""
     X, y = xy
     model = SupportVectorMachine()
     model.fit(X, y)
-    proba = model.predict_proba(X)
-    assert proba.shape[1] == 2
+    assert model.model.named_steps["clf"].probability is False
+    with pytest.raises(AttributeError):
+        model.predict_proba(X)
+
+
+def test_weighting_is_recorded_as_applied_or_unsupported(
+    xy: tuple[np.ndarray, np.ndarray],
+) -> None:
+    X, y = xy
+    weights = np.ones(30)
+    for cls in (
+        LogisticRegression,
+        RandomForest,
+        SupportVectorMachine,
+        GaussianNaiveBayes,
+    ):
+        model = cls()
+        model.fit(X, y, sample_weight=weights)
+        assert model.weighting == "applied"
+    knn = KNearestNeighbors(n_neighbors=3)
+    knn.fit(X, y, sample_weight=weights)
+    assert knn.weighting == "unsupported"
+    plain = LogisticRegression()
+    plain.fit(X, y)
+    assert plain.weighting == "none"
+
+
+def test_scaler_is_fit_on_training_rows_only(xy: tuple[np.ndarray, np.ndarray]) -> None:
+    X, y = xy
+    model = LogisticRegression()
+    model.fit(X, y)
+    scaler = model.model.named_steps["scaler"]
+    assert np.allclose(scaler.mean_, X.mean(axis=0))
+    model.predict(X * 100)
+    assert np.allclose(scaler.mean_, X.mean(axis=0))
 
 
 def test_classifiers_with_sample_weight(xy: tuple[np.ndarray, np.ndarray]) -> None:
