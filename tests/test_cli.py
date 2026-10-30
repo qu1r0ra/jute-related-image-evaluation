@@ -21,6 +21,9 @@ RESOLVABLE_COMMANDS = [
     ["evaluate", "aggregate", "--exp-names", "a"],
     ["evaluate", "ml", "--classifier", "rf"],
     ["freeze", "target"],
+    ["queue", "plan", "--config", "queue.json"],
+    ["queue", "run", "--plan", "plan.json", "--config", "queue.json", "--admit"],
+    ["queue", "check", "--config", "queue.json", "--now", "2026-10-30T12:00:00+00:00"],
     ["freeze", "cache", "--budget-seconds", "5"],
     [
         "freeze",
@@ -35,7 +38,6 @@ RESOLVABLE_COMMANDS = [
 ]
 
 PLANNED_COMMANDS = [
-    (["queue"], "#720"),
     (["profile"], "#721"),
     (["evaluate"], "#721"),
 ]

@@ -19,6 +19,7 @@ from jute_disease.config import (
     DEFAULT_SEED,
     FREEZE_DIR,
     IDENTITY_REVIEWS_PATH,
+    ML_MODELS_DIR,
     SOURCE_INVENTORY_DIR,
 )
 from jute_disease.data import (
@@ -46,6 +47,16 @@ from jute_disease.training.engines.ml.sweep import run_all_ml
 from jute_disease.training.engines.ml.train import train_ml
 from jute_disease.training.grid_search import run_grid_search
 from jute_disease.training.partitions import HELD_OUT_SUBCOMMANDS
+from jute_disease.training.queue import (
+    QUEUE_DIR,
+    RECIPES_DIR,
+    QueueEscalationError,
+    QueueNotAdmittedError,
+    build_plan,
+    plan_from_json,
+    plan_to_json,
+    run_queue,
+)
 
 Handler = Callable[[argparse.Namespace], None]
 
@@ -78,6 +89,40 @@ def _queue_check(args: argparse.Namespace) -> None:
         config = json.loads(args.config.read_text(encoding="utf-8"))
         _print_json(check_deadline(config, args.now))
     except (OSError, ValueError) as error:
+        raise SystemExit(f"queue blocked: {error}") from error
+
+
+def _queue_plan(args: argparse.Namespace) -> None:
+    """Write the stage plan; planning never starts or admits a run."""
+    try:
+        config = json.loads(args.config.read_text(encoding="utf-8"))
+        plan = build_plan(
+            config,
+            args.seed,
+            recipes_dir=args.recipes_dir,
+            state_dir=args.state_dir,
+        )
+    except (OSError, ValueError) as error:
+        raise SystemExit(f"queue blocked: {error}") from error
+    payload = plan_to_json(plan, args.seed)
+    if args.output is None:
+        _print_json(payload)
+    else:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        sys.stdout.write(f"Wrote {len(plan)} planned stages to {args.output}\n")
+
+
+def _queue_run(args: argparse.Namespace) -> None:
+    try:
+        config = json.loads(args.config.read_text(encoding="utf-8"))
+        plan = plan_from_json(json.loads(args.plan.read_text(encoding="utf-8")))
+        _print_json(run_queue(plan, args.state_dir, config, admit=args.admit))
+    except QueueNotAdmittedError as error:
+        raise SystemExit(f"queue not admitted: {error}; pass --admit") from error
+    except QueueEscalationError as error:
+        raise SystemExit(f"queue escalation: {error}") from error
+    except (OSError, ValueError, KeyError) as error:
         raise SystemExit(f"queue blocked: {error}") from error
 
 
@@ -150,6 +195,7 @@ def _train_ml(args: argparse.Namespace) -> None:
             feature_type=args.feature_type,
             balanced=args.balanced,
             seed=args.seed,
+            output_dir=args.output_dir,
         )
 
 
@@ -239,6 +285,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use balanced sample weights.",
     )
     ml.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    ml.add_argument(
+        "--output-dir", type=Path, default=ML_MODELS_DIR, help="Model directory."
+    )
     ml.set_defaults(run=_train_ml)
 
     baselines = train_actions.add_parser(
@@ -301,9 +350,31 @@ def build_parser() -> argparse.ArgumentParser:
 
     # planned commands owned by open tickets
     _add_freeze(commands)
-    queue = commands.add_parser("queue", help="Inspect the training queue deadline.")
-    queue.set_defaults(run=_planned("queue", "#720"))
-    queue_actions = queue.add_subparsers(dest="queue_action")
+    queue = commands.add_parser(
+        "queue", help="Plan, check and run the resumable training queue."
+    )
+    queue_actions = queue.add_subparsers(
+        dest="queue_action", metavar="ACTION", required=True
+    )
+    plan = queue_actions.add_parser(
+        "plan", help="Write the ordered stage plan; starts nothing."
+    )
+    plan.add_argument("--config", type=Path, required=True)
+    plan.add_argument("--recipes-dir", type=Path, default=RECIPES_DIR)
+    plan.add_argument("--state-dir", type=Path, default=QUEUE_DIR)
+    plan.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    plan.add_argument("--output", type=Path, default=None)
+    plan.set_defaults(run=_queue_plan)
+    run = queue_actions.add_parser(
+        "run", help="Run or resume a plan; requires an explicit --admit."
+    )
+    run.add_argument("--plan", type=Path, required=True)
+    run.add_argument("--config", type=Path, required=True)
+    run.add_argument("--state-dir", type=Path, default=QUEUE_DIR)
+    run.add_argument(
+        "--admit", action="store_true", help="Admit the run; never implied."
+    )
+    run.set_defaults(run=_queue_run)
     check = queue_actions.add_parser(
         "check", help="Check a simulated deadline forecast."
     )

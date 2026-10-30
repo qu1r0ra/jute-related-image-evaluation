@@ -7,6 +7,7 @@ from lightning.pytorch import Trainer
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint, TQDMProgressBar
 from lightning.pytorch.loggers import WandbLogger
 
+from jute_disease.config import DEFAULT_SEED
 from jute_disease.data import (
     FreezeBlockedError,
     SourceMismatchError,
@@ -30,7 +31,7 @@ def train_pretext_task(
     batch_size: int = 32,
     lr: float = 0.001,
     model_name: str = "mobilenetv2_100",
-    seed: int = 42,
+    seed: int = DEFAULT_SEED,
 ) -> None:
     """
     Trains a given timm backbone on a dataset and saves the checkpoint.
@@ -139,6 +140,7 @@ def main(argv: list[str] | None = None) -> None:
             "PlantVillage ckpt)"
         ),
     )
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=32)
 
@@ -176,6 +178,7 @@ def main(argv: list[str] | None = None) -> None:
             epochs=args.epochs,
             batch_size=args.batch_size,
             model_name=args.model_name,
+            seed=args.seed,
         )
     except (FreezeBlockedError, SourceMismatchError, FileNotFoundError) as error:
         parser.error(f"Source pretraining blocked: {error}")

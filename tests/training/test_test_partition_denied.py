@@ -53,7 +53,9 @@ def opened_partitions(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     opened: list[str] = []
     original = data_readers.ManifestDataset.__init__
 
-    def spy(self: object, manifest: object, partition: str, *args: object, **kw: object):
+    def spy(
+        self: object, manifest: object, partition: str, *args: object, **kw: object
+    ):
         opened.append(partition)
         original(self, manifest, partition, *args, **kw)  # type: ignore[arg-type]
 

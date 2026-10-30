@@ -161,8 +161,14 @@ def test_training_api() -> None:
         SPLITS,
     )
     from jute_disease.training import (
+        QueueEscalationError,
+        QueueNotAdmittedError,
+        Stage,
+        build_plan,
+        check_deadline,
         get_logger,
         pretrain_main,
+        run_queue,
         seed_everything,
         setup_wandb,
         source_data_module,
@@ -177,6 +183,12 @@ def test_training_api() -> None:
     assert isinstance(DEFAULT_SEED, int)
     assert isinstance(SPLITS, dict)
     assert get_logger is not None
+    assert issubclass(QueueEscalationError, RuntimeError)
+    assert issubclass(QueueNotAdmittedError, RuntimeError)
+    assert Stage is not None
+    assert build_plan is not None
+    assert check_deadline is not None
+    assert run_queue is not None
     assert pretrain_main is not None
     assert seed_everything is not None
     assert setup_wandb is not None
