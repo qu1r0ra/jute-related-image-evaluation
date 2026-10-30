@@ -1,0 +1,35 @@
+# Corrected-path recipe (#717). Optimizer, scheduler, early-stopping and compile
+# values live in configs/corrected/training.yaml, which `train dl` merges in
+# before this file. Run through `jute-disease train dl fit --config <this file>`.
+seed_everything: 42
+trainer:
+  accelerator: auto
+  devices: 1
+  precision: 16-mixed
+  max_epochs: 50
+  accumulate_grad_batches: 1
+  log_every_n_steps: 25
+  logger:
+    class_path: lightning.pytorch.loggers.CSVLogger
+    init_args:
+      save_dir: artifacts/logs/corrected
+      name: plantdoc-target
+
+model:
+  num_classes: 6
+  freeze_backbone: false
+  feature_extractor:
+    class_path: jute_disease.models.dl.backbone.TimmBackbone
+    init_args:
+      model_name: mobilenetv2_100.ra_in1k
+      pretrained: true
+      strict_checkpoint: true
+
+data:
+  manifest_dir: artifacts/freeze/target
+  image_root: data/recovered_original_split/ml_split
+  batch_size: 32
+  num_workers: 0
+  use_weighted_sampler: true
+  k_fold: 1
+  image_size: 256

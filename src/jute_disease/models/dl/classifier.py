@@ -18,6 +18,8 @@ class Classifier(LightningModule):
         weight_decay: float = DEFAULT_WEIGHT_DECAY,
         freeze_backbone: bool = True,
         compile_model: bool = True,
+        scheduler_patience: int = 3,
+        scheduler_factor: float = 0.1,
     ) -> None:
         super().__init__()
         if not hasattr(feature_extractor, "out_features"):
@@ -159,7 +161,11 @@ class Classifier(LightningModule):
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
-                "scheduler": ReduceLROnPlateau(optimizer, patience=3),
+                "scheduler": ReduceLROnPlateau(
+                    optimizer,
+                    patience=self.hparams.scheduler_patience,
+                    factor=self.hparams.scheduler_factor,
+                ),
                 "monitor": "val_loss",
                 "frequency": 1,
                 "interval": "epoch",

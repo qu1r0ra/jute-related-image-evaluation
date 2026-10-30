@@ -1,0 +1,35 @@
+# Training values shared by every corrected CNN fit and by source pretraining.
+#
+# PLACEHOLDERS: the owner has not approved any value below as final. Change a
+# value here and nowhere else; no code and no test keeps a copy of it. Every
+# entry names its source on the comment line directly above it.
+model:
+  # Source: #717 frozen recipe, AdamW learning rate. Placeholder, not owner-approved.
+  lr: 0.0003
+  # Source: #717 frozen recipe, AdamW weight decay. Placeholder, not owner-approved.
+  weight_decay: 0.01
+  # Source: #717 frozen recipe, ReduceLROnPlateau patience in epochs. Placeholder, not owner-approved.
+  scheduler_patience: 3
+  # Source: #717 frozen recipe, ReduceLROnPlateau factor. Placeholder, not owner-approved.
+  scheduler_factor: 0.1
+  # Source: #717 frozen recipe and #720 spec, model compilation off. Placeholder, not owner-approved.
+  compile_model: false
+trainer:
+  callbacks:
+    # Source: #717 frozen recipe, keep the lowest-val-loss checkpoint. Placeholder, not owner-approved.
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        monitor: val_loss
+        mode: min
+        save_top_k: 1
+        filename: "best-{epoch:02d}-{val_loss:.4f}"
+    # Early stopping on validation loss, as in the #717 frozen recipe.
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val_loss
+        mode: min
+        # Source: #717 frozen recipe, early-stopping patience in epochs. Placeholder, not owner-approved.
+        patience: 8
+    - class_path: lightning.pytorch.callbacks.TQDMProgressBar
+      init_args:
+        refresh_rate: 50

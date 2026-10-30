@@ -7,6 +7,12 @@ from jute_disease.training.queue import (
     check_deadline,
     run_queue,
 )
+from jute_disease.training.recipe import (
+    TRAINING_CONFIG,
+    TrainingValues,
+    load_training_values,
+    with_training_config,
+)
 from jute_disease.training.seed import seed_everything
 from jute_disease.training.source import source_data_module
 
@@ -19,16 +25,20 @@ def pretrain_main(argv: list[str] | None = None) -> None:
 
 
 __all__ = [
+    "TRAINING_CONFIG",
     "QueueEscalationError",
     "QueueNotAdmittedError",
     "Stage",
+    "TrainingValues",
     "build_plan",
     "check_deadline",
     "flatten_log_version",
     "get_logger",
+    "load_training_values",
     "pretrain_main",
     "run_queue",
     "seed_everything",
     "setup_wandb",
     "source_data_module",
+    "with_training_config",
 ]
