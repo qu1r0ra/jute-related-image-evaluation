@@ -64,7 +64,7 @@
     "classical_fit_seconds": 1800,
     "classical_aggregate_seconds": 18000,
     "shared_preparation_seconds": 1800,
-    "reserve_hours": 8,
+    "reserve_hours": 2,
     "forecast_margin": 1.25
   }
 }

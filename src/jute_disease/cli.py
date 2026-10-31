@@ -344,7 +344,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--cutoff",
         type=_local_time,
         required=True,
-        help="Hard stop as an ISO local time; the queue reserves 8 h before it.",
+        help="Hard stop as an ISO local time; the queue reserves 2 h before it.",
     )
     run.add_argument(
         "--cutoff-basis",

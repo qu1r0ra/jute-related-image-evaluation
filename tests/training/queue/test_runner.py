@@ -158,7 +158,7 @@ def test_unverified_cutoff_runs_nothing(harness: Harness) -> None:
     assert harness.calls == []
 
 
-def test_runs_core_then_classical_then_plantvillage_then_plantdoc(
+def test_runs_core_then_classical_then_plantdoc_then_plantvillage_fallback(
     harness: Harness,
 ) -> None:
     _known_timings(harness)
@@ -175,12 +175,15 @@ def test_runs_core_then_classical_then_plantvillage_then_plantdoc(
         for x in ("raw", "crafted")
     ]
     assert ids[17] == "source/plantvillage"
-    assert ids[18:21] == [
+    assert ids[18] == "source/plantdoc"
+    assert ids[19:22] == [
+        f"cnn/mobilenet_v2_plantvillage_plantdoc/seed-{s}" for s in (42, 1337, 7)
+    ]
+    assert ids[22:25] == [
         f"cnn/mobilenet_v2_plantvillage/seed-{s}" for s in (42, 1337, 7)
     ]
-    assert ids[21] == "source/plantdoc"
     assert len(ids) == 25
-    assert report.arms == {"plantvillage": "complete", "plantdoc": "complete"}
+    assert report.arms == {"plantdoc": "complete", "plantvillage": "complete"}
     assert harness.overlapped is False
 
 
@@ -224,7 +227,7 @@ def test_interrupted_queue_resumes_without_repeating_completed_fits(
 def test_mandatory_shortfall_escalates_before_any_work(harness: Harness) -> None:
     _known_timings(harness, hours=2.0)
     with pytest.raises(MandatoryShortfallError):
-        harness.run(8 + 5)
+        harness.run(2 + 5)
     assert harness.calls == []
 
 
@@ -232,7 +235,7 @@ def test_mandatory_shortfall_after_a_slow_fit_stops_the_queue(harness: Harness) 
     _known_timings(harness)
     harness.actual_hours = lambda fit: 2.0 if fit.fit_id.endswith("seed-42") else 0.5
     with pytest.raises(MandatoryShortfallError):
-        harness.run(20)
+        harness.run(14)
     assert harness.calls == ["cnn/mobilenet_v2_direct/seed-42"]
     report = json.loads((harness.store.root / "queue.json").read_text("utf-8"))
     assert report["escalations"]
@@ -242,7 +245,7 @@ def test_cnn_child_is_bounded_by_the_finalization_reservation(harness: Harness) 
     _known_timings(harness)
     harness.actual_hours = lambda fit: 100.0
     with pytest.raises(MandatoryShortfallError):
-        harness.run(20)
+        harness.run(14)
     assert harness.timeouts["cnn/mobilenet_v2_direct/seed-42"] == 12 * HOUR
     assert harness.clock.now() == START + timedelta(hours=12)
     assert harness.store.state("cnn/mobilenet_v2_direct/seed-42") is RunState.TIMED_OUT
@@ -250,25 +253,70 @@ def test_cnn_child_is_bounded_by_the_finalization_reservation(harness: Harness) 
     assert any("Mandatory" in note for note in saved["escalations"])
 
 
-def test_plantdoc_is_dropped_first_when_only_plantvillage_fits(
+def test_plantdoc_runs_before_plantvillage_target_fallback(
     harness: Harness,
 ) -> None:
     _known_timings(harness, hours=1.0)
-    # mandatory 6 + prepare 0.5 + 10 * 0.5 classical cap, then pv 4, pd 4.
+    # Mandatory work is followed by the PV prerequisite and PD arm, but not
+    # enough time for the three PV target fits.
     mandatory = 6 * 1.0 + 0.5 + 10 * 0.5
-    report = harness.run(8 + mandatory + 4 + 1)
-    assert report.arms["plantvillage"] == "complete"
-    assert report.arms["plantdoc"] == "omitted"
-    assert "source/plantdoc" not in harness.calls
-    assert harness.store.state("source/plantdoc") is RunState.OMITTED
+    report = harness.run(2 + mandatory + 4 + 1)
+    assert report.arms["plantdoc"] == "complete"
+    assert report.arms["plantvillage"] == "omitted"
+    assert "source/plantdoc" in harness.calls
+    assert harness.store.state("source/plantdoc") is RunState.COMPLETED
+    assert not any(
+        fit_id.startswith("cnn/mobilenet_v2_plantvillage/seed-")
+        for fit_id in harness.calls
+    )
 
 
 def test_both_optional_arms_are_omitted_when_neither_fits(harness: Harness) -> None:
     _known_timings(harness, hours=1.0)
     mandatory = 6 * 1.0 + 0.5 + 10 * 0.5
-    report = harness.run(8 + mandatory + 1)
+    report = harness.run(2 + mandatory + 0.5)
     assert report.arms == {"plantvillage": "omitted", "plantdoc": "omitted"}
     assert "source/plantvillage" not in harness.calls
+
+
+def test_shared_source_is_not_trained_when_neither_downstream_path_fits(
+    harness: Harness,
+) -> None:
+    _known_timings(harness, hours=1.0)
+    # The PV checkpoint alone (1 h) fits, but PV + PV arm (4 h) and PV + PD
+    # path (5 h) do not, so training it would only leave an orphan checkpoint.
+    mandatory = 6 * 1.0 + 0.5 + 10 * 0.5
+    report = harness.run(2 + mandatory + 3.5)
+    assert "source/plantvillage" not in harness.calls
+    assert report.arms == {"plantvillage": "omitted", "plantdoc": "omitted"}
+    saved = json.loads((harness.store.root / "queue.json").read_text("utf-8"))
+    source_decision = next(
+        d for d in saved["decisions"] if d["stage"] == "plantvillage_source"
+    )
+    assert source_decision["admitted"] is False
+    assert source_decision["path"] is None
+    assert source_decision["paths"]["plantdoc"]["admitted"] is False
+    assert source_decision["paths"]["plantvillage"]["admitted"] is False
+
+
+def test_shared_source_falls_back_to_the_plantvillage_path_when_plantdoc_does_not_fit(
+    harness: Harness,
+) -> None:
+    _known_timings(harness, hours=1.0)
+    # 4.5 h admits PV + PV arm (4 h) but not PV + PD path (5 h).
+    mandatory = 6 * 1.0 + 0.5 + 10 * 0.5
+    report = harness.run(2 + mandatory + 4.5)
+    assert "source/plantvillage" in harness.calls
+    assert "source/plantdoc" not in harness.calls
+    assert report.arms == {"plantvillage": "complete", "plantdoc": "omitted"}
+    saved = json.loads((harness.store.root / "queue.json").read_text("utf-8"))
+    source_decision = next(
+        d for d in saved["decisions"] if d["stage"] == "plantvillage_source"
+    )
+    assert source_decision["admitted"] is True
+    assert source_decision["path"] == "plantvillage"
+    assert source_decision["paths"]["plantdoc"]["admitted"] is False
+    assert source_decision["paths"]["plantvillage"]["admitted"] is True
 
 
 def test_overrun_stops_the_arm_and_it_does_not_count_as_complete(
@@ -279,7 +327,7 @@ def test_overrun_stops_the_arm_and_it_does_not_count_as_complete(
         9.0 if fit.fit_id == "cnn/mobilenet_v2_plantvillage/seed-42" else 1.0
     )
     mandatory = 6 * 1.0 + 0.5 + 10 * 0.5
-    report = harness.run(8 + mandatory + 8 + 4 + 0.5)
+    report = harness.run(2 + mandatory + 1 + 4 + 9 + 0.5)
     assert report.arms["plantvillage"] == "incomplete"
     assert harness.store.state("cnn/mobilenet_v2_plantvillage/seed-42") is (
         RunState.COMPLETED
@@ -287,7 +335,7 @@ def test_overrun_stops_the_arm_and_it_does_not_count_as_complete(
     assert harness.store.state("cnn/mobilenet_v2_plantvillage/seed-1337") is (
         RunState.OMITTED
     )
-    assert report.arms["plantdoc"] == "omitted"
+    assert report.arms["plantdoc"] == "complete"
 
 
 def test_unknown_timing_is_probed_once_before_admission(harness: Harness) -> None:
@@ -353,7 +401,7 @@ def test_optional_probe_that_crosses_the_reserve_omits_remaining_work(
         return original_probe(fit, timeout)
 
     harness.probe = probe  # type: ignore[method-assign]
-    report = harness.run(20)
+    report = harness.run(14)
     assert report.arms == {"plantvillage": "omitted", "plantdoc": "omitted"}
     assert "source/plantvillage" not in harness.calls
 
@@ -363,7 +411,7 @@ def test_classical_fits_run_under_the_per_fit_limit(harness: Harness) -> None:
     harness.run(500)
     assert harness.timeouts["classical/prepare"] == 1800
     assert harness.timeouts["classical/rf-raw"] == 1800
-    assert harness.timeouts["cnn/mobilenet_v2_direct/seed-42"] == (500 - 8) * HOUR
+    assert harness.timeouts["cnn/mobilenet_v2_direct/seed-42"] == (500 - 2) * HOUR
 
 
 def test_timed_out_classical_fit_is_preserved_not_counted(harness: Harness) -> None:
@@ -472,10 +520,11 @@ def test_report_is_written_and_records_the_cutoff_and_decisions(
     harness: Harness,
 ) -> None:
     _known_timings(harness)
-    harness.run(8 + 6 + 0.5 + 5 + 4 + 1)
+    harness.run(2 + 6 + 0.5 + 5 + 4 + 1)
     saved = json.loads((harness.store.root / "queue.json").read_text("utf-8"))
     assert saved["cutoff"]["basis"] == "owner-operational"
-    assert saved["arms"]["plantdoc"] == "omitted"
+    assert saved["arms"] == {"plantdoc": "complete", "plantvillage": "omitted"}
     stages = {d["stage"]: d["admitted"] for d in saved["decisions"]}
-    assert stages["plantvillage"] is True
-    assert stages["plantdoc"] is False
+    assert stages["plantvillage_source"] is True
+    assert stages["plantdoc"] is True
+    assert stages["plantvillage"] is False

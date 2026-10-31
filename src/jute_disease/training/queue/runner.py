@@ -350,9 +350,80 @@ class _Queue:
             self.check_mandatory()
             self.process(fit, True, "", mandatory=True)
 
+    def lookahead(self, stage: Stage) -> dict[str, Any] | None:
+        """Forecast a stage that feeds later arms before it is admitted.
+
+        A shared checkpoint is only worth training if one complete path through
+        it fits: the checkpoint plus a downstream stage, tried in plan order.
+        Returns None when no later stage depends on this one. Only timings,
+        deadlines and manifests are read; no validation or test metric is.
+        """
+        produced = {fit.fit_id for fit in stage.fits}
+        position = self.plan.index(stage)
+        paths = {
+            later.name: (*stage.fits, *later.fits)
+            for later in self.plan[position + 1 :]
+            if not later.mandatory
+            and any(fit.upstream in produced for fit in later.fits)
+        }
+        if not paths:
+            return None
+        results: dict[str, dict[str, Any]] = {}
+        chosen: str | None = None
+        for name, path_fits in paths.items():
+            try:
+                upper = self.remaining_upper(path_fits)
+            except Exception as error:  # a probe that cannot time the path
+                results[name] = {
+                    "admitted": False,
+                    "upper_seconds": None,
+                    "reason": f"timing probe failed: {error}",
+                }
+                continue
+            now = self.clock.now()
+            if now >= self.cutoff.at - self.reserve:
+                results[name] = {
+                    "admitted": False,
+                    "upper_seconds": upper,
+                    "reason": "finalization reservation reached",
+                }
+                continue
+            decision = admit_optional(
+                now, self.cutoff, self.reserve, 0.0, (OptionalChain(name, upper),)
+            )
+            admitted = bool(decision.admitted)
+            results[name] = {
+                "admitted": admitted,
+                "upper_seconds": upper,
+                "reason": ""
+                if admitted
+                else decision.omitted.get(name, "not admitted"),
+            }
+            if admitted:
+                chosen = name
+                break
+        return {"path": chosen, "paths": results}
+
     def run_optional(self, stage: Stage) -> None:
         fits = stage.fits
         allowed, reason, first = True, "", True
+        extra: dict[str, Any] = {}
+        lookahead = self.lookahead(stage)
+        if lookahead is not None:
+            extra = {"path": lookahead["path"], "paths": lookahead["paths"]}
+            if lookahead["path"] is None:
+                allowed = False
+                reason = "no downstream path fits before the finalization reservation"
+                self.report.decisions.append(
+                    {
+                        "stage": stage.name,
+                        "at": self.clock.now().isoformat(),
+                        "admitted": False,
+                        "reason": reason,
+                        **extra,
+                    }
+                )
+                self.save()
         for index, fit in enumerate(fits):
             if allowed:
                 rest = fits[index:]
@@ -397,6 +468,7 @@ class _Queue:
                                 "upper_seconds": upper,
                                 "reason": reason,
                                 "slack_seconds": slack,
+                                **extra,
                             }
                         )
                         self.save()
@@ -413,8 +485,10 @@ class _Queue:
                 self.run_optional(stage)
         for stage in self.plan:
             if not stage.mandatory:
-                states = [self.report.outcomes[fit.fit_id] for fit in stage.fits]
-                self.report.arms[stage.name] = _arm_status(states)
+                target_fits = [fit for fit in stage.fits if fit.kind is FitKind.TARGET]
+                if target_fits:
+                    states = [self.report.outcomes[fit.fit_id] for fit in target_fits]
+                    self.report.arms[stage.name] = _arm_status(states)
         self.save()
         return self.report
 

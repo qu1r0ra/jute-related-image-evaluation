@@ -174,7 +174,7 @@ To retrain the models from the command line instead of the notebooks:
    just queue-status                   # state and reason per fit
    ```
 
-   The queue runs the six direct CNN fits, then the eleven classical fits, then the PlantVillage and PlantDoc stages. It runs one heavy fit at a time, each in its own process. It starts an optional stage only when a conservative forecast leaves at least eight hours before the cutoff and every seed can finish. A mandatory shortfall is recorded as an escalation rather than a smaller scope. `--cutoff-basis` is `owner-operational` by default; pass `verified` only when the deadline has been confirmed.
+   The queue runs the six direct CNN fits, then the eleven classical fits, then the shared PlantVillage source checkpoint. It next attempts the PlantDoc source chain and target fits, followed by the PlantVillage-only target fits as the fallback. It runs one heavy fit at a time, each in its own process. It starts an optional stage only when a conservative forecast leaves at least two hours before the cutoff and every fit in that stage can finish. The shared PlantVillage checkpoint starts only when it fits with the PlantDoc path or, failing that, with the PlantVillage-only fallback; otherwise neither downstream arm starts. A mandatory shortfall is recorded as an escalation rather than a smaller scope. `--cutoff-basis` is `owner-operational` by default; pass `verified` only when the deadline has been confirmed.
 
    Keep `queue.json` with the run directory when resuming: it records cumulative classical fitting time. An interrupted classical attempt is conservatively charged its reserved limit. A previous run with classical attempts but no budget record is blocked until its accounting is resolved.
 

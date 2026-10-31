@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Protocol
 
-MIN_RESERVE = timedelta(hours=8)
+MIN_RESERVE = timedelta(hours=2)
 CUTOFF_BASES = frozenset({"verified", "owner-operational"})
 
 
@@ -100,11 +100,11 @@ def admit_optional(
     dropped first. A chain whose ``requires`` chain is not admitted is dropped too.
 
     Raises:
-        ValueError: ``reserve`` is under the eight-hour minimum.
+        ValueError: ``reserve`` is under the two-hour minimum.
         MandatoryShortfallError: mandatory work alone does not fit.
     """
     if reserve < MIN_RESERVE:
-        raise ValueError("The finalization reservation must be at least 8 hours")
+        raise ValueError("The finalization reservation must be at least 2 hours")
     budget = (cutoff.at - reserve - now).total_seconds()
     shortfall = mandatory_upper - budget
     if shortfall > 0:

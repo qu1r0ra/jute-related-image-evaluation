@@ -34,7 +34,7 @@ Each subpackage in `src/jute_disease/` (e.g., `models.ml`, `data`, `training`, `
 The project exposes a single console entry point, `jute-disease` (`jute_disease.cli:main`), and a `justfile` whose recipes each wrap one of its commands:
 
 - **`jute-disease train fit`**: Runs one declared fit (classical preparation, a classical estimator, a source stage or a target CNN) in the current process. The queue launches it as a child, so a crash or timeout ends only that fit.
-- **`jute-disease queue plan|status|run`**: Plans stages, shows run states, and runs or resumes the whole benchmark under a cutoff. It is the only path that enforces stage order, the eight-hour reserve and the time limits.
+- **`jute-disease queue plan|status|run`**: Plans stages, shows run states, and runs or resumes the whole benchmark under a cutoff. It is the only path that enforces stage order, the two-hour reserve and the time limits.
 - **`jute-disease stack`**: Reports the measured library versions and CUDA device, and fails when CUDA is required and unavailable.
 - **Other commands**: `data` (download, synthetic), `freeze` (target, cache, source), and `evaluate` (aggregate, predict). `jute-disease --help` lists them all.
 - Commands planned in open issues (`profile`, and `evaluate` on its own) exit non-zero and name the issue that owns them.
@@ -50,7 +50,7 @@ The DL pipeline is built using **PyTorch Lightning** for state-of-the-art reprod
 - **Recipe** (`configs/benchmark.json`): AdamW at 3e-4 with weight decay 0.01, reduce-on-plateau on validation loss, at most 50 epochs with patience-8 early stopping, 256 px inputs, a weighted sampler, mixed precision on CUDA, and compilation off. The full backbone trains, and the checkpoint is the lowest validation loss.
 - **Systems**: MobileNetV2 and EfficientNet-B5 trained directly, plus MobileNetV2 chained through PlantVillage and through PlantVillage then PlantDoc. A source stage trains once and its checkpoint is reused by every seed. A chained stage keeps the backbone, resets the head and the training state, and records which tensors moved.
 - **Run receipts** (`training/receipts.py`): each fit writes an atomic state and a receipt that hashes its artifacts. Resume skips a fit only when the receipt verifies and its identity (recipe, manifests, upstream checkpoint, initialization) matches, so a partial or incompatible output is never reused.
-- **Queue** (`training/queue/`): builds the stage plan, forecasts each stage conservatively from a bounded timing probe, admits optional stages only with the reserve left and all three seeds fitting, and records any mandatory shortfall as an escalation.
+- **Queue** (`training/queue/`): builds the stage plan, forecasts each stage conservatively from a bounded timing probe, admits optional stages only with the reserve left and all three seeds fitting, and trains a shared source checkpoint only when a full downstream path through it fits, and records any mandatory shortfall as an escalation.
 
 ### 4. Machine Learning Framework (Scikit-learn Adapters)
 

@@ -60,6 +60,10 @@ def test_twelve_target_fits_across_four_systems_and_three_seeds(benchmark) -> No
         assert {f.seed for f in targets if f.system == system} == {42, 1337, 7}
 
 
+def test_queue_reserve_defaults_to_two_hours(benchmark) -> None:
+    assert benchmark.limits.reserve_hours == 2
+
+
 def test_initialization_recipes_and_batching(benchmark) -> None:
     by_id = {f.fit_id: f for f in benchmark.fits()}
     mobile = by_id["cnn/mobilenet_v2_direct/seed-42"]
@@ -92,19 +96,29 @@ def test_one_shared_source_chain_feeds_both_domain_arms(benchmark) -> None:
         assert by_id[f"cnn/mobilenet_v2_direct/seed-{seed}"].upstream is None
 
 
-def test_plan_order_is_core_classical_plantvillage_then_plantdoc(benchmark) -> None:
+def test_plan_orders_plantdoc_before_the_plantvillage_fallback(benchmark) -> None:
     plan = build_plan(benchmark)
-    assert [s.name for s in plan] == ["core", "classical", "plantvillage", "plantdoc"]
-    assert [s.mandatory for s in plan] == [True, True, False, False]
-    core, classical, pv, pd = plan
+    assert [s.name for s in plan] == [
+        "core",
+        "classical",
+        "plantvillage_source",
+        "plantdoc",
+        "plantvillage",
+    ]
+    assert [s.mandatory for s in plan] == [True, True, False, False, False]
+    core, classical, pv_source, pd, pv = plan
     assert [f.system for f in core.fits] == (
         ["mobilenet_v2_direct"] * 3 + ["efficientnet_b5_direct"] * 3
     )
     assert classical.fits[0].kind is FitKind.PREPARE
     assert len(classical.fits) == 11
-    assert [f.fit_id for f in pv.fits][0] == "source/plantvillage"
+    assert [f.fit_id for f in pv_source.fits] == ["source/plantvillage"]
     assert [f.fit_id for f in pd.fits][0] == "source/plantdoc"
-    assert len(pv.fits) == len(pd.fits) == 4
+    assert len(pv_source.fits) == 1
+    assert len(pd.fits) == 4
+    assert [f.fit_id for f in pv.fits] == [
+        f"cnn/mobilenet_v2_plantvillage/seed-{seed}" for seed in (42, 1337, 7)
+    ]
 
 
 def test_every_declared_fit_is_in_exactly_one_stage(benchmark) -> None:
