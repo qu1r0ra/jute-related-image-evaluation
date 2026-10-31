@@ -17,7 +17,35 @@ shift 2
 [[ $seconds =~ ^[1-9][0-9]*$ ]] || { echo 'Timeout must be positive' >&2; exit 2; }
 [[ $# -gt 0 ]] || { echo 'Missing command' >&2; exit 2; }
 command -v flock >/dev/null || { echo 'flock is required' >&2; exit 127; }
-command -v timeout >/dev/null || { echo 'GNU timeout is required' >&2; exit 127; }
+command -v setsid >/dev/null || { echo 'setsid is required' >&2; exit 127; }
 exec 9>"$lock"
 flock -n 9 || exit 75
-exec timeout --signal=TERM --kill-after=5 "$seconds" "$@"
+
+setsid "$@" &
+command_pid=$!
+timed_out=0
+trap 'timed_out=1' USR1
+
+setsid bash -c '
+    sleep "$1"
+    kill -USR1 "$2" 2>/dev/null || true
+    kill -TERM -- "-$3" 2>/dev/null || true
+    sleep 5
+    kill -KILL -- "-$3" 2>/dev/null || true
+' bash "$seconds" "$BASHPID" "$command_pid" &
+timer_pid=$!
+
+if wait "$command_pid"; then
+    command_status=0
+else
+    command_status=$?
+fi
+
+if ((timed_out)); then
+    wait "$timer_pid" || true
+    exit 124
+fi
+
+kill -TERM -- "-$timer_pid" 2>/dev/null || true
+wait "$timer_pid" 2>/dev/null || true
+exit "$command_status"
