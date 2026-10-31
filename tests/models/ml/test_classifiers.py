@@ -71,13 +71,22 @@ def test_knn_ignores_sample_weight(
     assert "does not support sample_weight" in caplog.text
 
 
-def test_svm_has_probability_by_default(xy: tuple[np.ndarray, np.ndarray]) -> None:
-    """SVM must have probability=True so predict_proba works without explicit config."""
+def test_svm_uses_calibrated_probabilities(xy: tuple[np.ndarray, np.ndarray]) -> None:
+    """SVM exposes calibrated probabilities through scikit-learn's supported API."""
+    from sklearn.calibration import CalibratedClassifierCV
+
     X, y = xy
     model = SupportVectorMachine()
+    assert isinstance(model.model.named_steps["clf"], CalibratedClassifierCV)
+    assert model.model.named_steps["clf"].ensemble is False
     model.fit(X, y)
     proba = model.predict_proba(X)
     assert proba.shape[1] == 2
+
+
+def test_svm_rejects_disabling_probabilities() -> None:
+    with pytest.raises(ValueError, match="always exposes calibrated probabilities"):
+        SupportVectorMachine(probability=False)
 
 
 def test_classifiers_with_sample_weight(xy: tuple[np.ndarray, np.ndarray]) -> None:

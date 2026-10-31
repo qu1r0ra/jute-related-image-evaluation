@@ -15,7 +15,7 @@ class MockEstimator(BaseEstimator, ClassifierMixin):
 
     def fit(
         self, X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None
-    ) -> "MockEstimator":
+    ) -> MockEstimator:
         self.sample_weight_passed = sample_weight
         self.classes_ = np.unique(y)
         return self

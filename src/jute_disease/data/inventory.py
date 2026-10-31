@@ -51,7 +51,7 @@ class InventoryRecord:
         return data
 
     @classmethod
-    def from_json(cls, data: dict) -> "InventoryRecord":
+    def from_json(cls, data: dict) -> InventoryRecord:
         """Rebuild a record from :meth:`to_json` output."""
         return cls(
             **{**data, "phash": tuple(int(value, 16) for value in data["phash"])}

@@ -15,14 +15,14 @@ from jute_disease.data.cache import (
     downsize,
     is_cache_complete,
 )
-from jute_disease.data.manifest import Manifest, write_manifest
+from jute_disease.data.manifest import Manifest, load_manifest, write_manifest
 from jute_disease.data.readers import ManifestDataset, open_partition
 from jute_disease.data.sampling import balanced_sampler, loader_generator
 from jute_disease.data.synthetic import SyntheticPlan
 from jute_disease.data.transforms import PreprocessingSpec
 
 
-def _cache(frozen: Manifest, plan: SyntheticPlan, tmp_path: Path, **kwargs):
+def _cache(frozen: Manifest, plan: SyntheticPlan, tmp_path: Path, **kwargs) -> object:
     return build_image_cache(
         frozen, plan.root, tmp_path / "cache", PreprocessingSpec(), workers=2, **kwargs
     )
@@ -132,6 +132,23 @@ def test_open_partition_requires_a_completed_freeze(
         "train", manifest_dir=tmp_path / "freeze", image_root=synthetic.root
     )
     assert len(dataset) == len(frozen.partition("train"))
+
+
+def test_version_one_freezes_remain_readable_and_keep_their_digest(
+    frozen: Manifest, tmp_path: Path
+) -> None:
+    legacy_data = frozen.to_json()
+    legacy_data["version"] = 1
+    for entry in legacy_data["entries"]:
+        entry.pop("pad_fraction")
+    legacy = Manifest.from_json(legacy_data)
+    directory = tmp_path / "legacy-freeze"
+    write_manifest(legacy, directory)
+
+    restored = load_manifest(directory)
+    assert restored.version == 1
+    assert restored.to_json() == legacy_data
+    assert restored.digest() == legacy.digest()
 
 
 def test_balanced_sampler_repeats_for_a_seed_and_differs_for_another() -> None:

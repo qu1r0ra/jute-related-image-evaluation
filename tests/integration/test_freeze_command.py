@@ -9,6 +9,7 @@ import pytest
 
 from jute_disease.config import CURATION_RULES_PATH
 from jute_disease.data import (
+    PreprocessingSpec,
     inventory_digest,
     load_manifest,
     make_synthetic_data,
@@ -45,7 +46,9 @@ def inputs(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
     }
 
 
-def _freeze(inputs: dict[str, Path], name: str, *extra: str):
+def _freeze(
+    inputs: dict[str, Path], name: str, *extra: str
+) -> tuple[Path, subprocess.CompletedProcess]:
     out = inputs["base"] / name
     result = _run(
         "freeze",
@@ -70,6 +73,7 @@ def test_freeze_command_writes_a_verifiable_receipt(inputs: dict[str, Path]) -> 
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
     manifest = load_manifest(out / "target")
+    manifest_data = json.loads((out / "target" / "manifest.json").read_text())
     receipt = report["receipt"]
     assert receipt["manifest_digest"] == manifest.digest()
     assert receipt["seed"] == 42
@@ -81,6 +85,10 @@ def test_freeze_command_writes_a_verifiable_receipt(inputs: dict[str, Path]) -> 
     assert dependencies["inventory"] == inventory_digest(
         read_inventory(out / "inventory.jsonl")
     )
+    assert dependencies["preprocessing"] == PreprocessingSpec().digest()
+    assert manifest_data["version"] == 2
+    assert all("pad_fraction" in entry for entry in manifest_data["entries"])
+    assert report["pad_fraction_by_source_and_class"]
 
 
 def test_lineage_a_second_process_reproduces_the_same_freeze(

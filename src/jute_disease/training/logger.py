@@ -1,12 +1,11 @@
+import json
 import logging
-import os
 import shutil
 import sys
+import tempfile
 from logging import Logger
 from pathlib import Path
-
-import wandb
-from dotenv import load_dotenv
+from typing import Any
 
 
 def flatten_log_version(log_dir: Path, target_name: str) -> None:
@@ -42,19 +41,43 @@ def setup_logging(level: int = logging.INFO) -> None:
     logging.getLogger("lightning.pytorch").setLevel(logging.WARNING)
 
 
-def get_logger(name: str, level: int = logging.INFO) -> "Logger":
+def get_logger(name: str, level: int = logging.INFO) -> Logger:
     """Get a logger with the specified name and ensure logging is set up."""
     setup_logging(level)
     return logging.getLogger(name)
 
 
-def setup_wandb() -> None:
-    """Load environment variables and login to WandB."""
-    load_dotenv()
-    api_key = os.getenv("WANDB_API_KEY")
-    if api_key:
-        wandb.login(key=api_key)
-    elif os.getenv("WANDB_MODE") in ["disabled", "offline"]:
-        pass
-    else:
-        wandb.login()
+def write_evaluation(
+    name: str,
+    metrics: dict[str, float],
+    targets: object,
+    predictions: object,
+    classes: list[str] | None,
+    config: dict[str, Any],
+    directory: Path | None = None,
+) -> Path:
+    """Write local evaluation evidence atomically, without network access."""
+    from sklearn.metrics import confusion_matrix
+
+    from jute_disease.config import ML_MODELS_DIR
+
+    directory = directory or ML_MODELS_DIR
+    directory.mkdir(parents=True, exist_ok=True)
+    class_names = list(classes) if classes is not None else None
+    labels = list(range(len(class_names))) if class_names else None
+    payload = {
+        "config": config,
+        "metrics": metrics,
+        "classes": class_names,
+        "confusion_matrix": confusion_matrix(
+            targets, predictions, labels=labels
+        ).tolist(),
+    }
+    destination = directory / f"{name}.json"
+    with tempfile.NamedTemporaryFile(
+        mode="w", dir=directory, suffix=".tmp", delete=False, encoding="utf-8"
+    ) as handle:
+        temporary = Path(handle.name)
+        json.dump(payload, handle, indent=2, allow_nan=False)
+    temporary.replace(destination)
+    return destination

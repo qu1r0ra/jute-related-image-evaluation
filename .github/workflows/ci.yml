@@ -6,14 +6,16 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   test:
-    runs-on: ubuntu-latest
-    env:
-      WANDB_MODE: disabled
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        python-version: ["3.11"]
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.14.10"]
 
     steps:
       - uses: actions/checkout@v6
@@ -28,10 +30,38 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --all-groups
+        run: uv sync --locked --all-groups --extra masks
+
+      - name: Verify installed GPU wheel on Windows
+        if: runner.os == 'Windows'
+        run: >-
+          uv run python -c "import torch, torchvision; assert torch.version.cuda == '13.0'; x=torch.ones(8); assert (x @ x).item() == 8; print(torch.__version__, torchvision.__version__)"
+
+      - name: Verify Linux CPU imports
+        if: runner.os == 'Linux'
+        run: uv run python -c "import torch, torchvision, transformers; assert not torch.cuda.is_available(); print(torch.__version__, torchvision.__version__, transformers.__version__)"
+
+      - name: Audit locked dependencies
+        run: uv run --locked python scripts/audit_dependencies.py
 
       - name: Run tests
-        run: uv run pytest
+        run: uv run pytest -m ""
+
+  linux-target-resolution:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+
+      - name: Resolve locked Linux core and mask dependencies
+        run: uv sync --locked --all-groups --extra masks --dry-run
+
+      - name: Check Linux helper syntax
+        run: bash -n scripts/lab_run.sh
 
   lint:
     runs-on: ubuntu-latest
@@ -45,7 +75,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --all-groups
+        run: uv sync --locked --all-groups
 
       - name: Ruff check
         run: uv run ruff check .
@@ -53,10 +83,8 @@ jobs:
       - name: Ruff format
         run: uv run ruff format --check .
 
-  smoke:
+  synthetic-freeze:
     runs-on: ubuntu-latest
-    env:
-      WANDB_MODE: disabled
 
     steps:
       - uses: actions/checkout@v6
@@ -67,7 +95,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --all-groups
+        run: uv sync --locked --all-groups
 
       - name: Build synthetic dataset and freeze manifest
         run: |
@@ -83,17 +111,3 @@ jobs:
           )
           PY
           uv run jute-disease freeze target --image-root artifacts/synthetic --rules artifacts/smoke-curation-rules.json
-
-      - name: Train one batch (fast_dev_run)
-        run: >
-          uv run jute-disease train dl fit
-          --config configs/historical/baselines/mobilenet_v2.yaml
-          --data.data_dir=null
-          --data.manifest_dir=artifacts/freeze/target
-          --data.image_root=artifacts/synthetic
-          --trainer.fast_dev_run=True
-          --trainer.logger=null
-          --trainer.accelerator=cpu
-          --model.feature_extractor.pretrained=false
-          --model.compile_model=false
-          --data.num_workers=0

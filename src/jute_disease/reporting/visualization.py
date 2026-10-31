@@ -26,7 +26,7 @@ def visualize_augmentations(
     num_samples: int = 6,
     num_augmentations: int = 7,
     figsize: tuple[int, int] = (15, 15),
-):
+) -> None:
     fig, axes = plt.subplots(num_samples, num_augmentations + 1, figsize=figsize)
     plt.tight_layout()
 

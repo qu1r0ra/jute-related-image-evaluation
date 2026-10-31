@@ -10,7 +10,6 @@ import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from dotenv import load_dotenv
 from lightning.pytorch.cli import LightningCLI
 
 from jute_disease.config import (
@@ -119,7 +118,6 @@ def _freeze_source(args: argparse.Namespace) -> None:
 
 
 def _train_dl(lightning_args: list[str]) -> None:
-    load_dotenv()
     LightningCLI(
         model_class=Classifier,
         datamodule_class=DataModule,
@@ -306,7 +304,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _add_freeze(commands: "argparse._SubParsersAction") -> None:
+def _add_freeze(commands: argparse._SubParsersAction) -> None:
     freeze = commands.add_parser(
         "freeze", help="Freeze the target dataset, its cache decision and sources."
     )

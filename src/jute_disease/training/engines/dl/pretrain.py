@@ -5,7 +5,7 @@ from shutil import copyfile
 import torch
 from lightning.pytorch import Trainer
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint, TQDMProgressBar
-from lightning.pytorch.loggers import WandbLogger
+from lightning.pytorch.loggers import CSVLogger
 
 from jute_disease.data import (
     FreezeBlockedError,
@@ -63,7 +63,7 @@ def train_pretext_task(
 
     # Trainer
     task_name = Path(output_path).stem
-    logger_wandb = WandbLogger(project="jute-pretraining", name=task_name)
+    csv_logger = CSVLogger(save_dir="artifacts/logs/pretraining", name=task_name)
 
     callbacks = [
         ModelCheckpoint(
@@ -81,7 +81,7 @@ def train_pretext_task(
         max_epochs=epochs,
         accelerator="auto",
         devices="auto",
-        logger=logger_wandb,
+        logger=csv_logger,
         callbacks=callbacks,
         log_every_n_steps=100,
     )

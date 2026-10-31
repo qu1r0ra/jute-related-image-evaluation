@@ -13,5 +13,5 @@ The repository was renamed on 2026-10-31 when the study moved from the original 
 ## Reproducing the original study
 
 - Recorded notebook outputs under `notebooks/historical/` (tracebacks, run logs, W&B run URLs) keep the legacy name because they record what ran.
-- The W&B project was not renamed on the W&B side. Historical runs, W&B links and artifacts such as `svm-champion` stay under the legacy project path until the owner renames that project in W&B. A notebook that queries W&B for those runs needs the legacy project path, or the W&B-side rename first.
+- The W&B project was not renamed on the W&B side. Historical runs, W&B links and artifacts such as `svm-champion` stay under the legacy project path permanently. No W&B-side rename or project creation will happen. Reproduce the original study from tag `submitted-study` and its lockfile.
 - Zenodo record `10.5281/zenodo.23414231` keeps its DOI and its original title and repository link until the next release.

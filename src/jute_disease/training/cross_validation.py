@@ -34,7 +34,6 @@ def run_cross_validation(config: Path, folds: int | None = None) -> None:
             f"--data.fold_index={fold_idx}",
             f"--data.k_fold={folds}",
             f"--trainer.logger.init_args.name={model_name}_fold_{fold_idx}",
-            f"--trainer.logger.init_args.group={model_name}_cv",
             f"--trainer.callbacks.1.init_args.filename={model_name}-fold{fold_idx}-{{epoch:02d}}-{{val_loss:.4f}}",
             "--trainer.callbacks.1.init_args.monitor=val_loss",
             "--trainer.callbacks.1.init_args.mode=min",

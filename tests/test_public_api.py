@@ -1,4 +1,8 @@
-"""Validate the public __init__ API surface for each package."""
+"""Validate package APIs and local artifact output without experiment fits."""
+
+import csv
+import json
+from pathlib import Path
 
 
 def test_root_package_exposes_subpackages() -> None:
@@ -46,6 +50,8 @@ def test_data_api() -> None:
         inventory_digest,
         leaf_constraints,
         leaf_key,
+        letterbox_dimensions,
+        letterbox_pad_fraction,
         load_manifest,
         load_source_manifest,
         observed_counts,
@@ -88,6 +94,8 @@ def test_data_api() -> None:
         freeze_target,
         intake_source,
         inventory_digest,
+        letterbox_dimensions,
+        letterbox_pad_fraction,
         leaf_constraints,
         leaf_key,
         load_source_manifest,
@@ -164,8 +172,8 @@ def test_training_api() -> None:
         get_logger,
         pretrain_main,
         seed_everything,
-        setup_wandb,
         source_data_module,
+        write_evaluation,
     )
 
     assert ROOT_DIR is not None
@@ -179,5 +187,53 @@ def test_training_api() -> None:
     assert get_logger is not None
     assert pretrain_main is not None
     assert seed_everything is not None
-    assert setup_wandb is not None
     assert source_data_module is not None
+    assert write_evaluation is not None
+
+
+def test_pad_fraction_api_reports_letterbox_geometry() -> None:
+    from jute_disease.data import letterbox_dimensions, letterbox_pad_fraction
+
+    assert letterbox_dimensions(400, 200, 64) == (64, 32)
+    assert letterbox_pad_fraction(400, 200, 64) == 0.5
+    assert letterbox_pad_fraction(200, 200, 64) == 0.0
+
+
+def test_local_evaluation_json_records_metrics_settings_and_class_order(
+    tmp_path: Path,
+) -> None:
+    from jute_disease.training import write_evaluation
+
+    destination = write_evaluation(
+        "synthetic-evaluation",
+        {"test_f1": 0.75},
+        [0, 1, 2, 2],
+        [0, 2, 2, 1],
+        ["healthy", "mosaic", "dieback"],
+        {"seed": 42, "split": "synthetic"},
+        tmp_path,
+    )
+
+    record = json.loads(destination.read_text(encoding="utf-8"))
+    assert record["metrics"] == {"test_f1": 0.75}
+    assert record["classes"] == ["healthy", "mosaic", "dieback"]
+    assert record["confusion_matrix"] == [[1, 0, 0], [0, 0, 1], [0, 1, 1]]
+    assert record["config"] == {"seed": 42, "split": "synthetic"}
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_lightning_csv_logger_writes_local_metrics_without_a_fit(
+    tmp_path: Path,
+) -> None:
+    from lightning.pytorch.loggers import CSVLogger
+
+    logger = CSVLogger(save_dir=tmp_path, name="synthetic")
+    logger.log_hyperparams({"seed": 42, "classes": ["healthy", "mosaic"]})
+    logger.log_metrics({"val_macro_f1": 0.75}, step=1)
+    logger.save()
+
+    metrics_path = Path(logger.log_dir) / "metrics.csv"
+    with metrics_path.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows[0]["val_macro_f1"] == "0.75"
+    assert rows[0]["step"] == "1"

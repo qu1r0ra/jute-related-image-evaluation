@@ -88,6 +88,8 @@ from jute_disease.data.transforms import (
     PreprocessingSpec,
     classical_pipeline,
     create_pipeline,
+    letterbox_dimensions,
+    letterbox_pad_fraction,
 )
 
 __all__ = [
@@ -140,6 +142,8 @@ __all__ = [
     "freeze_target",
     "intake_source",
     "inventory_digest",
+    "letterbox_dimensions",
+    "letterbox_pad_fraction",
     "is_cache_complete",
     "leaf_constraints",
     "leaf_key",

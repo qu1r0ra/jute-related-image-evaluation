@@ -22,8 +22,9 @@ from jute_disease.data.identity import (
     reviews_digest,
 )
 from jute_disease.data.inventory import InventoryRecord, inventory_digest
+from jute_disease.data.transforms import letterbox_pad_fraction
 
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
 MANIFEST_FILE = "manifest.json"
 RECEIPT_FILE = "receipt.json"
 PARTITIONS = ("train", "val", "test")
@@ -45,6 +46,39 @@ class ManifestEntry:
     source: str
     width: int
     height: int
+    pad_fraction: float | None = None
+
+    def to_json(self, version: int) -> dict:
+        """Return this entry in the selected manifest schema."""
+        data = vars(self).copy()
+        if version == 1:
+            data.pop("pad_fraction")
+        elif self.pad_fraction is None:
+            raise ValueError("Version 2 manifest entries require pad_fraction")
+        return data
+
+
+def summarize_pad_fractions(
+    entries: tuple[ManifestEntry, ...],
+) -> list[dict[str, int | float | str]]:
+    """Summarize recorded pad fractions by image source and class label."""
+    groups: dict[tuple[str, str], list[float]] = {}
+    for entry in entries:
+        if entry.pad_fraction is not None:
+            groups.setdefault((entry.source, entry.label), []).append(
+                entry.pad_fraction
+            )
+    return [
+        {
+            "source": source,
+            "class": label,
+            "images": len(values),
+            "mean": sum(values) / len(values),
+            "min": min(values),
+            "max": max(values),
+        }
+        for (source, label), values in sorted(groups.items())
+    ]
 
 
 @dataclass(frozen=True)
@@ -59,15 +93,16 @@ class Manifest:
     quarantined: tuple[dict, ...]
     constraints: tuple[tuple[str, str], ...]
     dependencies: tuple[tuple[str, str], ...]
+    version: int = MANIFEST_VERSION
 
     def to_json(self) -> dict:
         """Return the canonical JSON-safe content."""
         return {
-            "version": MANIFEST_VERSION,
+            "version": self.version,
             "seed": self.seed,
             "fractions": dict(self.fractions),
             "dependencies": dict(self.dependencies),
-            "entries": [vars(entry) for entry in self.entries],
+            "entries": [entry.to_json(self.version) for entry in self.entries],
             "excluded": list(self.excluded),
             "merged": list(self.merged),
             "quarantined": list(self.quarantined),
@@ -75,19 +110,30 @@ class Manifest:
         }
 
     @classmethod
-    def from_json(cls, data: dict) -> "Manifest":
+    def from_json(cls, data: dict) -> Manifest:
         """Rebuild a manifest from :meth:`to_json` output."""
-        if data.get("version") != MANIFEST_VERSION:
+        version = data.get("version")
+        if version not in {1, MANIFEST_VERSION}:
             raise ValueError(f"Unsupported manifest version: {data.get('version')!r}")
+        entries = tuple(ManifestEntry(**item) for item in data["entries"])
+        if version == MANIFEST_VERSION:
+            for entry in entries:
+                expected = letterbox_pad_fraction(entry.width, entry.height)
+                if (
+                    entry.pad_fraction is None
+                    or abs(entry.pad_fraction - expected) > 1e-12
+                ):
+                    raise ValueError(f"Invalid pad fraction for image {entry.image_id}")
         return cls(
             seed=data["seed"],
             fractions=tuple(data["fractions"].items()),
-            entries=tuple(ManifestEntry(**item) for item in data["entries"]),
+            entries=entries,
             excluded=tuple(data["excluded"]),
             merged=tuple(data["merged"]),
             quarantined=tuple(data["quarantined"]),
             constraints=tuple(tuple(pair) for pair in data["constraints"]),
             dependencies=tuple(data["dependencies"].items()),
+            version=version,
         )
 
     def digest(self) -> str:
@@ -104,6 +150,10 @@ class Manifest:
         for entry in self.entries:
             table[entry.partition][entry.label] += 1
         return {p: dict(sorted(counts.items())) for p, counts in table.items()}
+
+    def pad_fraction_summary(self) -> list[dict[str, int | float | str]]:
+        """Summarize recorded pad fractions by image source and class label."""
+        return summarize_pad_fractions(self.entries)
 
     def partition(self, name: str) -> tuple[ManifestEntry, ...]:
         """Return the entries of one partition, sorted by image id."""
@@ -292,6 +342,7 @@ def build_manifest(
             source=curation.sources[r.path],
             width=r.width,
             height=r.height,
+            pad_fraction=letterbox_pad_fraction(r.width, r.height),
         )
         for r in resolution.retained
     )
@@ -319,7 +370,7 @@ def build_manifest(
 def receipt_for(manifest: Manifest) -> dict:
     """Return the freeze receipt: hashed dependencies, counts and support."""
     return {
-        "version": MANIFEST_VERSION,
+        "version": manifest.version,
         "manifest_digest": manifest.digest(),
         "partition_digest": manifest.partition_digest(),
         "seed": manifest.seed,

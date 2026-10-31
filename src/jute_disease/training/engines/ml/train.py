@@ -1,10 +1,7 @@
-import os
-
 import numpy as np
 import torch
-import wandb
 
-from jute_disease.config import DEFAULT_SEED, WANDB_ENTITY, WANDB_PROJECT
+from jute_disease.config import DEFAULT_SEED
 from jute_disease.data import classical_pipeline, open_partition
 from jute_disease.evaluation.metrics import EVAL_METRICS, format_metrics
 from jute_disease.models.ml import (
@@ -12,7 +9,7 @@ from jute_disease.models.ml import (
     ML_CLASSIFIERS,
     extract_features,
 )
-from jute_disease.training.logger import get_logger, setup_wandb
+from jute_disease.training.logger import get_logger, write_evaluation
 from jute_disease.training.seed import seed_everything
 
 logger = get_logger(__name__)
@@ -25,21 +22,6 @@ def train_ml(
     seed: int = DEFAULT_SEED,
 ) -> None:
     seed_everything(seed)
-
-    if os.getenv("WANDB_MODE") != "disabled":
-        setup_wandb()
-
-        wandb.init(
-            entity=WANDB_ENTITY,
-            project=WANDB_PROJECT,
-            name=f"{classifier}-{feature_type}",
-            config={
-                "classifier": classifier,
-                "feature_type": feature_type,
-                "balanced": balanced,
-                "seed": seed,
-            },
-        )
 
     extractor_cls = FEATURE_EXTRACTORS[feature_type]
     extractor = extractor_cls()
@@ -84,12 +66,17 @@ def train_ml(
     logger.info(f"Test Accuracy: {test_metrics['test_acc']:.4f}")
     logger.info(f"Test F1 Macro: {test_metrics['test_f1']:.4f}")
 
-    if os.getenv("WANDB_MODE") != "disabled":
-        class_names = test_ds.classes
-        wandb_logs = {**val_metrics, **test_metrics}
-        wandb_logs["test_conf_mat"] = wandb.plot.confusion_matrix(
-            preds=y_test_pred, y_true=y_test, class_names=class_names
-        )
-        wandb.log(wandb_logs)
-        wandb.finish()
+    write_evaluation(
+        f"{classifier}_{feature_type}",
+        {**val_metrics, **test_metrics},
+        y_test,
+        y_test_pred,
+        test_ds.classes,
+        {
+            "seed": seed,
+            "classifier": classifier,
+            "feature_type": feature_type,
+            "balanced": balanced,
+        },
+    )
     model.save(f"{classifier}_{feature_type}")

@@ -1,10 +1,7 @@
-import os
-
 import torch
-import wandb
 from sklearn.metrics import classification_report
 
-from jute_disease.config import DEFAULT_SEED, WANDB_ENTITY, WANDB_PROJECT
+from jute_disease.config import DEFAULT_SEED
 from jute_disease.data import classical_pipeline, open_partition
 from jute_disease.evaluation.metrics import EVAL_METRICS, format_metrics
 from jute_disease.models.ml import (
@@ -12,7 +9,7 @@ from jute_disease.models.ml import (
     ML_CLASSIFIERS,
     extract_features,
 )
-from jute_disease.training.logger import get_logger, setup_wandb
+from jute_disease.training.logger import get_logger, write_evaluation
 from jute_disease.training.seed import seed_everything
 
 logger = get_logger(__name__)
@@ -64,23 +61,11 @@ def test_ml(
         + classification_report(y_test, y_pred, target_names=class_names)
     )
 
-    # Log to WandB
-    if os.getenv("WANDB_MODE") != "disabled":
-        setup_wandb()
-        wandb.init(
-            entity=WANDB_ENTITY,
-            project=WANDB_PROJECT,
-            name=f"Eval-ML-{classifier}-{feature_type}",
-            job_type="evaluation",
-            config={
-                "classifier": classifier,
-                "feature_type": feature_type,
-                "seed": seed,
-            },
-        )
-        wandb_logs = {**test_metrics}
-        wandb_logs["test_conf_mat"] = wandb.plot.confusion_matrix(
-            preds=y_pred, y_true=y_test, class_names=class_names
-        )
-        wandb.log(wandb_logs)
-        wandb.finish()
+    write_evaluation(
+        f"{classifier}_{feature_type}",
+        test_metrics,
+        y_test,
+        y_pred,
+        class_names,
+        {"seed": seed, "classifier": classifier, "feature_type": feature_type},
+    )

@@ -10,9 +10,15 @@ repos:
         args: [--pytest-test-first]
       - id: trailing-whitespace
 
-  # - repo: https://github.com/astral-sh/ruff-pre-commit
-  #   rev: v0.14.14
-  #   hooks:
-  #     - id: ruff-check
-  #       args: [--fix]
-  #     - id: ruff-format
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: Ruff check (locked project version)
+        entry: uv run --locked ruff check
+        language: system
+        types_or: [python, pyi, jupyter]
+      - id: ruff-format
+        name: Ruff format (locked project version)
+        entry: uv run --locked ruff format --check
+        language: system
+        types_or: [python, pyi, jupyter]
