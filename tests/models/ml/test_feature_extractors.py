@@ -69,7 +69,7 @@ class _Dataset:
     def __len__(self) -> int:
         return self.length
 
-    def __getitem__(self, index: int):
+    def __getitem__(self, index: int) -> tuple[np.ndarray, int]:
         self.reads += 1
         return np.full((8, 8, 3), index, dtype=np.uint8), index % 2
 

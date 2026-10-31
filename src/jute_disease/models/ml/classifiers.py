@@ -3,6 +3,7 @@ from typing import Any
 import joblib
 import numpy as np
 from sklearn.base import ClassifierMixin
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression as SKLogisticRegression
 from sklearn.naive_bayes import GaussianNB
@@ -71,7 +72,7 @@ class SklearnClassifier:
         logger.info(f"Model saved to {path}")
 
     @classmethod
-    def load(cls, name: str | None = None) -> "SklearnClassifier | None":
+    def load(cls, name: str | None = None) -> SklearnClassifier | None:
         model_name = name or cls.__name__.lower()
         path = ML_MODELS_DIR / f"{model_name}.joblib"
         if not path.exists():
@@ -89,11 +90,22 @@ class KNearestNeighbors(SklearnClassifier):
 
 
 class SupportVectorMachine(SklearnClassifier):
-    def __init__(self, random_state: int | None = None, **kwargs: object) -> None:
-        kwargs.setdefault("probability", True)
-        if random_state is not None:
-            kwargs["random_state"] = random_state
-        super().__init__(SVC, **kwargs)
+    def __init__(
+        self,
+        random_state: int | None = None,
+        probability: bool | None = None,
+        **kwargs: object,
+    ) -> None:
+        if probability is False:
+            raise ValueError(
+                "SupportVectorMachine always exposes calibrated probabilities."
+            )
+        estimator = SVC(random_state=random_state, **kwargs)
+        super().__init__(
+            CalibratedClassifierCV,
+            estimator=estimator,
+            ensemble=False,
+        )
 
 
 class LogisticRegression(SklearnClassifier):

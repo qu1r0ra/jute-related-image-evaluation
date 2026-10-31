@@ -1,4 +1,8 @@
-from jute_disease.training.logger import flatten_log_version, get_logger, setup_wandb
+from jute_disease.training.logger import (
+    flatten_log_version,
+    get_logger,
+    write_evaluation,
+)
 from jute_disease.training.seed import seed_everything
 from jute_disease.training.source import source_data_module
 
@@ -15,6 +19,6 @@ __all__ = [
     "get_logger",
     "pretrain_main",
     "seed_everything",
-    "setup_wandb",
     "source_data_module",
+    "write_evaluation",
 ]

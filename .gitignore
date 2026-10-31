@@ -21,9 +21,8 @@ data/*
 # Runtime output (checkpoints, logs, features, models)
 artifacts/
 
-# Experiment runtime output from Lightning and Weights & Biases
+# Lightning runtime output
 lightning_logs/
-wandb/
 
 # Private working context and research
 .context/

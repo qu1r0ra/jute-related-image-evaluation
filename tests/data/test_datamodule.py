@@ -205,7 +205,7 @@ def test_manifest_folds_are_group_aware_and_cover_train_and_val(
 def test_manifest_loaders_repeat_for_a_seed_and_differ_for_another(
     frozen_dir: Path, synthetic: SyntheticPlan
 ) -> None:
-    def first_batch(seed: int):
+    def first_batch(seed: int) -> tuple[torch.Tensor, torch.Tensor]:
         dm = _manifest_module(frozen_dir, synthetic, seed=seed)
         dm.setup(stage="fit")
         return next(iter(dm.train_dataloader()))

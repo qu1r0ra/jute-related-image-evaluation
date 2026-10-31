@@ -15,8 +15,6 @@ from jute_disease.config import (
     ROOT_DIR,
     SEEDS,
     SPLITS,
-    WANDB_ENTITY,
-    WANDB_PROJECT,
 )
 
 
@@ -64,8 +62,3 @@ def test_image_extensions_are_strings() -> None:
     assert len(IMAGE_EXTENSIONS) > 0
     for ext in IMAGE_EXTENSIONS:
         assert ext.startswith("."), f"Extension {ext!r} must start with '.'"
-
-
-def test_wandb_strings_are_nonempty() -> None:
-    assert isinstance(WANDB_ENTITY, str) and WANDB_ENTITY
-    assert isinstance(WANDB_PROJECT, str) and WANDB_PROJECT

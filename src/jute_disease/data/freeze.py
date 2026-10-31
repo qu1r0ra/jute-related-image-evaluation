@@ -50,6 +50,7 @@ from jute_disease.data.manifest import (
     build_manifest,
     load_manifest,
     receipt_for,
+    summarize_pad_fractions,
     validate_manifest,
     write_manifest,
 )
@@ -67,7 +68,7 @@ from jute_disease.data.sources import (
     readiness_blockers,
     scan_source,
 )
-from jute_disease.data.transforms import PreprocessingSpec
+from jute_disease.data.transforms import PreprocessingSpec, letterbox_pad_fraction
 
 TARGET_DIR = "target"
 INVENTORY_FILE = "inventory.jsonl"
@@ -116,7 +117,7 @@ def freeze_target(
     target = output_dir / TARGET_DIR
     try:
         existing = load_manifest(target)
-    except (FileNotFoundError, FreezeBlockedError):
+    except FileNotFoundError, FreezeBlockedError:
         existing = None
     if existing is not None and existing.digest() != manifest.digest() and not force:
         raise FreezeBlockedError(
@@ -132,6 +133,7 @@ def freeze_target(
         "receipt": receipt_for(manifest),
         "curation": curation.summary(),
         "identity": resolution.summary(),
+        "pad_fraction_by_source_and_class": manifest.pad_fraction_summary(),
         "unchanged": existing is not None and existing.digest() == manifest.digest(),
     }
     _write_json(output_dir / REPORT_FILE, report)
@@ -364,6 +366,7 @@ def intake_source(
                     spec.name,
                     r.width,
                     r.height,
+                    letterbox_pad_fraction(r.width, r.height),
                 )
                 for side, members in (
                     ("train", split.train),
@@ -378,6 +381,7 @@ def intake_source(
     expected_labels = {r.label for r in records if r.source_partition == "train"}
     if {r.label for r in retained} != expected_labels:
         raise FreezeBlockedError("Source intake lost one or more training classes")
+    result["pad_fraction_by_source_and_class"] = summarize_pad_fractions(entries)
     provenance_digest = hashlib.sha256(
         json.dumps(result, sort_keys=True).encode()
     ).hexdigest()

@@ -1,11 +1,9 @@
 """Run all DL baseline experiments sequentially."""
 
-import os
 import subprocess
 import sys
 from pathlib import Path
 
-import wandb
 import yaml
 
 from jute_disease.config import CHECKPOINTS_DIR
@@ -13,7 +11,7 @@ from jute_disease.training.logger import flatten_log_version, get_logger
 
 logger = get_logger(__name__)
 
-CONFIGS_DIR = Path("configs/historical/baselines")
+CONFIGS_DIR = Path("configs/baselines")
 
 
 def run_all_dl(
@@ -30,7 +28,7 @@ def run_all_dl(
     if not configs:
         raise FileNotFoundError(f"No configs found in {configs_dir}")
 
-    logger.info(f"Starting DL Training Pipeline — {len(configs)} configs found.")
+    logger.info(f"Starting DL Training Pipeline â€” {len(configs)} configs found.")
 
     for config in configs:
         model_name = config.stem
@@ -55,11 +53,6 @@ def run_all_dl(
 
         log_dir = Path(csv_save_dir) / csv_name
 
-        run_id = wandb.util.generate_id()
-        # Ensure WandB and CSVLogger share the same run context
-        env = os.environ.copy()
-        env["WANDB_RUN_ID"] = run_id
-
         fit_cmd = [
             sys.executable,
             "-m",
@@ -70,7 +63,7 @@ def run_all_dl(
             "--config",
             str(config),
         ]
-        result = subprocess.run(fit_cmd, env=env)
+        result = subprocess.run(fit_cmd)
         if result.returncode != 0:
             raise RuntimeError(
                 f"{model_name} failed during fit with exit code {result.returncode}."
@@ -101,7 +94,7 @@ def run_all_dl(
             "--ckpt_path",
             str(best_ckpt),
         ]
-        result = subprocess.run(test_cmd, env=env)
+        result = subprocess.run(test_cmd)
         if result.returncode != 0:
             raise RuntimeError(
                 f"{model_name} failed during test with exit code {result.returncode}."

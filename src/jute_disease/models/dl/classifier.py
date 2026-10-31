@@ -1,5 +1,6 @@
+from pathlib import Path
+
 import torch
-import wandb
 from lightning import LightningModule
 from torch import nn
 from torch.optim import AdamW
@@ -7,6 +8,8 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torchmetrics import Accuracy, F1Score, MetricCollection, Precision, Recall
 
 from jute_disease.config import DEFAULT_LR, DEFAULT_WEIGHT_DECAY
+from jute_disease.evaluation.metrics import format_metrics
+from jute_disease.training.logger import write_evaluation
 
 
 class Classifier(LightningModule):
@@ -123,24 +126,22 @@ class Classifier(LightningModule):
         self.test_targets.clear()
 
     def on_test_epoch_end(self) -> None:
-        if getattr(self.logger, "experiment", None) is not None:
-            if isinstance(self.logger.experiment, wandb.sdk.wandb_run.Run):
-                preds = torch.cat(self.test_preds).numpy()
-                targets = torch.cat(self.test_targets).numpy()
-
-                class_names = None
-                if hasattr(self.trainer, "datamodule") and hasattr(
-                    self.trainer.datamodule, "classes"
-                ):
-                    class_names = self.trainer.datamodule.classes
-
-                self.logger.experiment.log(
-                    {
-                        "test_conf_mat": wandb.plot.confusion_matrix(
-                            preds=preds, y_true=targets, class_names=class_names
-                        )
-                    }
-                )
+        if self.test_preds:
+            classes = getattr(self.trainer.datamodule, "classes", None)
+            log_dir = getattr(self.logger, "log_dir", None)
+            write_evaluation(
+                "test",
+                format_metrics(self.test_metrics.compute()),
+                torch.cat(self.test_targets).numpy(),
+                torch.cat(self.test_preds).numpy(),
+                classes,
+                {
+                    "checkpoint": str(getattr(self.trainer, "ckpt_path", "")),
+                    "model": dict(self.hparams),
+                    "precision": str(self.trainer.precision),
+                },
+                directory=Path(log_dir) if isinstance(log_dir, str) else None,
+            )
         self.test_preds.clear()
         self.test_targets.clear()
 

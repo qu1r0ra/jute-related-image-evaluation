@@ -1,12 +1,10 @@
 """Run hyperparameter optimization searches for Deep Learning models."""
 
-import os
 import subprocess
 import sys
 from pathlib import Path
 
 import pandas as pd
-import wandb
 import yaml
 
 from jute_disease.config import ARTIFACTS_DIR, CHECKPOINTS_DIR, LOGS_DIR
@@ -75,7 +73,6 @@ def _aggregate_metrics(exp_names: list[str], output_csv: Path) -> None:
 def _get_modified_base_config(
     base_config_path: str | Path,
     exp_name: str,
-    wandb_group: str,
     save_dir_suffix: str = "",
     patience: int | None = None,
 ) -> Path:
@@ -92,16 +89,7 @@ def _get_modified_base_config(
         elif "EarlyStopping" in class_path and patience is not None:
             cb.setdefault("init_args", {})["patience"] = patience
 
-    # Explicitly define WandbLogger properties to avoid CLI CSVLogger crashes
-    loggers = trainer_cfg.get("logger", [])
-    if isinstance(loggers, dict):
-        loggers = [loggers]
-
-    for logger_cfg in loggers:
-        if "WandbLogger" in logger_cfg.get("class_path", ""):
-            init_args = logger_cfg.setdefault("init_args", {})
-            init_args["name"] = exp_name
-            init_args["group"] = wandb_group
+    loggers = []
 
     save_dir = f"{LOGS_DIR}/{save_dir_suffix}"
     loggers.append(
@@ -134,7 +122,7 @@ def run_grid_search(
 
     if base_config_path is None:
         grid_stem = Path(grid_config_path).stem.replace("_grid", "")
-        base_config_path = Path("configs/historical/baselines") / f"{grid_stem}.yaml"
+        base_config_path = Path("configs/baselines") / f"{grid_stem}.yaml"
         if not base_config_path.exists():
             raise ValueError(
                 f"Base config not found at {base_config_path}. "
@@ -177,21 +165,14 @@ def run_grid_search(
                 ckpt_arg = weights_path if weights_path != "imagenet" else "null"
                 pretrained_arg = str(weights_path == "imagenet")
 
-                # Share WandB Run ID between fit and test
-                run_id = wandb.util.generate_id()
-                env = os.environ.copy()
-                env["WANDB_RUN_ID"] = run_id
-
                 short_level = level_name.replace("level_", "l")
                 exp_name = f"{model_name.lower()}-{short_level}-lr_{lr}-wd_{wd}"
-                wandb_group = f"{model_name}_Finetune_Grid"
                 log_group = "phase2_finetune_grid"
                 run_exp_names.append(exp_name)
                 patience = fixed_params.get("early_stopping_patience")
                 exp_config_path = _get_modified_base_config(
                     base_config_path,
                     exp_name,
-                    wandb_group,
                     log_group,
                     patience=patience,
                 )
@@ -224,7 +205,7 @@ def run_grid_search(
 
                 logger.info(f"Command (Fit): {' '.join(cmd)}")
                 try:
-                    subprocess.run(cmd, env=env, check=True)
+                    subprocess.run(cmd, check=True)
                     flatten_log_version(
                         LOGS_DIR / log_group / exp_name, "train-metrics.csv"
                     )
@@ -260,7 +241,7 @@ def run_grid_search(
 
                 logger.info(f"Command (Test): {' '.join(test_cmd)}")
                 try:
-                    subprocess.run(test_cmd, env=env, check=True)
+                    subprocess.run(test_cmd, check=True)
                     flatten_log_version(
                         LOGS_DIR / log_group / exp_name, "test-metrics.csv"
                     )
@@ -291,20 +272,14 @@ def run_grid_search(
             ckpt_arg = weights_path if weights_path != "imagenet" else "null"
             pretrained_arg = str(weights_path == "imagenet")
 
-            run_id = wandb.util.generate_id()
-            env = os.environ.copy()
-            env["WANDB_RUN_ID"] = run_id
-
             short_level = level_name.replace("level_", "l")
             exp_name = f"{model_name.lower()}-{short_level}-dr_{dropout}"
-            wandb_group = f"{model_name}_Transfer_Grid"
             log_group = "phase1_transfer_grid"
             run_exp_names.append(exp_name)
             patience = fixed_params.get("early_stopping_patience")
             exp_config_path = _get_modified_base_config(
                 base_config_path,
                 exp_name,
-                wandb_group,
                 log_group,
                 patience=patience,
             )
@@ -339,7 +314,7 @@ def run_grid_search(
 
             logger.info(f"Command (Fit): {' '.join(cmd)}")
             try:
-                subprocess.run(cmd, env=env, check=True)
+                subprocess.run(cmd, check=True)
                 flatten_log_version(
                     LOGS_DIR / log_group / exp_name, "train-metrics.csv"
                 )
@@ -375,7 +350,7 @@ def run_grid_search(
 
             logger.info(f"Command (Test): {' '.join(test_cmd)}")
             try:
-                subprocess.run(test_cmd, env=env, check=True)
+                subprocess.run(test_cmd, check=True)
                 flatten_log_version(LOGS_DIR / log_group / exp_name, "test-metrics.csv")
             except subprocess.CalledProcessError as e:
                 logger.error(f"Error testing Phase 1 experiment {exp_name}: {e}")

@@ -18,12 +18,14 @@
 <!-- Refer to <https://shields.io/badges> for usage -->
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23414231.svg)](https://doi.org/10.5281/zenodo.23414231) ![Year, Term, Course](https://img.shields.io/badge/AY2526--T2-CSC713M-blue)
-![Python](https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=white) ![uv](https://img.shields.io/badge/uv-DE5FE9?logo=uv&logoColor=white) ![PyTorch](https://img.shields.io/badge/PyTorch-ee4c2c?logo=pytorch&logoColor=white) ![Lightning](https://img.shields.io/badge/Lightning-792ee5?logo=lightning&logoColor=white) ![scikit-learn](https://img.shields.io/badge/scikit--learn-F7931E?logo=scikitlearn&logoColor=white) ![Jupyter](https://img.shields.io/badge/Jupyter-f37626?logo=jupyter&logoColor=white) ![Weights & Biases](https://img.shields.io/badge/WandB-FFBE00?logo=weightsandbiases&logoColor=white)
 
-Benchmarking classical machine learning and transfer learning on a merged six-class jute leaf disease dataset. Created for CSC713M (Machine Learning for MSCS); the short paper was submitted to IEEE HNICEM 2026 and withdrawn before publication ([PDF](docs/hnicem2026-paper.pdf), [full paper](https://drive.google.com/file/d/1DbaQ4TWEHChkLTLvpzntbUxhkBkSmQ5o/view?usp=drive_link)).
+This repository now prepares tooling for a revised jute related-image evaluation. It also preserves the earlier six-class disease-classification study and its submitted paper, which was withdrawn before publication ([PDF](docs/hnicem2026-paper.pdf), [full paper](https://drive.google.com/file/d/1DbaQ4TWEHChkLTLvpzntbUxhkBkSmQ5o/view?usp=drive_link)).
 
 > [!NOTE]
 > This README documents the original course study. A revised study of how related-image controls affect measured performance is being planned in [issue 98](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/98); its results are not reported here.
+
+> [!IMPORTANT]
+> The active tooling follows the revised direction tracked by [issue 116](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/116). It does not report results for the revised experiment. Use Python 3.14 and the committed uv lock. Historical reproduction uses the `submitted-study` tag and its lockfile.
 
 ## Table of Contents <!-- omit from toc -->
 
@@ -33,22 +35,20 @@ Benchmarking classical machine learning and transfer learning on a merged six-cl
   - [3.1. Technical Prerequisites](#31-technical-prerequisites)
   - [3.2. Data \& Platform Credentials](#32-data--platform-credentials)
   - [3.3. Installation](#33-installation)
-- [4. Reproducing the Results](#4-reproducing-the-results)
-- [5. Training from Scratch](#5-training-from-scratch)
-- [6. Benchmarked Performance](#6-benchmarked-performance)
+- [4. Reproducing the Original Results](#4-reproducing-the-original-results)
+- [5. Current Tooling and Readiness](#5-current-tooling-and-readiness)
+- [6. Historical Benchmarked Performance](#6-historical-benchmarked-performance)
 - [7. Citation](#7-citation)
 - [8. License](#8-license)
 - [9. References](#9-references)
 
 ## 1. Introduction
 
-This project explores classical machine learning and deep learning approaches for **jute leaf disease classification** using a unified dataset constructed from multiple open-access sources. We combine and preprocess jute leaf disease images into six classes: **Cercospora Leaf Spot, Dieback, General Damage, Healthy, Mosaic, and Stem Rot**. We then use the unified dataset to benchmark both handcrafted-feature ML pipelines and transfer-learning-based DL models.
+The revised work focuses on evaluating how related-image controls affect measured performance. The active codebase prepares versioned dataset freezes, consistent preprocessing, classical and deep-learning APIs, and local evaluation records. The tooling issue does not authorize experiment fits or establish revised-study results.
 
-Our experiments compare classical ML models such as **Random Forest** and **Support Vector Machine** against deep learning architectures, including **EfficientNet, ResNet, Inception, MobileViT, and MobileNetV2**. Among the evaluated deep learning models, **MobileNetV2** offered the best practical balance of efficiency and performance, achieving the strongest test accuracy while remaining compact enough for resource-constrained settings.
+The original course study classified six jute leaf conditions—**Cercospora Leaf Spot, Dieback, General Damage, Healthy, Mosaic, and Stem Rot**—using handcrafted-feature ML and transfer-learning models. Its methods and results are retained as historical context below and in the archive.
 
-Beyond benchmarking, this project also investigates **fine-tuning on related plant disease datasets, input resolution effects, feature-space analysis with t-SNE/UMAP, error analysis, and Grad-CAM interpretability**. The results suggest that confusion between **Mosaic** and **Cercospora Leaf Spot** remains a key challenge, likely due to visual similarity and dataset limitations, motivating future work in improved preprocessing and multi-label disease recognition.
-
-Our short paper, **"Benchmarking Classical Machine Learning and Transfer Learning for Data-Constrained Jute Leaf Disease Classification"**, was submitted to IEEE HNICEM 2026 and withdrawn before publication ([PDF](docs/hnicem2026-paper.pdf)). The [full paper with additional visualizations](https://drive.google.com/file/d/1DbaQ4TWEHChkLTLvpzntbUxhkBkSmQ5o/view?usp=drive_link) covers the complete results.
+The original short paper, **"Benchmarking Classical Machine Learning and Transfer Learning for Data-Constrained Jute Leaf Disease Classification"**, was submitted to IEEE HNICEM 2026 and withdrawn before publication ([PDF](docs/hnicem2026-paper.pdf)). Its findings are not results of the revised study.
 
 ## 2. Project Structure
 
@@ -83,16 +83,15 @@ For a detailed look at the internal design, public APIs, and architectural decis
 Ensure you have the following installed on your local machine:
 
 1. **Git:** Used to clone this repository.
-2. **Python `>=3.11`:** (Managed by `uv` automatically if not present).
+2. **Python `3.14.10`:** (Managed by `uv` automatically if not present).
 3. **uv:** Our unified Python package and project manager. Installation instructions: <https://docs.astral.sh/uv/getting-started/installation/>.
 
 ### 3.2. Data & Platform Credentials
 
-This project automates data acquisition and experiment tracking via third-party APIs:
+This project uses third-party services only for optional data acquisition:
 
 1. **Jute dataset:** The unified six-class dataset is distributed as `data.zip` in this [Google Drive folder](https://drive.google.com/drive/folders/1WoQ-Xzy0Prl9lInHW5JpGX4tpE9YDUua?usp=sharing). Unzip it into the project root so that `data/by_class/` exists. See [References](#9-references) for the three source datasets it merges.
 2. **Kaggle API:** Only needed to download the PlantVillage (Hughes & Salathé, 2015; Mohanty et al., 2016) and PlantDoc (Singh et al., 2020) pretraining datasets (`just data-download`, which pins the Kaggle package versions). Ensure you have a `kaggle.json` in `~/.kaggle/`.
-3. **Weights & Biases (WandB):** Used for experiment logs and interactive dashboards. Run `wandb login` before starting deep learning training.
 
 The unified jute dataset merges three public sources. The repository code is Apache-2.0; the data keeps its original terms:
 
@@ -114,20 +113,23 @@ The unified jute dataset merges three public sources. The repository code is Apa
 
    ```bash
    cd jute-related-image-evaluation
-   uv sync
+   uv sync --locked --all-groups
    ```
 
-3. Copy the environment template and set your W&B key:
+   uv selects CUDA 13.0 PyTorch wheels on Windows and CUDA 12.6 wheels on Linux. Optional SAM2 support is installed with `uv sync --locked --extra masks --all-groups`; acquire model weights separately before any offline mask run.
 
-   ```bash
-   cp .env.example .env
-   ```
+3. Optional: install [`just`](https://just.systems) to run the recipes shown below. `just --list` shows every recipe, and each one wraps a single `uv run jute-disease` command. `uv run jute-disease --help` lists the commands themselves. The Linux lab helpers are under `scripts/`; ntfy topic and token are supplied through the host's environment secret mechanism, never command arguments.
 
-4. Optional: install [`just`](https://just.systems) to run the recipes shown below. `just --list` shows every recipe, and each one wraps a single `uv run jute-disease` command. `uv run jute-disease --help` lists the commands themselves.
+## 4. Reproducing the Original Results
 
-## 4. Reproducing the Results
+The submitted notebooks and results are preserved under `notebooks/historical/` and `results/submitted/`. They belong to the original course study and use the original 3.11-era environment and tracking setup. To reproduce that study, check out the `submitted-study` tag and install its committed lock; the active Python 3.14 environment is for the revised study.
 
-Run through the Jupyter notebooks in `notebooks/historical/` in numerical order. These are the notebooks as run for the paper; they predate the current module layout and still import the old paths, so the `jute-disease` commands in the next section are the maintained route to the same experiments:
+```bash
+git switch --detach submitted-study
+uv sync --locked --all-groups
+```
+
+The notebooks are preserved in numerical order:
 
 1. **`01_Exploratory_Data_Analysis.ipynb`**
    Consolidates the unified jute dataset and visualizes initial class distributions.
@@ -143,52 +145,27 @@ Run through the Jupyter notebooks in `notebooks/historical/` in numerical order.
    Finalizes evaluation on the held-out test set and identifies top failure modes.
 
 > [!NOTE]
-> The notebooks were run on Google Colab (CPU for classical ML, L4 GPU for deep learning), and the Colab badges at the top of each notebook open them there. To run locally, select the **`.venv`** in the project root as your Jupyter kernel and skip the Drive-mounting cells. Each notebook is paired with a `.py` file through Jupytext (`just sync-nb`).
+> The notebooks were run on Google Colab (CPU for classical ML, L4 GPU for deep learning). Use the submitted-study tag for reproduction; the active CLI and configurations implement the revised study tooling.
 
-Alternatively, `just` drives the same experiments from the command line (see `just --list`): `just train-dl`, `just grid-search`, `just grid-search-finetune`, `just train-dl-512`, and `just train-ml`. Experiment logs behind the reported deep learning numbers are committed under `results/submitted/logs/`.
+## 5. Current Tooling and Readiness
 
-## 5. Training from Scratch
+The current environment installs from the committed lock and uses Python 3.14.10. Set it up and run the local checks with:
 
-To retrain the models from the command line instead of the notebooks:
+```bash
+uv sync --locked --all-groups
+uv run --locked pytest -m ""
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+uv run --locked python scripts/audit_dependencies.py
+```
 
-1. Install dependencies (`uv sync`) and unzip `data.zip` so that `data/by_class/` exists ([3.2](#32-data--platform-credentials)).
-2. Freeze the leakage-controlled 70/15/15 split (seed 42) and download the PlantVillage/PlantDoc pretraining data:
+For optional local SAM2 package imports, use `uv sync --locked --all-groups --extra masks`. No model weights are included or downloaded by setup.
 
-   ```bash
-   just freeze --image-root <path-to-original-images>   # curation, identity groups, manifest and receipt
-   just freeze-cache                                      # optional bounded train/val image cache and its decision
-   just data-download                                      # optional source-package acquisition
-   just freeze-source plantdoc data/external/plantdoc --package-version 7 --package-digest 06f9782c9be1e9d6c707845c3f07b183c75e7421dbb112a88d60cb2d512ad1fd
-   just freeze-source plantvillage data/external/plantvillage --package-version 1 --package-digest d6db080933a47f289fb15bc60c8c42ef1c17c7656d3700d4133e6d313fdf471a
-   ```
+This tooling work does not authorize experiment fits or establish readiness of the lab A100. The synthetic freeze, Windows RTX 5060 smoke check, and Linux CI checks validate the development environment. The validation-only lab pilots and experiment readiness gates remain in [issue 114](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/114). See [Tooling](docs/tooling.md) for update cadence, local evidence, audit limits, preprocessing identity, and helper commands.
 
-   The freeze writes `artifacts/freeze/target/` (manifest plus a receipt that hashes every input). Training reads partitions only through that manifest, and a directory without its receipt is never treated as a completed freeze. The target candidate audit and its unresolved human-review limitation are recorded in [`results/corrected/identity-audit.md`](results/corrected/identity-audit.md).
+## 6. Historical Benchmarked Performance
 
-3. Point experiment tracking at your own W&B account. The configs log to the `grade-descent` entity, so either edit `entity` in the `WandbLogger` block of the files under `configs/historical/`, or run offline with `WANDB_MODE=offline`.
-4. Smoke-test the pipeline, then train:
-
-   ```bash
-   just train-dl-check                 # one-batch fast_dev_run (MobileNetV2)
-   just train-dl                       # all six deep learning baselines
-   just train-dl-single mobilenet_v2   # one baseline by config name
-   just train-ml                       # handcrafted features + classical ML
-   ```
-
-5. Reproduce the MobileNetV2 tuning in the paper (phase 1: transfer-learning/dropout; phase 2: learning rate and weight decay) and the 512 px experiment:
-
-   ```bash
-   just grid-search
-   just grid-search-finetune
-   just train-dl-512
-   ```
-
-Deep learning runs can also be driven directly through the Lightning CLI, for example `uv run jute-disease train dl fit --config configs/historical/baselines/mobilenet_v2.yaml`. On Windows without a C++ compiler, `torch.compile` fails; add `--model.compile_model=false` to that command.
-
-Checkpoints are written to `artifacts/checkpoints/` and CSV logs to `artifacts/logs/`. Source intake checks the package version and inventory SHA-256 against tracked PlantDoc and PlantVillage pins, then checks target overlap and records its source manifest. The owner authorized both downloaded packages for internal research use in this project. Their intake reports retain the unresolved publisher-identity and terms caveats; this approval does not establish a publisher or license, and it does not authorize redistribution. At execution, the loader rechecks the tracked source pin, owner-use readiness, intake lineage, target manifest and retained training/validation bytes. Training on a GPU is recommended for the deep learning runs; the classical ML pipeline runs on CPU.
-
-## 6. Benchmarked Performance
-
-Below is a summary of our primary results on the held-out test split (360 images). The [full paper](https://drive.google.com/file/d/1DbaQ4TWEHChkLTLvpzntbUxhkBkSmQ5o/view?usp=drive_link) discusses learning rates, input resolutions, and feature-space analysis in detail.
+The table records results from the earlier course study on its held-out test split (360 images). It does not describe the revised experiment. The [full paper](https://drive.google.com/file/d/1DbaQ4TWEHChkLTLvpzntbUxhkBkSmQ5o/view?usp=drive_link) discusses learning rates, input resolutions, and feature-space analysis in detail.
 
 | Model Class       | Architecture / Classifier                  | Features / Training       | Val Acc (%) | Val Macro-F1 (%) | Test Acc (%) |
 | :---------------- | :----------------------------------------- | :------------------------ | :---------- | :--------------- | :----------- |
@@ -198,9 +175,10 @@ Below is a summary of our primary results on the held-out test split (360 images
 
 Model selection used validation metrics. Results come from a single stratified 70/15/15 split (seed 42) without near-duplicate removal, so differences of a point or two are within noise.
 
-### Pretrained Weights
+### Historical Pretrained Weights
 
-The best MobileNetV2 (learning rate 0.01, weight decay 0.05, frozen backbone, 91.39% test accuracy) is attached to the [v1.0.0 release](https://github.com/qu1r0ra/jute-related-image-evaluation/releases/tag/v1.0.0) as `mobilenet_v2_jute.pt` (SHA-256 `f172c2668378f6a59376928f3d55e1562e289dd954c29b74e5054c978edcad9d`). It is the Weights & Biases `best` checkpoint of run `af60c7b9` as a plain `state_dict`. Class indices follow `data/disease_classes.txt`. The architecture is MobileNetV2 (Sandler et al., 2018), loaded through the timm library (Wightman, 2019).
+The original MobileNetV2 checkpoint (learning rate 0.01, weight decay 0.05, frozen backbone, 91.39% test accuracy) is attached to the [v1.0.0 release](https://github.com/qu1r0ra/jute-related-image-evaluation/releases/tag/v1.0.0) as `mobilenet_v2_jute.pt` (SHA-256 `f172c2668378f6a59376928f3d55e1562e289dd954c29b74e5054c978edcad9d`). It is the historical W&B `best` checkpoint of run `af60c7b9` as a plain `state_dict`; class indices follow `data/disease_classes.txt`. The code below shows the original checkpoint preprocessing and is not the revised experiment pipeline.
+
 
 ```python
 import torch
@@ -268,3 +246,5 @@ This project is licensed under the **Apache License 2.0**. See the [LICENSE](LIC
 - Singh, D., Jain, N., Jain, P., Kayal, P., Kumawat, S., & Batra, N. (2020). _PlantDoc: A dataset for visual plant disease detection_. In _Proceedings of the 7th ACM IKDD CoDS and 25th COMAD_ (pp. 249–253). <https://doi.org/10.1145/3371158.3371196>
 
 - Wightman, R. (2019). _PyTorch Image Models_ (timm) [Software]. GitHub. <https://doi.org/10.5281/zenodo.4414861>
+
+For the active environment, package choices, and lab helpers, see [Tooling](docs/tooling.md).

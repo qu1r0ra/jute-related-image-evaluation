@@ -7,7 +7,13 @@ default:
 # Environment
 
 setup:
-    uv sync --all-groups
+    uv sync --locked --all-groups
+
+setup-masks:
+    uv sync --locked --all-groups --extra masks
+
+audit:
+    uv run --locked python scripts/audit_dependencies.py
 
 # Data
 
@@ -48,27 +54,7 @@ train-dl:
     uv run jute-disease train baselines
 
 train-dl-single model="mobilenet_v2":
-    uv run jute-disease train baselines --config configs/historical/baselines/{{model}}.yaml
-
-train-dl-check:
-    uv run jute-disease train dl fit --config configs/historical/baselines/mobilenet_v2.yaml --trainer.fast_dev_run=True
-
-train-cv folds="5":
-    uv run jute-disease train cv configs/historical/baselines/mobilenet_v2.yaml --folds {{folds}}
-
-train-dl-512:
-    uv run jute-disease train dl fit --config configs/historical/experiments/mobilenet_v2_512.yaml
-
-# Grid search
-
-grid-search:
-    uv run jute-disease train grid configs/historical/grid/mobilenet_v2_grid.yaml
-
-grid-search-check:
-    uv run jute-disease train grid configs/historical/grid/mobilenet_v2_grid.yaml --fast-dev-run
-
-grid-search-finetune:
-    uv run jute-disease train grid configs/historical/grid/mobilenet_v2_finetune_grid.yaml --base-config configs/historical/baselines/mobilenet_v2.yaml
+    uv run jute-disease train baselines --config configs/baselines/{{model}}.yaml
 
 # Aggregation
 
@@ -78,16 +64,17 @@ aggregate exps:
 # Quality and tests
 
 test:
-    uv run pytest
+    uv run --locked pytest
 
 test-all:
-    uv run pytest -m ""
+    uv run --locked pytest -m ""
 
 lint:
-    uv run ruff check .
+    uv run --locked ruff check .
+    uv run --locked ruff format --check .
 
 format:
-    uv run ruff check --fix . && uv run ruff format .
+    uv run --locked ruff check --fix . && uv run --locked ruff format .
 
 sync-nb:
     uv run jupytext --sync "notebooks/*.py"
@@ -95,7 +82,7 @@ sync-nb:
 # Cleanup
 
 clean:
-    rm -rf .coverage htmlcov lightning_logs wandb .pytest_cache .ruff_cache
+    rm -rf .coverage htmlcov lightning_logs .pytest_cache .ruff_cache
 
 clean-artifacts:
     rm -rf artifacts/ml_models artifacts/checkpoints artifacts/features

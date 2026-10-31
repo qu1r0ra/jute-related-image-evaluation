@@ -1,100 +1,45 @@
 # Project Architecture
 
-This document describes the architectural design and directory structure of the `jute-related-image-evaluation` repository (Python package `jute_disease`). It serves as a guide for developers and contributors to understand the core components and their interactions.
+The repository contains active tooling for a revised jute related-image evaluation and an archive of the earlier classification study. The tooling does not itself authorize or report revised-study experiment fits.
 
-## Directory Structure Overview
+## Repository layout
 
 ```text
 .
-├── configs/
-│   └── historical/     # Lightning CLI and grid search configs for the reported runs
-├── data/               # Dataset storage (git-ignored) and the tracked class list
-├── docs/               # Architecture notes and the submitted paper
-├── notebooks/
-│   └── historical/     # Notebooks and Jupytext pairs as run for the paper
-├── results/
-│   └── submitted/      # Committed logs and figures behind the reported numbers
-├── src/
-│   └── jute_disease/   # Library package and the jute-disease console entry point
-├── tests/              # Unit and API tests
-├── justfile            # Task runner: one recipe per study command
-└── artifacts/          # Runtime output (git-ignored): checkpoints, features, logs
+├── configs/baselines/       # Current baseline entry points
+├── configs/historical/      # Configurations used for submitted-study runs
+├── data/                    # Local datasets and tracked class definitions
+├── docs/adr/                # Accepted architecture and methodology decisions
+├── notebooks/historical/    # Original notebooks and their outputs
+├── results/submitted/       # Artifacts backing the original paper
+├── scripts/                 # Dependency audit and Linux lab helpers
+├── src/jute_disease/        # Python package and CLI
+├── tests/                   # Unit, public API and synthetic integration coverage
+└── artifacts/               # Ignored runtime output
 ```
 
-## Core Design Principles
+## Command and library interfaces
 
-### 1. Unified Public API
+`jute-disease` is the console entry point. Its subcommands cover dataset preparation, freezing, classical ML, Lightning training and evaluation. Public package imports are exposed from the relevant `jute_disease` subpackages. The `justfile` provides short wrappers for common commands; it does not define another application interface.
 
-Each subpackage in `src/jute_disease/` (e.g., `models.ml`, `data`, `training`, `reporting`) uses `__init__.py` to expose a clean, flattened public API.
+Historical study files are retained as records. Active dependency configuration, baseline entry points and run output use the revised tooling. W&B is not an active logger or dependency. Lightning writes CSV logs locally; evaluation writes JSON with metrics, class order, confusion matrix and run settings.
 
-- **Internal developers** use relative imports where appropriate or `from jute_disease.x import y` to avoid circular dependencies.
-- **External consumers** (scripts, tests, notebooks) use the clean package-level imports (e.g., `from jute_disease.models.ml import RandomForest`).
+## Data identity and preprocessing
 
-### 2. Command Line Interface (CLI)
+Dataset freezing inventories image bytes and decoded pixels, applies the tracked curation and identity rules, and writes grouped partitions with a receipt binding the manifest to its inputs. Manifest version 2 records per-image letterbox pad fraction and reports a source-by-class summary. Version 1 manifests remain readable. A new freeze is explicit; completed freeze outputs are not silently replaced.
 
-The project exposes a single console entry point, `jute-disease` (`jute_disease.cli:main`), and a `justfile` whose recipes each wrap one of its commands:
+ADR 0002 defines shared preprocessing. Both feature routes resize to a 256-pixel letterboxed image with bilinear interpolation and rounded uint8 ImageNet-mean padding. The classical route receives deterministic unnormalized RGB; the deep-learning route converts to tensors and normalizes with ImageNet statistics. Training adds the fixed crop, flips and brightness/contrast jitter from the ADR. The preprocessing specification contributes to cache identity, so a changed specification invalidates matching image caches.
 
-- **`jute-disease train dl fit|test`**: The deep learning engine. Arguments are forwarded to the **Lightning CLI**, which drives training and testing from configuration files.
-- **`jute-disease train ml --all`**: Classical ML training over every classifier and feature combination. It drives the pipeline in `src/jute_disease/training/engines/ml/`.
-- **Other commands**: `data` (download, synthetic), `freeze` (target, cache, source), `train` (baselines, cv, grid, pretrain), and `evaluate` (aggregate, ml, predict). `jute-disease --help` lists them all.
-- Commands planned in open issues (`queue`, `profile`, and `evaluate` on its own) exit non-zero and name the issue that owns them.
+## Modeling and local evidence
 
-### 3. Deep Learning Service (Lightning + Timm)
+The deep-learning path uses PyTorch Lightning and `timm`; the classical path uses scikit-learn estimators and image-feature extractors. Both paths expose consistent evaluation outputs. Local logs and evaluation records are the active evidence format. Downloaded SAM2 weights and inference are outside tooling setup; the optional `masks` extra is only used to check package installation and imports.
 
-The DL pipeline is built using **PyTorch Lightning** for state-of-the-art reproducibility and boilerplate reduction.
+## Environment and validation
 
-- **LightningModule (`Classifier`)**: The core class handling the training loop, optimization, logging, and metrics.
-- **Backbone System**: Uses a generic `TimmBackbone` to wrap any model from the `timm` library, allowing for easy experimentation with different architectures.
-- **Transfer Learning Strategy**: Generic **ImageNet-1K pre-training** provides the most robust baseline. Our final champion configuration for Jute Disease Detection utilizes **MobileNet V2** at **256x256** resolution, with **Learning Rate: 0.01**, **Weight Decay: 0.05**, and **Dropout: 0.1**. This configuration achieves the optimal balance of features without overfitting, even while hitting the dataset's inherent "single-label" performance ceiling.
-- **Lightning CLI**: Training is driven by configuration files in `configs/`, promoting "Configuration as Code".
+Python 3.14.10 is pinned in `.python-version` and constrained in `pyproject.toml`. `uv.lock` locks the supported environment. PyTorch and TorchVision form a single pinned pair, with official CUDA 13.0 wheels on Windows and CUDA 12.6 wheels on Linux. See [tooling.md](tooling.md) for installation, update, audit and helper-command details.
 
-### 4. Machine Learning Framework (Scikit-learn Adapters)
+Continuous integration checks locked installs on Windows and Linux, package imports, dependency advisories, lint and the synthetic test suite. Windows CI checks the CUDA wheel build; a small GPU operation is also checked on the development RTX 5060. Synthetic fixtures exercise public interfaces. Linux CI checks notification transport without sending messages, process locking, timeouts, detachment and copy-back integrity. CI does not fit an experiment, access the lab, or download model weights.
 
-Classical ML models are integrated using a custom adapter pattern to unify them with the DL workflow.
+## Historical study
 
-- **Feature Extractors**: Classes like `CraftedFeatureExtractor` convert raw images into numerical vectors (HSV, LBP, HOG). `RawPixelFeatureExtractor` handles pixel flattening.
-- **Adapters**: The `SklearnClassifier` base class wraps standard scikit-learn estimators to provide a consistent `fit`/`predict`/`save`/`load` interface across the project.
-- **Implementations**: Currently supports Logistic Regression, SVM, Random Forest, KNN, and Gaussian Naive Bayes.
-
-### 5. Data Management & Reproducibility
-
-- **Freeze** (`jute-disease freeze`): fingerprints the original images (byte, decoded-pixel and perceptual hashes), applies the curation rules and the identity policy, and writes a seed-42 group-aware 70/15/15 manifest. A receipt written last hashes every dependency (inventory, rules, reviews, identity, preprocessing) with the manifest and partition digests and per-class support. A manifest without a matching receipt is never loaded, and a different completed freeze is only replaced with `--force`.
-- **Readers**: `ManifestDataset` / `open_partition` read frozen partitions in stable image-id order, from the originals or from the lossless image cache. A requested cache never falls back to the originals.
-- **Sources**: PlantVillage and PlantDoc are recorded with tracked version and inventory SHA-256 pins, exact partition counts and license caveats. Intake builds grouped validation and removes source images matching frozen target validation or test images. The owner authorized the downloaded packages for internal research use; this does not establish publisher identity or resolve license terms, and redistribution is not authorized. The report keeps these caveats visible while its internal-use readiness gate checks the tracked content pin and owner authorization again at execution.
-- **DataModule**:
-  - Serves manifest partitions (or a synthetic tree), with fixed seeds.
-  - Supports **K-Fold Cross-Validation** via `set_fold()`.
-  - Implements **Weighted Random Sampling** to handle class imbalance.
-- **Transforms**: Uses a factory pattern (`create_pipeline`) via **Albumentations** for robust and deterministic data augmentation. Supports both global/fixed preprocessing for ML and resolution-parameterized preprocessing for DL.
-- **Seed Everything**: A centralized `seed_everything` utility ensures deterministic behavior across Python, Numpy, specific libraries, and PyTorch.
-
-### 6. Unified Diagnostics & Metrics
-
-Both pipelines are evaluated identically using a combined **Experiment Aggregation Utility** (`jute-disease evaluate aggregate`, backed by `jute_disease.reporting.tables`). We completely deprecated `scikit-learn` metrics in favor of native PyTorch `torchmetrics.MetricCollection`.
-
-- **EVAL_METRICS**: Computes Accuracy, Macro-F1, Precision, and Recall uniformly for both classical and neural models.
-- **Aggregation**: Metrics from `WandbLogger` (cloud) and `CSVLogger` (local) are automatically synthesized into tabular CSV files for all Grid Searches and manual experiment targets.
-
-### 7. Code Quality & Standards
-
-- **Type Safety**: Public functions carry type annotations and use modern Python 3.10+ syntax (e.g., `list[str] | None`). Mypy is not part of the CI or lint pipeline.
-- **Formatting**: Code is formatted and linted using `ruff` to ensure PEP 8 compliance.
-- **CLI Patterns**: Automation functions raise on failure and are called from `jute_disease.cli`, which owns argument parsing and exit codes. The functions stay usable from Python and remain unit-testable.
-- **Testing**: A comprehensive test suite (`tests/`) covers unit tests (logic verification) and slower integration tests (end-to-end pipeline).
-
-### 8. Artifact Management
-
-The project uses a structured approach to saving experiment outputs in the `artifacts/` directory.
-
-- **Checkpoints**: PyTorch Lightning automatically saves the best `.ckpt` files based on validation loss/accuracy.
-- **Metrics**: Local experiments save metrics to `experiment_name/metrics.csv`. These are prioritized for reproducibility when cloud logging (WandB) is unavailable.
-- **Model Exports**: Classical ML models are serialized as `.joblib` files within the `artifacts/` hierarchy, ensuring they are versioned alongside the feature extraction pipelines that generated them.
-
-## Tools & Dependencies
-
-- **uv**: Package management and environment isolation.
-- **PyTorch Lightning**: Deep learning framework.
-- **timm**: Pretrained computer vision models.
-- **Scikit-learn**: Classical machine learning algorithms.
-- **Albumentations**: Fast image augmentation library.
-- **WandB**: Experiment tracking and visualization.
+The original notebooks, W&B run references, configs and results are retained as historical evidence under `notebooks/historical/`, `configs/historical/` and `results/submitted/`. Reproduction uses the `submitted-study` tag and its lockfile. See [legacy-names.md](legacy-names.md) for the old repository, package and W&B names.
