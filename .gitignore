@@ -23,6 +23,8 @@ artifacts/
 
 # Lightning runtime output
 lightning_logs/
+.playwright-cli/
+.playwright-mcp/
 
 # Private working context and research
 .context/
