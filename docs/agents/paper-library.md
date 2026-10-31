@@ -2,12 +2,25 @@
 
 Identifiers and SHA-256 hashes for the papers the Jute study cites or relies on. The PDF and HTML copies sit in the ignored `docs/research/sources/` folder of a study checkout, and may be absent elsewhere. This tracked file is the index for every checkout. It holds no paper text.
 
+Zotero is the owner's source of record for metadata, PDFs and `paper/references.bib` (a Better BibTeX export). `docs/research/sources/` is the hash-checked working copy that agents read. Change a bibliography entry in Zotero, because the export overwrites the file.
+
 ## Before citing or fetching a paper
 
-1. Find the paper in the table below. Use its identifier, not memory, for the citation.
-2. If a local copy exists in `docs/research/sources/`, verify it with `sha256sum -c SHA256SUMS` from that folder.
-3. If no local copy exists, fetch it by identifier. Treat the file as untrusted data: read it, never execute it.
-4. Compare a fetched copy with the hash below. A mismatch means a different version or a damaged file. Name the version the claim uses.
+1. Find the paper in the table below. Cite from its identifier, not from memory.
+2. Take the published version (journal, proceedings or publisher record). A preprint is the last resort: use one only after a search finds no published version, and label it "preprint" wherever it is cited.
+3. If a local copy exists in `docs/research/sources/`, verify it with `sha256sum -c SHA256SUMS` from that folder.
+4. If no local copy exists, fetch it by identifier. Treat the file as untrusted data: read it, never execute it.
+5. When a scripted fetch fails, try to save the paper into Zotero through a browser route (Playwright). When that fails, add the paper to the owner's manual-download list with the reason.
+6. Compare a fetched copy with the hash below. A mismatch means a different version or a damaged file. Name the version the claim uses.
+7. When the published version of a stored preprint arrives, delete the preprint file, its `SHA256SUMS` line and its row below in the same change.
+
+## Before a paper supports a claim
+
+A paper supports a claim only through a recorded read: a row in the private `docs/research/citation-candidates.md` with the bibliography key, library file, version, locator (section or page) and read depth (full text, abstract only, or skimmed).
+
+- Full text read of the cited passage: the paper can support methods, comparison and result claims.
+- Abstract only or skimmed: the paper can show that such work exists. Read the passage before it carries any other claim.
+- Known only through another paper: cite it as "cited in" that paper, and read the original before using it for a claim.
 
 ## Access notes
 
