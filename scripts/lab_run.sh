@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Linux only: a single lock holder covers the entire timed process group.
+# Linux only: one lock holder supervises the full timed process group.
 set -euo pipefail
 if [[ ${1:-} == --detach ]]; then
     shift
@@ -18,34 +18,7 @@ shift 2
 [[ $# -gt 0 ]] || { echo 'Missing command' >&2; exit 2; }
 command -v flock >/dev/null || { echo 'flock is required' >&2; exit 127; }
 command -v setsid >/dev/null || { echo 'setsid is required' >&2; exit 127; }
+command -v python3 >/dev/null || { echo 'python3 is required' >&2; exit 127; }
 exec 9>"$lock"
 flock -n 9 || exit 75
-
-setsid "$@" &
-command_pid=$!
-timed_out=0
-trap 'timed_out=1' USR1
-
-setsid bash -c '
-    sleep "$1"
-    kill -USR1 "$2" 2>/dev/null || true
-    kill -TERM -- "-$3" 2>/dev/null || true
-    sleep 5
-    kill -KILL -- "-$3" 2>/dev/null || true
-' bash "$seconds" "$BASHPID" "$command_pid" &
-timer_pid=$!
-
-if wait "$command_pid"; then
-    command_status=0
-else
-    command_status=$?
-fi
-
-if ((timed_out)); then
-    wait "$timer_pid" || true
-    exit 124
-fi
-
-kill -TERM -- "-$timer_pid" 2>/dev/null || true
-wait "$timer_pid" 2>/dev/null || true
-exit "$command_status"
+exec python3 "$(dirname "$0")/lab_process.py" "$seconds" "$@"
