@@ -14,6 +14,7 @@
 - Use frozen checkpoints and prespecified settings for visual diagnostics, and prespecified samples for reported figures. Make no unsupported localization, generalization, or leakage claims.
 
 - Optional ignored `docs/research/README.md` may index literature and methods. Link canonical evidence instead of duplicating reports. Ordinary work in a fresh checkout must not depend on private notes.
+- Literature: cited papers are kept as local copies in the git-ignored `docs/research/sources/`, indexed by its `README.md` and verified with `SHA256SUMS`. Before citing or fetching a paper, check that index; add new copies with checksums.
 
 - Manuscript editing and builds: read optional ignored `paper/README.md` when present; fresh checkouts need not contain it.
 
