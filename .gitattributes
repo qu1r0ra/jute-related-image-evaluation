@@ -1,3 +1,6 @@
+# Line endings: text files are stored with LF in the index.
+* text=auto eol=lf
+
 # Basic .gitattributes for a python repo.
 
 # Source files
