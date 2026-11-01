@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from jute_disease.config import BENCHMARK_CONFIG
-from jute_disease.data import file_sha256, load_manifest
+from jute_disease.data import ManifestDataset, file_sha256, load_manifest
 from jute_disease.training import (
     ChildResult,
     DataInputs,
@@ -356,7 +356,17 @@ def test_tampered_upstream_checkpoint_is_refused(workspace: Workspace) -> None:
     assert len(launcher.jobs) == ran  # nothing was launched on bad bytes
 
 
-def test_queue_runs_resumes_and_skips_end_to_end(workspace: Workspace) -> None:
+def test_queue_runs_resumes_and_skips_end_to_end(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened: list[str] = []
+    original = ManifestDataset.__init__
+
+    def spy(self, manifest, partition, *args, **kwargs) -> None:
+        opened.append(partition)
+        original(self, manifest, partition, *args, **kwargs)
+
+    monkeypatch.setattr(ManifestDataset, "__init__", spy)
     store = RunStore(workspace.runs_dir)
     launcher = InProcess(workspace)
     identity = make_identity(workspace, store)
@@ -375,6 +385,8 @@ def test_queue_runs_resumes_and_skips_end_to_end(workspace: Workspace) -> None:
     expected = {f.fit_id for f in workspace.benchmark.fits()}
     assert set(first.outcomes) == expected
     assert all(state is RunState.COMPLETED for state in first.outcomes.values())
+    assert opened
+    assert set(opened) <= {"train", "val"}  # the whole queue never opens test
 
     ran = len(launcher.jobs)
     again = go()

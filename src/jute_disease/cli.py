@@ -300,7 +300,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--bounds",
         type=_bounds,
         default=None,
-        help="TRAIN,VAL batch limits for a timing probe or smoke run.",
+        help="TRAIN,VAL batch limits for a timing or smoke run.",
     )
     fit.set_defaults(run=_train_fit)
 
