@@ -199,6 +199,14 @@ def _audit_evaluate(args: argparse.Namespace) -> None:
         if previous is not None:
             report["revision"] = args.revision
             report["previous"] = previous
+        if args.gate_output:
+            gate = {
+                key: report[key]
+                for key in ("kappa_interval", "threshold", "pass", "method")
+            }
+            with args.gate_output.open("x", encoding="utf-8") as handle:
+                json.dump(gate, handle, indent=2)
+                handle.write("\n")
         _print_json(report)
     except (ValueError, OSError, KeyError) as error:
         raise SystemExit(f"audit blocked: {error}") from error
@@ -478,6 +486,9 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_audit.add_argument("sheet", type=Path)
     evaluate_audit.add_argument("--previous", type=Path)
     evaluate_audit.add_argument("--revision")
+    evaluate_audit.add_argument(
+        "--gate-output", type=Path, help="Write a new freeze-compatible gate record."
+    )
     evaluate_audit.set_defaults(run=_audit_evaluate)
 
     # train: the one fit command the queue launches as a child process

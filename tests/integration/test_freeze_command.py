@@ -372,3 +372,62 @@ def test_grouped_manifest_rejects_missing_grouping_dependency(
     write_manifest(altered, out / "target")
     with pytest.raises(FreezeBlockedError, match="grouping"):
         load_manifest(out / "target")
+
+
+def test_freeze_accepts_audit_cli_gate_projection(inputs: dict[str, Path]) -> None:
+    audit_dir = inputs["base"] / "rating-fixture"
+    fixture = _run("data", "audit-fixture", "--output", str(audit_dir))
+    assert fixture.returncode == 0, fixture.stderr
+    gate = inputs["base"] / "projected-gate.json"
+    rating = _run(
+        "data",
+        "audit-evaluate",
+        str(audit_dir / "agent.json"),
+        str(audit_dir / "synthetic_ratings.csv"),
+        "--gate-output",
+        str(gate),
+    )
+    assert rating.returncode == 0, rating.stderr
+    assert set(json.loads(gate.read_text())) == {
+        "kappa_interval",
+        "threshold",
+        "pass",
+        "method",
+    }
+    out, result = _freeze(
+        inputs,
+        "projected-gate",
+        "--grouping-version",
+        "dhash-v1",
+        "--agreement-results",
+        str(gate),
+    )
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads((out / "target" / "grouping.json").read_text())
+    assert receipt["gate_outcomes"]["agreement"] == "pass"
+
+
+def test_freeze_records_undefined_kappa_as_failed_gate(inputs: dict[str, Path]) -> None:
+    gate = inputs["base"] / "undefined-gate.json"
+    gate.write_text(
+        json.dumps(
+            {
+                "kappa_interval": None,
+                "threshold": 0.6,
+                "pass": False,
+                "method": "Cohen kappa undefined",
+            }
+        ),
+        encoding="utf-8",
+    )
+    out, result = _freeze(
+        inputs,
+        "undefined-gate",
+        "--grouping-version",
+        "dhash-v1",
+        "--agreement-results",
+        str(gate),
+    )
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads((out / "target" / "grouping.json").read_text())
+    assert receipt["gate_outcomes"]["agreement"] == "fail"

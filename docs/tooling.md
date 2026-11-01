@@ -49,8 +49,10 @@ other verdicts and malformed rows are rejected. Duplicate or reversed pairs are
 collapsed. Exact byte-identical copies remain inseparable.
 
 Optionally, `--agreement-results PATH` reads a JSON object with exactly
-`kappa_interval` (two ordered numbers in [-1, 1]), `threshold` (a number in
-[-1, 1]), `pass` (a boolean), and `method` (a nonempty string). The pass flag
-must equal whether the interval's lower bound meets the threshold. The receipt
-records the input and the resulting pass/fail gate. Without the option, agreement
+`kappa_interval` (two ordered numbers in [-1, 1], or null for undefined
+kappa), `threshold` (a number in [-1, 1]), `pass` (a boolean), and `method`
+(a nonempty string). A numeric interval passes only when its lower bound meets
+the threshold; a null interval always fails. `data audit-evaluate --gate-output`
+writes this record separately from its full rating report. The receipt records
+the input and the resulting pass/fail gate. Without the option, agreement
 remains pending. These grouping inputs are unavailable on the legacy freeze path.

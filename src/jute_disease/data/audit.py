@@ -6,7 +6,9 @@ near-duplicate as merge; very similar and different are no-merge.
 
 import csv
 import hashlib
+import io
 import json
+import math
 import random
 from collections import defaultdict
 from collections.abc import Callable, Sequence
@@ -15,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PIL import Image, ImageEnhance, ImageOps
+from PIL import Image
 
 from jute_disease.data.grouping import flip_canonical_dhash
 from jute_disease.evaluation import agreement_gate
@@ -234,49 +236,82 @@ def residual_sample(
 
 
 def synthetic_recall(images: Sequence[Image.Image]) -> dict[str, Any]:
-    """Measure flip-canonical dHash recall across fixed transforms and strengths."""
-    if len(images) < 2:
-        raise ValueError("at least two unrelated images required")
-    transforms = {
-        "brightness": lambda im, strength: ImageEnhance.Brightness(im).enhance(
-            strength
-        ),
-        "crop": lambda im, strength: im.crop(
-            (
-                int(im.width * strength),
-                int(im.height * strength),
-                int(im.width * (1 - strength)),
-                int(im.height * (1 - strength)),
-            )
-        ).resize(im.size),
-        "mirror": lambda im, strength: ImageOps.mirror(im),
-    }
-    strengths = {"brightness": [0.9, 0.7], "crop": [0.05, 0.15], "mirror": [1.0]}
+    """Audit 100 unrelated sources under the prespecified mild transforms.
+
+    Crop strength is the fraction of total image area targeted for removal.
+    Rounded-up centered dimensions ensure the actual loss does not exceed it.
+    """
+    if len(images) != 100:
+        raise ValueError(
+            "synthetic recall requires exactly 100 unrelated source images"
+        )
     hashes = [flip_canonical_dhash(im) for im in images]
     rows = []
-    for name, transform in transforms.items():
-        for strength in strengths[name]:
+    for name, strengths in (
+        ("resize", (0.5, 0.75)),
+        ("crop", (0.05, 0.10)),
+        ("jpeg", (70, 85)),
+    ):
+        for strength in strengths:
+            transformed = []
+            removed = []
+            for image in images:
+                if name == "resize":
+                    copy = image.resize(
+                        (
+                            max(1, round(image.width * strength)),
+                            max(1, round(image.height * strength)),
+                        ),
+                        Image.Resampling.LANCZOS,
+                    )
+                elif name == "crop":
+                    factor = math.sqrt(1 - strength)
+                    width, height = (
+                        math.ceil(image.width * factor),
+                        math.ceil(image.height * factor),
+                    )
+                    left, top = (image.width - width) // 2, (image.height - height) // 2
+                    copy = image.crop((left, top, left + width, top + height))
+                    removed.append(1 - width * height / (image.width * image.height))
+                else:
+                    buffer = io.BytesIO()
+                    image.convert("RGB").save(
+                        buffer, format="JPEG", quality=int(strength)
+                    )
+                    buffer.seek(0)
+                    with Image.open(buffer) as jpeg:
+                        copy = jpeg.convert("RGB")
+                transformed.append(copy)
             hits = sum(
-                (h ^ flip_canonical_dhash(transform(im, strength))).bit_count() <= 4
-                for im, h in zip(images, hashes, strict=True)
+                (h ^ flip_canonical_dhash(copy)).bit_count() <= 4
+                for h, copy in zip(hashes, transformed, strict=True)
             )
-            rows.append(
-                {
-                    "transform": name,
-                    "strength": strength,
-                    "hits": hits,
-                    "total": len(images),
-                    "recall": hits / len(images),
-                }
-            )
+            row = {
+                "transform": name,
+                "strength": strength,
+                "hits": hits,
+                "total": len(images),
+                "recall": hits / len(images),
+                "mild": True,
+            }
+            if removed:
+                row["actual_removed_area"] = removed
+                row["actual_removed_area_min"] = min(removed)
+                row["actual_removed_area_max"] = max(removed)
+            rows.append(row)
     false_merges = sum((a ^ b).bit_count() <= 4 for a, b in combinations(hashes, 2))
     total = len(images) * (len(images) - 1) // 2
+    rate = false_merges / total
+    mild_failed = any(row["mild"] and row["recall"] < 0.9 for row in rows)
+    false_failed = rate > 0.05
     return {
+        "source_images": len(images),
         "transforms": rows,
-        "unrelated": {
-            "false_merges": false_merges,
-            "total": total,
-            "rate": false_merges / total,
+        "unrelated": {"false_merges": false_merges, "total": total, "rate": rate},
+        "threshold_change": {
+            "mild_recall_failed": mild_failed,
+            "unrelated_false_merge_failed": false_failed,
+            "condition_met": mild_failed or false_failed,
         },
     }
 
@@ -458,7 +493,25 @@ def evaluate_ratings(
         raise ValueError(
             "every population stratum must be represented with positive denominator"
         )
-    agreement = agreement_gate(first, second, seed=seed)
+    positive = sum(a == b == 1 for a, b in zip(first, second, strict=True))
+    negative = sum(a == b == 0 for a, b in zip(first, second, strict=True))
+    discordant = len(first) - positive - negative
+    pos_denom, neg_denom = 2 * positive + discordant, 2 * negative + discordant
+    positive_agreement = 2 * positive / pos_denom if pos_denom else None
+    negative_agreement = 2 * negative / neg_denom if neg_denom else None
+    if len(set(first + second)) == 1:
+        kappa, interval, passed = None, None, False
+        threshold = 0.6
+        method = "Cohen kappa undefined: both raters used one category"
+    else:
+        agreement = agreement_gate(first, second, seed=seed)
+        kappa = agreement.kappa
+        interval = [agreement.interval.lower, agreement.interval.upper]
+        threshold, passed, method = (
+            agreement.threshold,
+            agreement.passed,
+            agreement.method,
+        )
     weighted = sum(denominators[s] * sum(e) / len(e) for s, e in errors.items()) / sum(
         denominators.values()
     )
@@ -484,11 +537,13 @@ def evaluate_ratings(
         **algorithm,
         "cohort_digest": digest,
         "revision": revision,
-        "kappa": agreement.kappa,
-        "kappa_interval": [agreement.interval.lower, agreement.interval.upper],
-        "threshold": agreement.threshold,
-        "pass": agreement.passed,
-        "method": agreement.method,
+        "kappa": kappa,
+        "kappa_interval": interval,
+        "threshold": threshold,
+        "pass": passed,
+        "method": method,
+        "positive_agreement": positive_agreement,
+        "negative_agreement": negative_agreement,
         "weighted_error_rate": weighted,
         "weighted_false_merge_disagreement_rate": false_rate,
         "weighted_missed_merge_disagreement_rate": missed_rate,
@@ -499,7 +554,7 @@ def evaluate_ratings(
         "very_similar": similar,
         "round": round_number,
         "next_action": "proceed"
-        if agreement.passed
+        if passed
         else "revise_rubric_and_rerun"
         if round_number == 1
         else "owner_escalation",
@@ -522,7 +577,7 @@ def fixture_round(output: Path) -> dict[str, Any]:
     rng = np.random.default_rng(42)
     images = [
         Image.fromarray(rng.integers(0, 256, (32, 32, 3), dtype=np.uint8))
-        for _ in range(4)
+        for _ in range(100)
     ]
     samples = {
         "edges": sample_edges(hashes),

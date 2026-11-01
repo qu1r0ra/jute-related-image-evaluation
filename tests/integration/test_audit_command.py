@@ -74,11 +74,37 @@ def test_fixture_exercises_audit_samples(tmp_path: Path) -> None:
     assert report["residual"]["pools"]["fixture"]["rows"][0]["hash_neighbors"]
     assert report["residual"]["pools"]["fixture"]["rows"][0]["feature_neighbors"]
     assert {row["transform"] for row in report["recall"]["transforms"]} == {
-        "brightness",
+        "resize",
         "crop",
-        "mirror",
+        "jpeg",
     }
-    assert report["recall"]["unrelated"]["total"] == 6
+    recall = report["recall"]
+    assert recall["source_images"] == 100
+    assert recall["unrelated"]["total"] == 4950
+    assert {(r["transform"], r["strength"]) for r in recall["transforms"]} == {
+        ("resize", 0.5),
+        ("resize", 0.75),
+        ("crop", 0.05),
+        ("crop", 0.1),
+        ("jpeg", 70),
+        ("jpeg", 85),
+    }
+    assert all(row["total"] == 100 and row["mild"] for row in recall["transforms"])
+    assert all(
+        row["actual_removed_area_max"] <= row["strength"]
+        for row in recall["transforms"]
+        if row["transform"] == "crop"
+    )
+    assert all(
+        len(row["actual_removed_area"]) == 100
+        and max(row["actual_removed_area"]) <= row["strength"]
+        for row in recall["transforms"]
+        if row["transform"] == "crop"
+    )
+    assert recall["threshold_change"]["condition_met"] == (
+        recall["threshold_change"]["mild_recall_failed"]
+        or recall["threshold_change"]["unrelated_false_merge_failed"]
+    )
 
 
 def test_owner_rating_import_reports_weighted_error_and_escalation(
@@ -125,6 +151,8 @@ def test_owner_rating_import_reports_weighted_error_and_escalation(
     assert first.returncode == 0, first.stderr
     report = json.loads(first.stdout)
     assert report["weighted_error_rate"] == 1
+    assert report["positive_agreement"] == 0
+    assert report["negative_agreement"] == 0
     assert report["weighted_algorithm_error_rate"] == 0
     assert report["next_action"] == "revise_rubric_and_rerun"
     previous = tmp_path / "first.json"
@@ -249,3 +277,72 @@ def test_residual_sampler_rejects_short_pool_before_feature_extraction(
     with pytest.raises(SystemExit, match="short.*200"):
         cli.main(["data", "audit-sample", "residual", str(source)])
     assert not calls
+
+
+def test_undefined_kappa_fails_then_escalates_after_revision(tmp_path: Path) -> None:
+    rows = [
+        {
+            "pair_id": str(i),
+            "image_a": f"a{i}",
+            "image_b": f"b{i}",
+            "agent_rating": "exact",
+            "algorithm_merge": True,
+            "stratum": "all",
+        }
+        for i in range(20)
+    ]
+    source = tmp_path / "agent.json"
+    source.write_text(
+        json.dumps({"pairs": rows, "denominators": {"all": 20}}), encoding="utf-8"
+    )
+    sheet = tmp_path / "owner.csv"
+    with sheet.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle, fieldnames=["pair_id", "image_a", "image_b", "rating"]
+        )
+        writer.writeheader()
+        writer.writerows(
+            {
+                "pair_id": r["pair_id"],
+                "image_a": r["image_a"],
+                "image_b": r["image_b"],
+                "rating": "exact",
+            }
+            for r in rows
+        )
+    base = [
+        sys.executable,
+        "-m",
+        "jute_disease.cli",
+        "data",
+        "audit-evaluate",
+        str(source),
+        str(sheet),
+    ]
+    gate = tmp_path / "gate.json"
+    first = subprocess.run(
+        base + ["--gate-output", str(gate)], capture_output=True, text=True, check=False
+    )
+    assert first.returncode == 0, first.stderr
+    assert json.loads(gate.read_text(encoding="utf-8")) == {
+        "kappa_interval": None,
+        "threshold": 0.6,
+        "pass": False,
+        "method": "Cohen kappa undefined: both raters used one category",
+    }
+    report = json.loads(first.stdout)
+    assert report["kappa"] is None and report["kappa_interval"] is None
+    assert (
+        report["pass"] is False and report["next_action"] == "revise_rubric_and_rerun"
+    )
+    assert report["positive_agreement"] == 1 and report["negative_agreement"] is None
+    prior = tmp_path / "prior.json"
+    prior.write_text(first.stdout, encoding="utf-8")
+    second = subprocess.run(
+        base + ["--previous", str(prior), "--revision", "clarify examples"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert second.returncode == 0, second.stderr
+    assert json.loads(second.stdout)["next_action"] == "owner_escalation"
