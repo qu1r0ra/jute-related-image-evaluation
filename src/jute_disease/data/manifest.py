@@ -311,7 +311,7 @@ def build_manifest(
     extra_dependencies: dict[str, str] | None = None,
     identity_resolution: IdentityResolution | None = None,
     grouping_version: str | None = None,
-    grouping_receipt: dict | None = None,
+    grouping_receipt: dict[str, object] | None = None,
 ) -> tuple[Manifest, Curation, IdentityResolution]:
     """Curate, resolve identity, split by group and validate.
 
