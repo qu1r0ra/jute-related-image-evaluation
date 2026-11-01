@@ -57,6 +57,7 @@ A high-level overview of the repository organization:
 ```text
 .
 ├── configs/
+│   ├── benchmark.json  # Declared fits, shared recipe and per-step timeouts
 │   └── historical/     # Lightning CLI and grid search configs for the reported runs (superseded record)
 ├── data/               # Dataset storage (git-ignored) and the tracked class list
 ├── docs/               # Architecture notes and the submitted paper
@@ -158,6 +159,8 @@ uv run --locked ruff check .
 uv run --locked ruff format --check .
 uv run --locked python scripts/audit_dependencies.py
 ```
+
+Training runs through a serial, resumable queue declared in `configs/benchmark.json`: `just queue-plan` shows the fits, `just queue-run` runs them, and running it again skips completed fits and resumes an interrupted CNN fit from its last saved epoch. [Architecture](docs/architecture.md#training-queue) defines the identity, retry and resume rules.
 
 For optional local SAM2 package imports, use `uv sync --locked --all-groups --extra masks`. No model weights are included or downloaded by setup.
 

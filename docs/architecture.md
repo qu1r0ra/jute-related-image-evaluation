@@ -6,7 +6,7 @@ The repository contains active tooling for a revised jute related-image evaluati
 
 ```text
 .
-├── configs/baselines/       # Current baseline entry points
+├── configs/benchmark.json   # Declared fits, shared recipe and per-step timeouts
 ├── configs/historical/      # Configurations used for submitted-study runs
 ├── data/                    # Local datasets and tracked class definitions
 ├── docs/adr/                # Accepted architecture and methodology decisions
@@ -22,7 +22,7 @@ The repository contains active tooling for a revised jute related-image evaluati
 
 `jute-disease` is the console entry point. Its subcommands cover dataset preparation, freezing, classical ML, Lightning training and evaluation. Public package imports are exposed from the relevant `jute_disease` subpackages. The `justfile` provides short wrappers for common commands; it does not define another application interface.
 
-Historical study files are retained as records. Active dependency configuration, baseline entry points and run output use the revised tooling. W&B is not an active logger or dependency. Lightning writes CSV logs locally; evaluation writes JSON with metrics, class order, confusion matrix and run settings.
+Historical study files are retained as records. Active dependency configuration and run output use the revised tooling. Lightning writes CSV logs locally; evaluation writes JSON with metrics, class order, confusion matrix and run settings.
 
 ## Data identity and preprocessing
 
@@ -33,6 +33,16 @@ ADR 0002 defines shared preprocessing. Both feature routes resize to a 256-pixel
 ## Modeling and local evidence
 
 The deep-learning path uses PyTorch Lightning and `timm`; the classical path uses scikit-learn estimators and image-feature extractors. Both paths expose consistent evaluation outputs. Local logs and evaluation records are the active evidence format. Downloaded SAM2 weights and inference are outside tooling setup; the optional `masks` extra is only used to check package installation and imports.
+
+## Training queue
+
+`configs/benchmark.json` declares every fit, the shared recipe and one timeout per kind of step (prepare, classical, source, target). The source and target timeouts are placeholders until the lab pilots in issue 114 calibrate them. `queue run` executes the plan serially, one child process per fit, so the timeout is enforced from outside the fit. Rerunning it resumes the queue. `queue.json` in the runs directory reports attempts, outcomes and arm status.
+
+- **Identity.** A fit is skipped only when its `receipt.json` parses, its run identity matches the current frozen inputs, recipe and upstream checkpoint bytes, and every recorded artifact still has its recorded bytes. Any other attempt stays under its `attempt-N` directory as a disclosed partial run and is never reused.
+- **Retry and abort.** A failed or timed-out fit is retried once with the same seed. A persistent failure is reported and its dependants are omitted. Three persistent failures in a row abort the queue, because they point at the environment; a rerun starts a fresh count.
+- **Seeds.** Each fit receives its seed from the benchmark config. No code fixes one.
+- **Mid-fit resume.** A CNN fit keeps its full training state in `checkpoints/`, shared by its attempts. A restarted attempt continues from `last.ckpt` when `owner.json` names the identical run identity, training had not finished, and the file has the bytes `last.json` recorded. Any other state moves to `superseded/checkpoints-N` and the fit starts fresh. The receipt discloses `training_state` (`resumed`, `optimizer_loaded`, `refused`) and `lineage.resumed_from`. A resumed fit is not bit-identical to an uninterrupted one: the interrupted epoch revalidates, then training continues.
+- **Held-out data.** Training code never names the test partition. `tests/training/test_held_out_guard.py` enforces this statically and at the command line.
 
 ## Environment and validation
 
