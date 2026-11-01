@@ -87,9 +87,13 @@ def audit_components(
         return []
     sizes = sorted(len(c) for c in components)
     cutoff = sizes[(99 * len(sizes) + 99) // 100 - 1]
+    bridge_by_root: dict[str, list[tuple[str, str]]] = {}
+    roots = {key: component[0] for component in components for key in component}
+    for a, b, _ in edges:
+        if labels[a] != labels[b]:
+            bridge_by_root.setdefault(roots[a], []).append((min(a, b), max(a, b)))
     result = []
     for component in components:
-        members = set(component)
         diameter = max(
             (
                 (hashes[a] ^ hashes[b]).bit_count()
@@ -97,11 +101,7 @@ def audit_components(
             ),
             default=0,
         )
-        bridges = sorted(
-            (min(a, b), max(a, b))
-            for a, b, _ in edges
-            if a in members and b in members and labels[a] != labels[b]
-        )
+        bridges = sorted(bridge_by_root.get(component[0], []))
         flags = []
         if len(component) > cutoff:
             flags.append("size")
@@ -202,9 +202,10 @@ def group_inventory(
         if len({labels[key] for key in audit["members"]}) > 1
         for key in audit["members"]
     )
+    excluded_set = set(excluded)
     families = [
         audit["members"]
         for audit in repair["audit"]
-        if not set(audit["members"]) & set(excluded)
+        if not excluded_set.intersection(audit["members"])
     ]
     return {**repair, "excluded": excluded, "families": families}

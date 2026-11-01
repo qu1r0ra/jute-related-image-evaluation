@@ -186,6 +186,11 @@ def test_dhash_freeze_receipt_binds_groups_and_cannot_replace_existing_freeze(
     assert grouping["algorithm_version"] == "dhash-v1"
     assert report["receipt"]["dependencies"]["grouping"] == grouping["digest"]
     assert grouping["denominators"]["images"] > 0
+    manifest = load_manifest(out / "target")
+    groups = {entry.path: entry.group for entry in manifest.entries}
+    assert any(len(family) > 1 for family in grouping["families"])
+    for family in grouping["families"]:
+        assert len({groups[path] for path in family if path in groups}) <= 1
     _, repeat = _freeze(inputs, "dhash", "--grouping-version", "dhash-v1")
     assert repeat.returncode == 0
     assert json.loads(repeat.stdout)["receipt"] == report["receipt"]
