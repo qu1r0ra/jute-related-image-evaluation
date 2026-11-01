@@ -33,6 +33,7 @@ from jute_disease.training.logger import (
 from jute_disease.training.results import FitResult
 from jute_disease.training.resume import (
     CHECKPOINT_DIR,
+    LAST_CHECKPOINT,
     record_progress,
     verified_progress,
 )
@@ -200,7 +201,10 @@ def fit_cnn(
         if checkpoint_dir is None:
             raise ValueError(f"{fit.fit_id}: resuming needs a checkpoint directory")
         resumed_from = verified_progress(checkpoint_dir)
-        if resumed_from is None or Path(resume_from).parent != Path(checkpoint_dir):
+        if (
+            resumed_from is None
+            or Path(resume_from) != Path(checkpoint_dir) / LAST_CHECKPOINT
+        ):
             raise ValueError(
                 f"{fit.fit_id}: {resume_from} is not a recorded checkpoint"
             )

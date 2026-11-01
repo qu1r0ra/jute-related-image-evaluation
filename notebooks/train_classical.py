@@ -105,7 +105,7 @@ def run(fit_id: str) -> dict:
     attempt = SMOKE_DIR / name
     attempt.mkdir(parents=True, exist_ok=True)
     job = Job(fit_id, attempt, attempt / "result.json")
-    limit = benchmark.limits.classical_fit_seconds
+    limit = benchmark.limits.classical_seconds
     outcome = launch(job, limit, attempt / "child.log")
     if outcome.timed_out:
         raise RuntimeError(f"{fit_id} exceeded the {limit:.0f} s limit")

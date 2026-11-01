@@ -90,7 +90,6 @@ class _Queue:
         report_path: Path,
     ) -> None:
         self.benchmark = benchmark
-        self.timeouts = benchmark.limits
         self.store = store
         self.clock = clock
         self.execute = execute
@@ -148,7 +147,7 @@ class _Queue:
             raise error
 
     def attempt(self, fit: FitSpec, identity: str) -> Outcome:
-        timeout = self.timeouts.timeout(fit.kind)
+        timeout = self.benchmark.limits.timeout(fit.kind)
         try:
             outcome = self.execute(fit, timeout)
         except Exception as error:
