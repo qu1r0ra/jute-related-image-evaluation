@@ -5,9 +5,11 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 import torch.nn as nn
+from lightning import LightningModule
 
 from jute_disease.config import DEFAULT_LR, NUM_CLASSES
 from jute_disease.models.dl import Classifier, TimmBackbone
+from jute_disease.models.dl import classifier as classifier_module
 
 
 @pytest.fixture
@@ -94,14 +96,6 @@ def test_classifier_validation_step(classifier: Classifier) -> None:
     assert loss is not None
 
 
-def test_classifier_test_step(classifier: Classifier) -> None:
-    batch = (torch.randn(4, 3, 224, 224), torch.randint(0, NUM_CLASSES, (4,)))
-    loss = classifier.test_step(batch, 0)
-    assert loss is not None
-    assert len(classifier.test_preds) == 1
-    assert len(classifier.test_targets) == 1
-
-
 def test_classifier_predict_step(classifier: Classifier) -> None:
     batch = (torch.randn(4, 3, 224, 224), torch.randint(0, NUM_CLASSES, (4,)))
     preds = classifier.predict_step(batch, 0)
@@ -114,16 +108,37 @@ def test_classifier_extra_repr(classifier: Classifier) -> None:
     assert f"lr={DEFAULT_LR}" in rep
 
 
-def test_classifier_on_test_epoch_hooks(classifier: Classifier) -> None:
-    classifier.test_preds.append(torch.tensor([1, 2]))
-    classifier.test_targets.append(torch.tensor([1, 2]))
+def test_default_recipe_trains_the_full_uncompiled_backbone(
+    backbone: TimmBackbone,
+) -> None:
+    model = Classifier(feature_extractor=backbone, num_classes=NUM_CLASSES)
+    assert all(p.requires_grad for p in model.feature_extractor.parameters())
+    assert not hasattr(model.feature_extractor, "_orig_mod")
 
-    classifier.on_test_epoch_start()
-    assert len(classifier.test_preds) == 0
-    assert len(classifier.test_targets) == 0
 
-    classifier.test_preds.append(torch.tensor([1, 2]))
-    classifier.test_targets.append(torch.tensor([1, 2]))
-    classifier.on_test_epoch_end()
-    assert len(classifier.test_preds) == 0
-    assert len(classifier.test_targets) == 0
+def test_classifier_has_no_test_hooks_and_no_wandb() -> None:
+    assert Classifier.test_step is LightningModule.test_step
+    assert Classifier.on_test_epoch_end is LightningModule.on_test_epoch_end
+    assert not hasattr(classifier_module, "wandb")
+
+
+def test_scheduler_and_optimizer_follow_the_declared_recipe(
+    backbone: TimmBackbone,
+) -> None:
+    model = Classifier(
+        feature_extractor=backbone,
+        num_classes=NUM_CLASSES,
+        lr=3e-4,
+        weight_decay=0.01,
+        scheduler_patience=3,
+        scheduler_factor=0.1,
+    )
+    configured = model.configure_optimizers()
+    optimizer = configured["optimizer"]
+    scheduler = configured["lr_scheduler"]
+    assert type(optimizer).__name__ == "AdamW"
+    assert optimizer.defaults["lr"] == 3e-4
+    assert optimizer.defaults["weight_decay"] == 0.01
+    assert scheduler["monitor"] == "val_loss"
+    assert scheduler["scheduler"].patience == 3
+    assert scheduler["scheduler"].factor == 0.1

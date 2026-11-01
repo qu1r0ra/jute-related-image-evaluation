@@ -18,6 +18,7 @@ import json
 import re
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 from jute_disease.config import (
     CURATION_RULES_PATH,
@@ -34,7 +35,6 @@ from jute_disease.data.cache import (
     write_decision,
 )
 from jute_disease.data.curation import load_rules
-from jute_disease.data.fingerprints import file_sha256
 from jute_disease.data.identity import load_reviews
 from jute_disease.data.inventory import (
     build_inventory,
@@ -174,6 +174,8 @@ def load_source_manifest(
     manifest_dir: Path | str,
     image_root: Path | str,
     target_manifest_dir: Path | str,
+    *,
+    content_verifier: Any | None = None,
 ) -> Manifest:
     """Load a source manifest after checking identity, lineage and retained bytes.
 
@@ -228,13 +230,21 @@ def load_source_manifest(
         raise FreezeBlockedError("Source intake differs from the tracked content pin")
     if report.get("package_inventory_digest") != dependencies["source_inventory"]:
         raise FreezeBlockedError("Source intake inventory differs from its manifest")
-    if blockers := readiness_blockers(spec):
+    support = manifest.support()
+    if blockers := readiness_blockers(
+        spec,
+        required_labels=manifest.labels,
+        validation_labels=tuple(support["val"]),
+    ):
         raise FreezeBlockedError("; ".join(blockers))
 
-    image_root = Path(image_root)
-    for entry in (*manifest.partition("train"), *manifest.partition("val")):
-        if file_sha256(image_root / entry.path) != entry.image_id:
-            raise SourceMismatchError(f"Source content changed: {entry.path}")
+    from jute_disease.data.readers import ManifestContentVerifier
+
+    verifier = content_verifier or ManifestContentVerifier()
+    try:
+        verifier.verify(manifest, image_root, ("train", "val"))
+    except ValueError as error:
+        raise SourceMismatchError(str(error)) from error
     return manifest
 
 

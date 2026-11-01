@@ -2,7 +2,7 @@
 
 import pytest
 
-from jute_disease.data.synthetic import SyntheticPlan, make_synthetic_data
+from jute_disease.data import SyntheticPlan, make_synthetic_data
 
 
 @pytest.fixture(scope="session")

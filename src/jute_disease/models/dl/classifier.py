@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import torch
 from lightning import LightningModule
 from torch import nn
@@ -8,8 +6,6 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torchmetrics import Accuracy, F1Score, MetricCollection, Precision, Recall
 
 from jute_disease.config import DEFAULT_LR, DEFAULT_WEIGHT_DECAY
-from jute_disease.evaluation.metrics import format_metrics
-from jute_disease.training.logger import write_evaluation
 
 
 class Classifier(LightningModule):
@@ -19,8 +15,10 @@ class Classifier(LightningModule):
         num_classes: int,
         lr: float = DEFAULT_LR,
         weight_decay: float = DEFAULT_WEIGHT_DECAY,
-        freeze_backbone: bool = True,
-        compile_model: bool = True,
+        freeze_backbone: bool = False,
+        compile_model: bool = False,
+        scheduler_patience: int = 3,
+        scheduler_factor: float = 0.1,
     ) -> None:
         super().__init__()
         if not hasattr(feature_extractor, "out_features"):
@@ -43,6 +41,8 @@ class Classifier(LightningModule):
         self.num_classes = num_classes
         self.lr = lr
         self.weight_decay = weight_decay
+        self.scheduler_patience = scheduler_patience
+        self.scheduler_factor = scheduler_factor
         self.save_hyperparameters(ignore=["feature_extractor"])
 
         self.train_metrics = MetricCollection(
@@ -64,10 +64,6 @@ class Classifier(LightningModule):
             },
             prefix="val_",
         )
-        self.test_metrics = self.val_metrics.clone(prefix="test_")
-
-        self.test_preds: list[torch.Tensor] = []
-        self.test_targets: list[torch.Tensor] = []
 
     def extra_repr(self) -> str:
         return (
@@ -105,46 +101,6 @@ class Classifier(LightningModule):
 
         return loss
 
-    def test_step(
-        self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int
-    ) -> torch.Tensor:
-        x, y = batch
-        y_hat = self(x)
-        loss = self.loss(y_hat, y)
-
-        self.log("test_loss", loss)
-        self.test_metrics(y_hat, y)
-        self.log_dict(self.test_metrics, on_step=False, on_epoch=True)
-
-        self.test_preds.append(y_hat.argmax(dim=-1).detach().cpu())
-        self.test_targets.append(y.detach().cpu())
-
-        return loss
-
-    def on_test_epoch_start(self) -> None:
-        self.test_preds.clear()
-        self.test_targets.clear()
-
-    def on_test_epoch_end(self) -> None:
-        if self.test_preds:
-            classes = getattr(self.trainer.datamodule, "classes", None)
-            log_dir = getattr(self.logger, "log_dir", None)
-            write_evaluation(
-                "test",
-                format_metrics(self.test_metrics.compute()),
-                torch.cat(self.test_targets).numpy(),
-                torch.cat(self.test_preds).numpy(),
-                classes,
-                {
-                    "checkpoint": str(getattr(self.trainer, "ckpt_path", "")),
-                    "model": dict(self.hparams),
-                    "precision": str(self.trainer.precision),
-                },
-                directory=Path(log_dir) if isinstance(log_dir, str) else None,
-            )
-        self.test_preds.clear()
-        self.test_targets.clear()
-
     def predict_step(
         self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int
     ) -> torch.Tensor:
@@ -160,7 +116,11 @@ class Classifier(LightningModule):
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
-                "scheduler": ReduceLROnPlateau(optimizer, patience=3),
+                "scheduler": ReduceLROnPlateau(
+                    optimizer,
+                    patience=self.scheduler_patience,
+                    factor=self.scheduler_factor,
+                ),
                 "monitor": "val_loss",
                 "frequency": 1,
                 "interval": "epoch",

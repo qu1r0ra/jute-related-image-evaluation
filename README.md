@@ -60,7 +60,7 @@ A high-level overview of the repository organization:
 │   └── historical/     # Lightning CLI and grid search configs for the reported runs (superseded record)
 ├── data/               # Dataset storage (git-ignored) and the tracked class list
 ├── docs/               # Architecture notes and the submitted paper
-├── notebooks/
+├── notebooks/          # Local training notebooks and the freeze provenance demo
 │   └── historical/     # Notebooks and Jupytext pairs as run for the paper
 ├── results/
 │   └── submitted/      # Committed logs and figures behind the reported numbers
@@ -71,7 +71,7 @@ A high-level overview of the repository organization:
 ├── tests/              # Unit and API tests
 ├── .env.example        # Environment variables template
 ├── justfile            # Task runner: one recipe per study command
-└── artifacts/          # Runtime output (git-ignored): checkpoints, features, logs
+└── artifacts/          # Runtime output (git-ignored): run receipts, features, smoke receipts
 ```
 
 For a detailed look at the internal design, public APIs, and architectural decisions, see [architecture.md](docs/architecture.md).

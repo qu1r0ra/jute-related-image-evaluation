@@ -1,0 +1,70 @@
+{
+  "recipe": {
+    "image_size": 256,
+    "seeds": [
+      42,
+      1337,
+      7
+    ],
+    "source_seed": 42,
+    "learning_rate": 0.0003,
+    "weight_decay": 0.01,
+    "max_epochs": 50,
+    "early_stopping_patience": 8,
+    "scheduler_patience": 3,
+    "scheduler_factor": 0.1,
+    "precision": "16-mixed",
+    "compile_model": false,
+    "num_workers": 0,
+    "weighted_sampler": true,
+    "effective_batch": 32
+  },
+  "cnn_systems": {
+    "mobilenet_v2_direct": {
+      "model": "mobilenetv2_100.ra_in1k",
+      "micro_batch": 32,
+      "chain": []
+    },
+    "efficientnet_b5_direct": {
+      "model": "efficientnet_b5.sw_in12k_ft_in1k",
+      "micro_batch": 8,
+      "chain": []
+    },
+    "mobilenet_v2_plantvillage": {
+      "model": "mobilenetv2_100.ra_in1k",
+      "micro_batch": 32,
+      "chain": [
+        "plantvillage"
+      ]
+    },
+    "mobilenet_v2_plantvillage_plantdoc": {
+      "model": "mobilenetv2_100.ra_in1k",
+      "micro_batch": 32,
+      "chain": [
+        "plantvillage",
+        "plantdoc"
+      ]
+    }
+  },
+  "classical": {
+    "estimators": [
+      "gnb",
+      "knn",
+      "lr",
+      "rf",
+      "svm"
+    ],
+    "features": [
+      "raw",
+      "crafted"
+    ],
+    "seed": 42
+  },
+  "queue": {
+    "classical_fit_seconds": 1800,
+    "classical_aggregate_seconds": 18000,
+    "shared_preparation_seconds": 1800,
+    "reserve_hours": 8,
+    "forecast_margin": 1.25
+  }
+}

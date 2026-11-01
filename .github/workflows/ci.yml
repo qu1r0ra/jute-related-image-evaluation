@@ -111,3 +111,8 @@ jobs:
           )
           PY
           uv run jute-disease freeze target --image-root artifacts/synthetic --rules artifacts/smoke-curation-rules.json
+
+      - name: Plan the queue on the frozen manifest
+        run: |
+          uv run jute-disease stack --allow-cpu
+          uv run jute-disease queue plan --allow-cpu --image-root artifacts/synthetic

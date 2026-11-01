@@ -11,7 +11,12 @@ from torchvision.datasets import ImageFolder
 
 from jute_disease.config import BATCH_SIZE, DEFAULT_SEED, IMAGE_SIZE, NUM_WORKERS
 from jute_disease.data.freeze import load_source_manifest
-from jute_disease.data.manifest import FreezeBlockedError, Manifest, load_manifest
+from jute_disease.data.manifest import (
+    FreezeBlockedError,
+    HeldOutPartitionError,
+    Manifest,
+    load_manifest,
+)
 from jute_disease.data.readers import ManifestDataset
 from jute_disease.data.sampling import balanced_sampler, loader_generator, seed_worker
 from jute_disease.data.transforms import PreprocessingSpec, create_pipeline
@@ -27,6 +32,10 @@ class DataModule(LightningDataModule):
     * ``data_dir``: an ``ImageFolder`` tree, either with ``train/``/``val/``
       (and optional ``test/``) folders, or flat with ``val_split`` for a seeded
       split. Used for external pretraining data and historical configs.
+
+    The held-out test partition is denied unless ``allow_test`` is set, which only
+    the separately gated evaluation does: training and the queue build the train
+    and validation datasets and nothing else.
 
     Every pipeline, sampler and loader is built from ``seed``; nothing random is
     shared between instances.
@@ -48,6 +57,7 @@ class DataModule(LightningDataModule):
         k_fold: int = 1,
         fold_index: int = 0,
         image_size: int = IMAGE_SIZE,
+        allow_test: bool = False,
     ) -> None:
         super().__init__()
         if (data_dir is None) == (manifest_dir is None):
@@ -114,6 +124,10 @@ class DataModule(LightningDataModule):
         )
 
     def setup(self, stage: str | None = None) -> None:
+        if stage in ("test", "predict") and not self.hparams.allow_test:
+            raise HeldOutPartitionError(
+                f"Stage {stage!r} would open the held-out test partition"
+            )
         if self.manifest_dir is not None:
             self._setup_manifest(stage)
         else:
@@ -142,7 +156,7 @@ class DataModule(LightningDataModule):
                 self.jute_train = self._manifest_dataset("train", True)
                 self.jute_val = self._manifest_dataset("val", False)
                 self._make_sampler(self.jute_train.targets)
-        if stage in ("test", None):
+        if stage == "test" or (stage is None and self.hparams.allow_test):
             self.jute_test = self._manifest_dataset("test", False)
         if stage == "predict":
             self.jute_predict = self._manifest_dataset("test", False)
@@ -193,7 +207,9 @@ class DataModule(LightningDataModule):
                     val_part.indices,
                 )
                 self._make_sampler([full.targets[i] for i in train_part.indices])
-        if stage in ("test", None) and test_dir.exists():
+        if (
+            stage == "test" or (stage is None and self.hparams.allow_test)
+        ) and test_dir.exists():
             self.jute_test = ImageFolder(test_dir, self._eval_transform())
             self._classes = self.jute_test.classes
         if stage == "predict":

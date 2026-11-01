@@ -6,12 +6,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from jute_disease.data.fingerprints import (
-    PHASH_VARIANTS,
-    fingerprint_image,
-    perceptual_hashes,
-    phash_distance,
-)
+from jute_disease.data import fingerprint_image, phash_distance
+from jute_disease.data.fingerprints import PHASH_VARIANTS, perceptual_hashes
 
 
 def _field(seed: int, size: int = 64) -> Image.Image:

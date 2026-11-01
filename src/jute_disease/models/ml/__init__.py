@@ -13,6 +13,7 @@ from jute_disease.models.ml.features import (
     CraftedFeatureExtractor,
     RawPixelFeatureExtractor,
     extract_features,
+    feature_cache_key,
 )
 
 __all__ = [
@@ -26,6 +27,7 @@ __all__ = [
     "SklearnClassifier",
     "SupportVectorMachine",
     "extract_features",
+    "feature_cache_key",
     "ML_CLASSIFIERS",
     "FEATURE_EXTRACTORS",
 ]
