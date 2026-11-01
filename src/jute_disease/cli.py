@@ -8,7 +8,6 @@ import argparse
 import json
 import sys
 from collections.abc import Callable, Sequence
-from datetime import datetime
 from pathlib import Path
 
 from jute_disease.config import (
@@ -41,9 +40,9 @@ from jute_disease.data import (
 from jute_disease.reporting.tables import aggregate_metrics
 from jute_disease.training import (
     WORKSPACE_FILE,
-    Cutoff,
     DataInputs,
     Job,
+    QueueAbortedError,
     QueueReport,
     RunStore,
     SystemClock,
@@ -51,7 +50,6 @@ from jute_disease.training import (
     build_plan,
     make_executor,
     make_identity,
-    make_probe,
     open_workspace,
     run_job,
     run_queue,
@@ -173,7 +171,6 @@ def _queue_plan(args: argparse.Namespace) -> None:
         [
             {
                 "stage": stage.name,
-                "mandatory": stage.mandatory,
                 "fits": [
                     {"fit": fit.fit_id, "state": store.state(fit.fit_id).value}
                     for fit in stage.fits
@@ -205,16 +202,17 @@ def _queue_run(args: argparse.Namespace) -> None:
     store = RunStore(workspace.runs_dir)
     launcher = subprocess_launcher(workspace_file)
     identity = make_identity(workspace, store)
-    report: QueueReport = run_queue(
-        workspace.benchmark,
-        store,
-        clock=SystemClock(),
-        cutoff=Cutoff(args.cutoff, args.cutoff_basis, args.cutoff_record),
-        execute=make_executor(workspace, store, identity, launcher),
-        probe=make_probe(workspace, launcher),
-        identity_for=identity,
-        report_path=workspace.runs_dir / "queue.json",
-    )
+    try:
+        report: QueueReport = run_queue(
+            workspace.benchmark,
+            store,
+            clock=SystemClock(),
+            execute=make_executor(workspace, store, identity, launcher),
+            identity_for=identity,
+            report_path=workspace.runs_dir / "queue.json",
+        )
+    except QueueAbortedError as error:
+        raise SystemExit(f"{error}; see queue.json") from error
     _print_json(
         {
             "outcomes": {k: v.value for k, v in report.outcomes.items()},
@@ -238,15 +236,6 @@ def _bounds(text: str) -> tuple[int, int]:
     if train < 1 or val < 1:
         raise argparse.ArgumentTypeError("batch counts must be positive")
     return train, val
-
-
-def _local_time(text: str) -> datetime:
-    try:
-        return datetime.fromisoformat(text)
-    except ValueError as error:
-        raise argparse.ArgumentTypeError(
-            "use an ISO local time such as 2026-10-31T14:00"
-        ) from error
 
 
 def _add_workspace_options(parser: argparse.ArgumentParser) -> None:
@@ -319,7 +308,7 @@ def build_parser() -> argparse.ArgumentParser:
     stack.add_argument("--allow-cpu", action="store_true")
     stack.set_defaults(run=_stack)
 
-    # queue: the resumable, deadline-aware run of the whole benchmark
+    # queue: the serial, resumable run of the whole benchmark
     queue = commands.add_parser("queue", help="Plan, run and inspect the queue.")
     queue_actions = queue.add_subparsers(
         dest="queue_action", metavar="ACTION", required=True
@@ -330,26 +319,8 @@ def build_parser() -> argparse.ArgumentParser:
     status = queue_actions.add_parser("status", help="Show every fit's state.")
     _add_workspace_options(status)
     status.set_defaults(run=_queue_status)
-    run = queue_actions.add_parser(
-        "run", help="Run or resume the benchmark before the cutoff."
-    )
+    run = queue_actions.add_parser("run", help="Run or resume the benchmark.")
     _add_workspace_options(run)
-    run.add_argument(
-        "--cutoff",
-        type=_local_time,
-        required=True,
-        help="Hard stop as an ISO local time; the queue reserves 8 h before it.",
-    )
-    run.add_argument(
-        "--cutoff-basis",
-        choices=("verified", "owner-operational"),
-        default="owner-operational",
-    )
-    run.add_argument(
-        "--cutoff-record",
-        required=True,
-        help="Where the cutoff comes from (a note, message or announcement).",
-    )
     run.set_defaults(run=_queue_run)
 
     # evaluate: aggregation and inference

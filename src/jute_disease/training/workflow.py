@@ -11,7 +11,6 @@ Imports of ``jute_disease.data`` and the fit engines are deferred: both import
 
 import json
 import sys
-import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -26,25 +25,18 @@ from jute_disease.training.benchmark import (
 )
 from jute_disease.training.inputs import DataInputs
 from jute_disease.training.process import ChildResult, run_child
-from jute_disease.training.queue import Executor, IdentityFor, Outcome, Probe
+from jute_disease.training.queue import Executor, IdentityFor, Outcome
 from jute_disease.training.receipts import Resume, RunState, RunStore, write_json_atomic
 from jute_disease.training.stack import verify_stack
 
 RESULT_FILE = "result.json"
 LOG_FILE = "child.log"
 WORKSPACE_FILE = "workspace.json"
-PROBE_DIR = "_probes"
-PROBE_BATCHES = (8, 4)
-PROBE_SECONDS = 900.0
 CNN_KINDS = (FitKind.SOURCE, FitKind.TARGET)
 
 
 class UpstreamError(RuntimeError):
     """The checkpoint a chained fit starts from is missing or no longer verifies."""
-
-
-class ProbeError(RuntimeError):
-    """A bounded timing probe did not produce a usable measurement."""
 
 
 @dataclass(frozen=True)
@@ -157,7 +149,7 @@ class Job:
     """One child invocation: a fit, where to work, and what it may start from.
 
     ``bounds`` are train and validation batch limits; a bounded job is a timing
-    probe or a smoke run and is never a fit.
+    or smoke run and is never a fit.
     """
 
     fit_id: str
@@ -247,7 +239,7 @@ def run_job(workspace: Workspace, job: Job) -> None:
     else:
         bounded: dict[str, Any] = {}
         if job.bounds is not None:
-            # A timing probe needs no chain; a smoke run given a checkpoint keeps it.
+            # A bounded run needs no chain; one given a checkpoint keeps it.
             if job.upstream_checkpoint is None:
                 fit = replace(fit, upstream=None)
             recipe = replace(recipe, max_epochs=1)
@@ -349,7 +341,7 @@ def make_executor(
 ) -> Executor:
     """Run one fit as a child, bounded by ``timeout``, and receipt the result."""
 
-    def execute(fit: FitSpec, timeout: float | None) -> Outcome:
+    def execute(fit: FitSpec, timeout: float) -> Outcome:
         if fit.kind is FitKind.CLASSICAL:
             prepare = find_fit(workspace, "classical/prepare")
             if store.resolve(prepare.fit_id, identity(prepare)) is not Resume.SKIP:
@@ -380,11 +372,7 @@ def make_executor(
             run.fail(state, f"{type(error).__name__}: {error}")
             raise
         if child.timed_out:
-            reason = (
-                f"exceeded the {timeout:.0f} s limit"
-                if timeout is not None
-                else "timed out"
-            )
+            reason = f"exceeded the {timeout:.0f} s limit"
             run.fail(RunState.TIMED_OUT, reason)
             return Outcome(RunState.TIMED_OUT, child.seconds, reason)
         if child.returncode != 0:
@@ -404,44 +392,3 @@ def make_executor(
         return Outcome(RunState.COMPLETED, child.seconds)
 
     return execute
-
-
-def make_probe(workspace: Workspace, launcher: Launcher) -> Probe:
-    """Seconds per full epoch, scaled from a bounded run of the same stage.
-
-    The scale is the ratio of whole-epoch to probed batch counts. The probed time
-    includes start-up cost, so the estimate errs high, which is the safe side for
-    admission.
-
-    Raises:
-        ProbeError: the probe failed, timed out or reported no usable timing.
-    """
-
-    def probe(fit: FitSpec, deadline_seconds: float) -> float:
-        root = workspace.runs_dir / PROBE_DIR
-        root.mkdir(parents=True, exist_ok=True)
-        directory = Path(
-            tempfile.mkdtemp(prefix=fit.fit_id.replace("/", "-"), dir=root)
-        )
-        job = Job(fit.fit_id, directory, directory / RESULT_FILE, bounds=PROBE_BATCHES)
-        child = launcher(
-            job, min(PROBE_SECONDS, deadline_seconds), directory / LOG_FILE
-        )
-        if child.timed_out or child.returncode != 0:
-            raise ProbeError(f"probe of {fit.fit_id} failed: {child.tail}")
-        try:
-            payload = json.loads(job.result_path.read_text(encoding="utf-8"))
-            results = payload["results"]
-            batches = results["epoch_batches"]
-            measured = float(results["seconds_per_epoch"])
-        except (OSError, ValueError, KeyError) as error:
-            raise ProbeError(
-                f"probe of {fit.fit_id} left no timing: {error}"
-            ) from error
-        ran = min(PROBE_BATCHES[0], batches["train"]) + min(
-            PROBE_BATCHES[1], batches["val"]
-        )
-        full = batches["train"] + batches["val"]
-        return measured * full / max(1, ran)
-
-    return probe

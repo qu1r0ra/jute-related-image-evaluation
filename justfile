@@ -48,7 +48,7 @@ queue-plan *args:
 queue-status *args:
     uv run jute-disease queue status {{args}}
 
-# Run or resume the benchmark: just queue-run --cutoff 2026-10-31T14:00 --cutoff-record "<note>"
+# Run or resume the benchmark; running it again skips completed fits
 queue-run *args:
     uv run jute-disease queue run {{args}}
 

@@ -28,7 +28,7 @@ RESOLVABLE_COMMANDS = [
     ["stack"],
     ["queue", "plan"],
     ["queue", "status"],
-    ["queue", "run", "--cutoff", "2026-10-31T14:00", "--cutoff-record", "owner note"],
+    ["queue", "run"],
     ["evaluate", "aggregate", "--exp-names", "a"],
     ["freeze", "target"],
     ["freeze", "cache", "--budget-seconds", "5"],
@@ -153,43 +153,46 @@ def test_train_fit_rejects_malformed_bounds() -> None:
     assert excinfo.value.code == 2
 
 
-def test_queue_run_needs_an_explicit_cutoff() -> None:
+def test_queue_run_takes_no_deadline() -> None:
     with pytest.raises(SystemExit) as excinfo:
-        build_parser().parse_args(["queue", "run"])
+        build_parser().parse_args(["queue", "run", "--cutoff", "2026-10-31T14:00"])
     assert excinfo.value.code == 2
 
 
-def test_queue_run_passes_the_declared_cutoff_basis(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
-    captured: dict[str, object] = {}
+def _stub_queue(monkeypatch: pytest.MonkeyPatch, tmp_path, fake_queue) -> None:
     monkeypatch.setattr(
         cli, "_workspace_from", lambda args: MagicMock(runs_dir=tmp_path)
     )
     monkeypatch.setattr(cli, "make_identity", lambda *a: None)
     monkeypatch.setattr(cli, "make_executor", lambda *a: None)
-    monkeypatch.setattr(cli, "make_probe", lambda *a: None)
     monkeypatch.setattr(cli, "subprocess_launcher", lambda *a: None)
+    monkeypatch.setattr(cli, "run_queue", fake_queue)
+
+
+def test_queue_run_hands_the_queue_its_executor_and_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    captured: dict[str, object] = {}
 
     def fake_queue(benchmark, store, **kwargs) -> cli.QueueReport:
         captured.update(kwargs)
         return cli.QueueReport()
 
-    monkeypatch.setattr(cli, "run_queue", fake_queue)
-    main(
-        [
-            "queue",
-            "run",
-            "--cutoff",
-            "2026-10-31T14:00",
-            "--cutoff-record",
-            "owner note",
-        ]
-    )
-    cutoff = captured["cutoff"]
-    assert cutoff.basis == "owner-operational"
-    assert cutoff.at.isoformat() == "2026-10-31T14:00:00"
-    assert cutoff.record == "owner note"
+    _stub_queue(monkeypatch, tmp_path, fake_queue)
+    main(["queue", "run"])
+    assert set(captured) == {"clock", "execute", "identity_for", "report_path"}
+    assert captured["report_path"] == tmp_path / "queue.json"
+
+
+def test_an_aborted_queue_exits_with_its_reason(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    def fake_queue(benchmark, store, **kwargs) -> cli.QueueReport:
+        raise cli.QueueAbortedError(["a", "b", "c"])
+
+    _stub_queue(monkeypatch, tmp_path, fake_queue)
+    with pytest.raises(SystemExit, match="consecutive persistent failures: a, b, c"):
+        main(["queue", "run"])
 
 
 def test_stack_command_reports_the_measured_stack(

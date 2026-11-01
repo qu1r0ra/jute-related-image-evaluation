@@ -61,10 +61,9 @@
     "seed": 42
   },
   "queue": {
-    "classical_fit_seconds": 1800,
-    "classical_aggregate_seconds": 18000,
-    "shared_preparation_seconds": 1800,
-    "reserve_hours": 8,
-    "forecast_margin": 1.25
+    "prepare_seconds": 1800,
+    "classical_seconds": 1800,
+    "source_seconds": 28800,
+    "target_seconds": 14400
   }
 }

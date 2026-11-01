@@ -1,5 +1,6 @@
 """The declared benchmark matrix, recipe, plan order and run identities."""
 
+import json
 from dataclasses import replace
 
 import pytest
@@ -95,7 +96,6 @@ def test_one_shared_source_chain_feeds_both_domain_arms(benchmark) -> None:
 def test_plan_order_is_core_classical_plantvillage_then_plantdoc(benchmark) -> None:
     plan = build_plan(benchmark)
     assert [s.name for s in plan] == ["core", "classical", "plantvillage", "plantdoc"]
-    assert [s.mandatory for s in plan] == [True, True, False, False]
     core, classical, pv, pd = plan
     assert [f.system for f in core.fits] == (
         ["mobilenet_v2_direct"] * 3 + ["efficientnet_b5_direct"] * 3
@@ -166,3 +166,35 @@ def test_compilation_cannot_be_enabled(tmp_path) -> None:
     path.write_text(text, encoding="utf-8")
     with pytest.raises(ValueError, match="compile"):
         load_benchmark(path)
+
+
+def test_each_kind_of_step_has_its_own_timeout(benchmark) -> None:
+    limits = benchmark.limits
+    assert limits.timeout(FitKind.PREPARE) == limits.prepare_seconds
+    assert limits.timeout(FitKind.CLASSICAL) == limits.classical_seconds
+    assert limits.timeout(FitKind.SOURCE) == limits.source_seconds
+    assert limits.timeout(FitKind.TARGET) == limits.target_seconds
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "true", '"1800"', "1e999"])
+def test_a_timeout_must_be_a_finite_positive_number(tmp_path, value: str) -> None:
+    raw = json.loads(BENCHMARK_CONFIG.read_text(encoding="utf-8"))
+    text = json.dumps(raw).replace(
+        f'"target_seconds": {raw["queue"]["target_seconds"]}',
+        f'"target_seconds": {value}',
+        1,
+    )
+    path = tmp_path / "benchmark.json"
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match="target_seconds"):
+        load_benchmark(path)
+
+
+def test_the_queue_declares_no_deadline_or_budget() -> None:
+    raw = json.loads(BENCHMARK_CONFIG.read_text(encoding="utf-8"))
+    assert set(raw["queue"]) == {
+        "prepare_seconds",
+        "classical_seconds",
+        "source_seconds",
+        "target_seconds",
+    }

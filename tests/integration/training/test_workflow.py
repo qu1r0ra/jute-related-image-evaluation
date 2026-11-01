@@ -6,7 +6,6 @@ body in this process, so the same code paths run without a process per fit.
 
 import json
 from dataclasses import replace
-from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -15,7 +14,6 @@ from jute_disease.config import BENCHMARK_CONFIG
 from jute_disease.data import file_sha256, load_manifest
 from jute_disease.training import (
     ChildResult,
-    Cutoff,
     DataInputs,
     FitKind,
     FitSpec,
@@ -28,7 +26,6 @@ from jute_disease.training import (
     load_benchmark,
     make_executor,
     make_identity,
-    make_probe,
     open_workspace,
     run_job,
     run_queue,
@@ -290,10 +287,10 @@ def test_chain_passes_the_verified_upstream_checkpoint(workspace: Workspace) -> 
 
     source = _fit(workspace, "source/plantvillage")
     target = _fit(workspace, "cnn/tiny_chained/seed-42")
-    assert execute(source, None).state is RunState.COMPLETED
+    assert execute(source, 1800).state is RunState.COMPLETED
     assert launcher.jobs[-1].upstream_checkpoint is None
 
-    assert execute(target, None).state is RunState.COMPLETED
+    assert execute(target, 1800).state is RunState.COMPLETED
     checkpoint = launcher.jobs[-1].upstream_checkpoint
     assert checkpoint is not None
     recorded = store.receipt(source.fit_id)["artifacts"]["checkpoint"]["sha256"]
@@ -343,7 +340,7 @@ def test_tampered_upstream_checkpoint_is_refused(workspace: Workspace) -> None:
     execute = make_executor(workspace, store, identity, launcher)
     source = _fit(workspace, "source/plantvillage")
     target = _fit(workspace, "cnn/tiny_chained/seed-42")
-    execute(source, None)
+    execute(source, 1800)
     before = identity(target)
     checkpoint = (
         store.run_dir(source.fit_id)
@@ -353,51 +350,23 @@ def test_tampered_upstream_checkpoint_is_refused(workspace: Workspace) -> None:
 
     assert identity(target) != before
     ran = len(launcher.jobs)
-    outcome = execute(target, None)
+    outcome = execute(target, 1800)
     assert outcome.state is RunState.FAILED
     assert "upstream" in outcome.reason
     assert len(launcher.jobs) == ran  # nothing was launched on bad bytes
-
-
-def test_probe_scales_a_bounded_run_to_a_full_epoch(workspace: Workspace) -> None:
-    store = RunStore(workspace.runs_dir)
-    launcher = InProcess(workspace)
-    probe = make_probe(workspace, launcher)
-    chained = _fit(workspace, "cnn/tiny_chained/seed-42")
-
-    seconds = probe(chained, 900.0)
-    assert seconds > 0
-    job = launcher.jobs[-1]
-    assert job.bounds is not None
-    assert job.upstream_checkpoint is None  # a probe never needs the chain
-    assert not store.run_dir(chained.fit_id).exists()  # probes are not fits
-
-
-def test_probe_respects_a_shorter_deadline(workspace: Workspace) -> None:
-    launcher = InProcess(workspace)
-    launcher.override = ChildResult(1, True, 12.0, "deadline")
-    probe = make_probe(workspace, launcher)
-    with pytest.raises(RuntimeError, match="probe"):
-        probe(_fit(workspace, "cnn/tiny_direct/seed-42"), 12.0)
-    assert launcher.limits[-1] == 12.0
 
 
 def test_queue_runs_resumes_and_skips_end_to_end(workspace: Workspace) -> None:
     store = RunStore(workspace.runs_dir)
     launcher = InProcess(workspace)
     identity = make_identity(workspace, store)
-    cutoff = Cutoff(
-        at=datetime.now() + timedelta(days=30), basis="owner-operational", record="n"
-    )
 
     def go() -> QueueReport:
         return run_queue(
             workspace.benchmark,
             store,
             clock=SystemClock(),
-            cutoff=cutoff,
             execute=make_executor(workspace, store, identity, launcher),
-            probe=make_probe(workspace, launcher),
             identity_for=identity,
             report_path=workspace.runs_dir / "queue.json",
         )
@@ -420,18 +389,13 @@ def test_queue_refuses_to_resume_after_target_bytes_change(
     launcher = InProcess(workspace)
     identity = make_identity(workspace, store)
     benchmark = replace(workspace.benchmark, systems={}, estimators=(), features=())
-    cutoff = Cutoff(
-        at=datetime.now() + timedelta(days=30), basis="owner-operational", record="n"
-    )
 
     def go() -> QueueReport:
         return run_queue(
             benchmark,
             store,
             clock=SystemClock(),
-            cutoff=cutoff,
             execute=make_executor(workspace, store, identity, launcher),
-            probe=make_probe(workspace, launcher),
             identity_for=identity,
             report_path=workspace.runs_dir / "queue.json",
         )

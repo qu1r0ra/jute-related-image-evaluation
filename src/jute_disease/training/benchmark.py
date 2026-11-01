@@ -37,11 +37,20 @@ class Recipe:
 
 @dataclass(frozen=True)
 class QueueLimits:
-    classical_fit_seconds: float
-    classical_aggregate_seconds: float
-    shared_preparation_seconds: float
-    reserve_hours: float
-    forecast_margin: float
+    """The run timeout, in seconds, of one attempt of each kind of step."""
+
+    prepare_seconds: float
+    classical_seconds: float
+    source_seconds: float
+    target_seconds: float
+
+    def timeout(self, kind: FitKind) -> float:
+        return {
+            FitKind.PREPARE: self.prepare_seconds,
+            FitKind.CLASSICAL: self.classical_seconds,
+            FitKind.SOURCE: self.source_seconds,
+            FitKind.TARGET: self.target_seconds,
+        }[kind]
 
 
 @dataclass(frozen=True)
@@ -153,6 +162,11 @@ def load_benchmark(path: Path | str) -> Benchmark:
     if recipe.compile_model:
         raise ValueError("Benchmark recipe must keep compile_model off on this stack")
     limits = QueueLimits(**_checked("queue", raw["queue"], QueueLimits))
+    for name, seconds in asdict(limits).items():
+        if isinstance(seconds, bool) or not isinstance(seconds, int | float):
+            raise ValueError(f"Benchmark queue {name} must be a number")
+        if not 0 < seconds < float("inf"):
+            raise ValueError(f"Benchmark queue {name} must be a finite positive number")
     systems = raw["cnn_systems"]
     for name, definition in systems.items():
         if set(definition) != {"model", "micro_batch", "chain"}:

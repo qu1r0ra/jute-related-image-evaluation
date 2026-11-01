@@ -7,7 +7,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.1
+#       jupytext_version: 1.19.6
 #   kernelspec:
 #     display_name: jute-disease-detection (3.11.14)
 #     language: python
@@ -199,9 +199,10 @@ print("wrote", SMOKE_DIR / "cnn_smoke.json")
 # ## 5. Full run
 #
 # ```bash
-# just queue-run --cutoff 2026-10-31T14:00 --cutoff-record "<where the cutoff is from>"
+# just queue-run
 # ```
 #
-# The queue enforces stage order, the reserve before the cutoff, serial heavy work
-# and all-three-seed optional stages. Running it again resumes: a fit whose receipt
-# is complete and matches is skipped.
+# The queue runs fits serially in stage order, each under its configured timeout.
+# A failed fit is retried once with the same seed, and three persistent failures in
+# a row stop the queue. Running it again resumes: a fit whose receipt is complete
+# and matches is skipped.

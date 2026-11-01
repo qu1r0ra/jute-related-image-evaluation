@@ -7,7 +7,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.19.1
+#       jupytext_version: 1.19.6
 #   kernelspec:
 #     display_name: jute-disease-detection (3.11.14)
 #     language: python
@@ -167,9 +167,9 @@ receipt
 # ## 4. Full run
 #
 # ```bash
-# just queue-run --cutoff 2026-10-31T14:00 --cutoff-record "<where the cutoff is from>"
+# just queue-run
 # ```
 #
-# The queue runs the classical stage after the core CNN fits. It enforces the
-# 30-minute fit limit, the five-hour aggregate limit and the 30-minute preparation
-# allowance, and resumes by skipping fits whose receipt is complete and matches.
+# The queue runs the classical stage after the core CNN fits. Feature preparation
+# and each classical fit run under their configured timeouts, and the queue
+# resumes by skipping fits whose receipt is complete and matches.
