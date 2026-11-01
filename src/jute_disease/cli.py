@@ -46,6 +46,7 @@ from jute_disease.data import (
     residual_sample,
     sample_edges,
     synthetic_recall,
+    write_policy_manifests,
 )
 from jute_disease.reporting.tables import aggregate_metrics
 from jute_disease.training import (
@@ -238,6 +239,26 @@ def _freeze_cache(args: argparse.Namespace) -> None:
             workers=args.workers,
         )
     )
+
+
+def _freeze_policies(args: argparse.Namespace) -> None:
+    try:
+        pools = dict(item.split("=", 1) for item in args.pool)
+        if len(pools) != len(args.pool):
+            raise ValueError("Pool names must be unique")
+        _print_json(
+            write_policy_manifests(
+                pools,
+                args.output,
+                args.reserve_fraction,
+                args.train_fraction,
+                args.val_fraction,
+                args.test_fraction,
+                args.seed,
+            )
+        )
+    except (ValueError, OSError) as error:
+        raise SystemExit(f"policy manifests blocked: {error}") from error
 
 
 def _freeze_source(args: argparse.Namespace) -> None:
@@ -573,6 +594,27 @@ def _add_freeze(commands: argparse._SubParsersAction) -> None:
     target.add_argument("--plantvillage-root", type=Path)
     target.add_argument("--plantdoc-root", type=Path)
     target.set_defaults(run=_freeze_target)
+
+    policies = actions.add_parser(
+        "policies",
+        help="Generate policy-by-view manifests from frozen pools.",
+        description=(
+            "Each pool is an independently frozen directory. Reserve fractions apply "
+            "to per-class families; final fractions apply to non-reserve policy "
+            "units. View 2 reserves whole families for its shared test set. "
+            "Counts are rounded to the nearest integer; support failures stop output."
+        ),
+    )
+    policies.add_argument(
+        "--pool", action="append", required=True, metavar="NAME=FREEZE"
+    )
+    policies.add_argument("--output", type=Path, required=True)
+    policies.add_argument("--reserve-fraction", type=float, required=True)
+    policies.add_argument("--train-fraction", type=float, required=True)
+    policies.add_argument("--val-fraction", type=float, required=True)
+    policies.add_argument("--test-fraction", type=float, required=True)
+    policies.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    policies.set_defaults(run=_freeze_policies)
 
     cache = actions.add_parser(
         "cache", help="Bounded train/val cache probe and its cache decision."

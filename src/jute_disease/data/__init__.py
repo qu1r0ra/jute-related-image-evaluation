@@ -83,6 +83,7 @@ from jute_disease.data.manifest import (
     validate_manifest,
     write_manifest,
 )
+from jute_disease.data.policies import write_policy_manifests
 from jute_disease.data.readers import (
     ManifestContentVerifier,
     ManifestDataset,
@@ -199,6 +200,7 @@ __all__ = [
     "write_decision",
     "write_inventory",
     "write_manifest",
+    "write_policy_manifests",
 ]
 
 
