@@ -24,6 +24,10 @@ data-download:
 freeze *args:
     uv run jute-disease freeze target {{args}}
 
+# Generate policy and view manifests from frozen, audited pools
+freeze-policies *args:
+    uv run jute-disease freeze policies {{args}}
+
 # Bounded train/val image-cache probe and decision (reads the frozen manifest)
 freeze-cache *args:
     uv run jute-disease freeze cache {{args}}
