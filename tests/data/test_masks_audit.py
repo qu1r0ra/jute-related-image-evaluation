@@ -120,6 +120,14 @@ def test_stratified_audit_oversamples_rare_scenes_and_blinds_sheets(
         "field": 4,
         "unknown": 4,
     }
+    id_scene_order = [row["predicted_scene"] for row in manifest["records"]]
+    assert (
+        sum(
+            id_scene_order[index] != id_scene_order[index - 1]
+            for index in range(1, len(id_scene_order))
+        )
+        > len(SCENE_TAGS) - 1
+    )
     owner_columns = next(csv.reader((tmp_path / "audit" / "owner.csv").open()))
     agent_columns = next(csv.reader((tmp_path / "audit" / "agent.csv").open()))
     assert owner_columns == ["audit_id", "overlay_path", "mask_quality", "scene_tag"]
@@ -145,6 +153,62 @@ def test_stratified_audit_oversamples_rare_scenes_and_blinds_sheets(
     assert all(len(row) == 3 for row in confusion["counts"])
     assert sum(map(sum, confusion["counts"])) == 6
     assert report["mask_quality"]["fail_rate"]["population"] == 20
+
+
+@pytest.mark.parametrize("rating", ["", "invalid"])
+def test_evaluation_rejects_invalid_unpaired_agent_rating(
+    tmp_path: Path, rating: str
+) -> None:
+    manifest = run_masks_audit(
+        _candidates(tmp_path),
+        _thresholds(),
+        FixtureMaskBackend(),
+        tmp_path / "audit",
+        sample_count=12,
+        owner_count=6,
+        seed=10,
+    )
+    _fill_ratings(manifest, tmp_path / "audit")
+    unpaired_id = next(
+        row["audit_id"]
+        for row in manifest["records"]
+        if row["audit_id"] not in manifest["owner_audit_ids"]
+    )
+    agent_path = tmp_path / "audit" / "agent.csv"
+    with agent_path.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    for row in rows:
+        if row["audit_id"] == unpaired_id:
+            row["mask_quality"] = rating
+    with agent_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle, fieldnames=("audit_id", "overlay_path", "mask_quality")
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+    with pytest.raises(
+        ValueError, match=f"invalid mask_quality rating for {unpaired_id}"
+    ):
+        evaluate_masks_audit(
+            manifest,
+            agent_path,
+            tmp_path / "audit" / "owner.csv",
+            resamples=200,
+            agent_rater={"name": "fixture-agent", "version": "test"},
+        )
+
+
+def test_audit_sample_includes_each_nonempty_stratum(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="every nonempty scene stratum"):
+        run_masks_audit(
+            _candidates(tmp_path),
+            _thresholds(),
+            FixtureMaskBackend(),
+            tmp_path / "audit",
+            sample_count=2,
+            owner_count=1,
+        )
 
 
 def test_audit_rejects_development_image_content_overlap(tmp_path: Path) -> None:

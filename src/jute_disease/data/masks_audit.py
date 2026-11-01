@@ -218,12 +218,7 @@ def run_masks_audit(
         amount = allocations[tag]
         if amount:
             sampled.extend(rng.sample(pool, amount))
-    sampled.sort(
-        key=lambda row: (
-            SCENE_TAGS.index(row["predicted_scene"]),
-            row["candidate"].image_id,
-        )
-    )
+    rng.shuffle(sampled)
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=False)
@@ -330,9 +325,17 @@ def evaluate_masks_audit(
     if not set(owner_ids).issubset(by_id):
         raise ValueError("owner subset contains IDs outside the audit sample")
 
-    agent = _read_rating_sheet(Path(agent_sheet), AGENT_COLUMNS, by_id)
+    agent = _read_rating_sheet(
+        Path(agent_sheet),
+        AGENT_COLUMNS,
+        by_id,
+        {"mask_quality": MASK_QUALITY_RATINGS},
+    )
     owner = _read_rating_sheet(
-        Path(owner_sheet), OWNER_COLUMNS, {key: by_id[key] for key in owner_ids}
+        Path(owner_sheet),
+        OWNER_COLUMNS,
+        {key: by_id[key] for key in owner_ids},
+        {"mask_quality": MASK_QUALITY_RATINGS, "scene_tag": SCENE_TAGS},
     )
     agent_mask = [agent[key]["mask_quality"] for key in owner_ids]
     owner_mask = [owner[key]["mask_quality"] for key in owner_ids]
@@ -472,6 +475,9 @@ def file_sha256(path: Path) -> str:
 def _balanced_allocation(populations: dict[str, int], target: int) -> dict[str, int]:
     if target > sum(populations.values()):
         raise ValueError("sample exceeds audit population")
+    nonempty_strata = sum(population > 0 for population in populations.values())
+    if target < nonempty_strata:
+        raise ValueError("sample must include every nonempty scene stratum")
     allocation = dict.fromkeys(SCENE_TAGS, 0)
     remaining = target
     while remaining:
@@ -509,7 +515,10 @@ def _write_rating_sheet(
 
 
 def _read_rating_sheet(
-    path: Path, columns: Sequence[str], expected: dict[str, dict[str, Any]]
+    path: Path,
+    columns: Sequence[str],
+    expected: dict[str, dict[str, Any]],
+    allowed_values: dict[str, Sequence[str]],
 ) -> dict[str, dict[str, str]]:
     with path.open(newline="", encoding="utf-8-sig") as handle:
         reader = csv.DictReader(handle)
@@ -525,6 +534,11 @@ def _read_rating_sheet(
             raise ValueError(f"unexpected rating ID: {audit_id}")
         if row["overlay_path"] != expected[audit_id]["overlay_path"]:
             raise ValueError(f"overlay path changed for rating ID {audit_id}")
+        for column, categories in allowed_values.items():
+            if row[column] not in categories:
+                raise ValueError(
+                    f"invalid {column} rating for {audit_id}: {row[column]!r}"
+                )
         indexed[audit_id] = row
     if set(indexed) != set(expected):
         raise ValueError("rating IDs do not match the required audit subset")
