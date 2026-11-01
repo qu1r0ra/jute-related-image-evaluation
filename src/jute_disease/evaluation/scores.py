@@ -228,3 +228,26 @@ def evaluate_predictions(predictions: PredictionSet) -> Evaluation:
         source_summary={source: _summaries(runs) for source, runs in by_source.items()},
         class_summary=class_summary,
     )
+
+
+def one_image_per_family(system: PredictionSet) -> PredictionSet:
+    """Select the lexicographically first image ID in each family, across seeds."""
+    chosen: dict[str, int] = {}
+    for i, family in enumerate(system.groups):
+        if (
+            family not in chosen
+            or system.image_ids[i] < system.image_ids[chosen[family]]
+        ):
+            chosen[family] = i
+    indices = sorted(chosen.values(), key=lambda i: system.image_ids[i])
+    return PredictionSet(
+        system.classes,
+        tuple(system.image_ids[i] for i in indices),
+        tuple(system.truth[i] for i in indices),
+        tuple(system.groups[i] for i in indices),
+        tuple(system.sources[i] for i in indices),
+        {
+            seed: tuple(labels[i] for i in indices)
+            for seed, labels in system.predictions.items()
+        },
+    )
