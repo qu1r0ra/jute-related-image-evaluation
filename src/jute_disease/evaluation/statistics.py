@@ -12,7 +12,10 @@ from jute_disease.evaluation.resampling import Interval
 
 @dataclass(frozen=True)
 class Agreement:
-    """Binary Cohen kappa, paired percentile interval and specific agreement."""
+    """Unweighted Cohen kappa, paired percentile interval and binary specific agreement.
+
+    Positive and negative agreement are reported only for 0/1 ratings.
+    """
 
     kappa: float
     interval: Interval
@@ -52,23 +55,35 @@ def agreement_gate(
     resamples: int = 10_000,
     seed: int = 42,
 ) -> Agreement:
-    """Binary kappa and 95% paired percentile bootstrap, discarding undefined draws."""
+    """Unweighted kappa with a 95% paired percentile bootstrap.
+
+    Undefined bootstrap draws are discarded.
+    """
     a, b = np.asarray(first), np.asarray(second)
     if (
         a.ndim != 1
         or len(a) == 0
         or a.shape != b.shape
-        or not np.isin(a, [0, 1]).all()
-        or not np.isin(b, [0, 1]).all()
+        or not np.issubdtype(a.dtype, np.integer)
+        or not np.issubdtype(b.dtype, np.integer)
         or resamples < 1
         or not -1 <= threshold <= 1
     ):
-        raise ValueError("invalid binary ratings, threshold or resample count")
+        raise ValueError("invalid integer ratings, threshold or resample count")
+    labels = np.unique(np.concatenate([a, b]))
+    binary = labels.tolist() == [0, 1]
+    positive = int(np.sum((a == 1) & (b == 1)))
+    negative = int(np.sum((a == 0) & (b == 0)))
+    a, b = np.searchsorted(labels, a), np.searchsorted(labels, b)
+    categories = len(labels)
 
     def kappa(x, y) -> np.ndarray:
         observed = np.mean(x == y, axis=-1)
-        px, py = np.mean(x, axis=-1), np.mean(y, axis=-1)
-        expected = px * py + (1 - px) * (1 - py)
+        expected = np.zeros_like(observed, dtype=float)
+        for category in range(categories):
+            expected += np.mean(x == category, axis=-1) * np.mean(
+                y == category, axis=-1
+            )
         return np.divide(
             observed - expected,
             1 - expected,
@@ -86,16 +101,18 @@ def agreement_gate(
     if not len(values):
         raise ValueError("all bootstrap kappas are undefined")
     low, high = np.percentile(values, [2.5, 97.5])
-    positive = int(np.sum((a == 1) & (b == 1)))
-    negative = int(np.sum((a == 0) & (b == 0)))
-    discordant = len(a) - positive - negative
-    pos_denom, neg_denom = 2 * positive + discordant, 2 * negative + discordant
+    positive_agreement = negative_agreement = None
+    if binary:
+        discordant = len(a) - positive - negative
+        pos_denom, neg_denom = 2 * positive + discordant, 2 * negative + discordant
+        positive_agreement = 2 * positive / pos_denom if pos_denom else None
+        negative_agreement = 2 * negative / neg_denom if neg_denom else None
     interval = Interval(value, float(low), float(high), 0.95)
     return Agreement(
         value,
         interval,
-        2 * positive / pos_denom if pos_denom else None,
-        2 * negative / neg_denom if neg_denom else None,
+        positive_agreement,
+        negative_agreement,
         threshold,
         bool(low >= threshold),
         f"95% paired percentile bootstrap; {len(values)}/{resamples} defined draws; "

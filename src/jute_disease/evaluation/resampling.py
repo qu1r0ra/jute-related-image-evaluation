@@ -63,8 +63,10 @@ def resample_metrics(
 
     Family draws use the union within each split. Draws with no observations in
     any system are rejected, so intervals are conditional on nonempty native
-    test sets. Checkpoint assignments, when supplied, are shared across systems;
-    seeds are resampled within each checkpoint and checkpoint means weighted equally.
+    test sets. Checkpoint assignments, when supplied, are shared across systems:
+    seeds are resampled within each checkpoint, run scores are pooled per
+    checkpoint across the sampled splits, and checkpoint means are weighted
+    equally. Without assignments, each sampled split is weighted equally.
     """
     if not systems or metric not in METRICS or resamples < 1 or not 0 < level < 1:
         raise ValueError("invalid systems, metric, resample count or confidence level")
@@ -92,56 +94,62 @@ def resample_metrics(
                 labels[family] = label
         families = sorted(labels)
         if checkpoints is None:
-            strata = [ref.seeds]
+            strata = {None: tuple(ref.seeds)}
         else:
             assignment = checkpoints[split]
             if set(assignment) != set(ref.seeds):
                 raise ValueError("checkpoint assignment must cover every seed")
-            strata = [
-                tuple(s for s in ref.seeds if assignment[s] == cp)
-                for cp in sorted(set(assignment.values()))
-            ]
+            strata = {
+                cp: tuple(s for s in ref.seeds if assignment[s] == cp)
+                for cp in set(assignment.values())
+            }
         layouts[split] = (families, strata)
 
-    def score(name, split, seeds, weights) -> float:
+    def run_scores(name, split, groups, weights) -> dict:
         item = systems[name][split]
         index = {label: i for i, label in enumerate(item.classes)}
-        matrices = []
-        for group in seeds:
+        scores = {}
+        for key, seeds in groups.items():
             group_scores = []
-            for run_seed in group:
+            for run_seed in seeds:
                 confusion = np.zeros((len(index), len(index)))
                 for family, truth, pred in zip(
                     item.groups, item.truth, item.predictions[run_seed], strict=True
                 ):
                     confusion[index[truth], index[pred]] += weights.get(family, 0)
                 group_scores.append(float(metric_values(confusion, metric)))
-            matrices.append(float(np.mean(group_scores)))
-        return float(np.mean(matrices))
+            scores[key] = group_scores
+        return scores
+
+    def route_score(name, parts) -> float:
+        # Pool runs per checkpoint across sampled splits, then weight checkpoints
+        # equally. Without assignments, each sampled split is its own group.
+        pooled: dict = {}
+        for position, (split, groups, weights) in enumerate(parts):
+            for cp, scores in run_scores(name, split, groups, weights).items():
+                key = cp if checkpoints is not None else position
+                pooled.setdefault(key, []).extend(scores)
+        return float(np.mean([np.mean(values) for values in pooled.values()]))
 
     estimates = {
-        name: float(
-            np.mean(
-                [
-                    score(
-                        name,
-                        split,
-                        layouts[split][1],
-                        dict.fromkeys(layouts[split][0], 1),
-                    )
-                    for split in splits
-                ]
-            )
+        name: route_score(
+            name,
+            [
+                (split, layouts[split][1], dict.fromkeys(layouts[split][0], 1))
+                for split in splits
+            ],
         )
         for name in names
     }
     rng = np.random.default_rng(seed)
     samples = {name: np.empty(resamples) for name in names}
     for i in range(resamples):
-        values = {name: [] for name in names}
+        parts = []
         for split in rng.choice(splits, size=len(splits)):
             families, strata = layouts[split]
-            seeds = [rng.choice(group, size=len(group)) for group in strata]
+            groups = {
+                key: rng.choice(group, size=len(group)) for key, group in strata.items()
+            }
             for _ in range(10000):
                 weights = Counter(rng.choice(families, size=len(families)))
                 if all(
@@ -151,10 +159,9 @@ def resample_metrics(
                     break
             else:
                 raise ValueError("could not draw nonempty native test sets")
-            for name in names:
-                values[name].append(score(name, split, seeds, weights))
+            parts.append((split, groups, weights))
         for name in names:
-            samples[name][i] = np.mean(values[name])
+            samples[name][i] = route_score(name, parts)
     rankings = np.array(
         [sorted(names, key=lambda n: (-samples[n][i], n)) for i in range(resamples)]
     )

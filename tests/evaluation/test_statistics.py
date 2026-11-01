@@ -32,6 +32,17 @@ def test_agreement_gate_uses_lower_bound_and_reports_specific_agreements() -> No
     assert not result.passed
 
 
+def test_agreement_gate_is_unweighted_kappa_over_three_categories() -> None:
+    # Confusion rows: a=0 -> (3, 1, 0), a=1 -> (0, 3, 0), a=2 -> (0, 0, 3).
+    # Observed agreement 0.9; expected agreement 0.4*0.3 + 0.3*0.4 + 0.3*0.3 = 0.33.
+    first = [0] * 4 + [1] * 3 + [2] * 3
+    second = [0] * 3 + [1] + [1] * 3 + [2] * 3
+    result = agreement_gate(first, second, threshold=0.6, seed=1)
+    assert result.kappa == pytest.approx(0.57 / 0.67)
+    assert result.positive_agreement is None
+    assert result.negative_agreement is None
+
+
 def test_agreement_gate_passes_at_bound_and_fails_above_it() -> None:
     first = [0, 1] * 50
     result = agreement_gate(first, first, threshold=1)

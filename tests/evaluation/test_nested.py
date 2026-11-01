@@ -62,6 +62,36 @@ def test_route_weights_checkpoints_equally_with_17_17_16_seeds() -> None:
     assert result.samples["route"] == pytest.approx(np.full(30, 1 / 3))
 
 
+def test_route_checkpoints_pool_runs_across_splits_before_weighting() -> None:
+    # Checkpoint A has three runs (two in split 0, one in split 1) and checkpoint
+    # B has three runs. Each run is scored by its image accuracy.
+    split0 = PredictionSet(
+        ("a", "b"),
+        ("i0", "i1"),
+        ("a", "b"),
+        ("f0", "f1"),
+        ("s", "s"),
+        {1: ("a", "b"), 2: ("a", "b"), 3: ("b", "a")},
+    )
+    split1 = PredictionSet(
+        ("a", "b"),
+        ("i0", "i1"),
+        ("a", "b"),
+        ("f0", "f1"),
+        ("s", "s"),
+        {4: ("b", "a"), 5: ("a", "b"), 6: ("a", "b")},
+    )
+    checkpoints = {
+        0: {1: "A", 2: "A", 3: "B"},
+        1: {4: "A", 5: "B", 6: "B"},
+    }
+    result = resample_metrics(
+        {"route": {0: split0, 1: split1}}, "accuracy", 1, checkpoints=checkpoints
+    )
+    # Pooled checkpoint means are A = (1 + 1 + 0) / 3 and B = (0 + 1 + 1) / 3.
+    assert result.estimates["route"] == pytest.approx(2 / 3)
+
+
 def test_one_image_per_family_sensitivity_uses_stable_image_id() -> None:
     from jute_disease.evaluation import one_image_per_family, score_run
 
