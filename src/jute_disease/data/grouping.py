@@ -2,6 +2,7 @@
 
 from collections.abc import Iterable
 from itertools import combinations
+from typing import Any
 
 from PIL import Image, ImageOps
 
@@ -77,7 +78,7 @@ def union_find_components(
 
 def audit_components(
     hashes: dict[str, int], labels: dict[str, str], edges: list[tuple[str, str, int]]
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Audit component size, diameter and cross-label edges before exclusions.
 
     Size uses the nearest-rank 99th percentile of component sizes.
@@ -127,7 +128,7 @@ def repair_components(
     labels: dict[str, str],
     edges: list[tuple[str, str, int]],
     no_merge: set[tuple[str, str]],
-) -> dict:
+) -> dict[str, Any]:
     """Remove rated edges in distance and pair-hash order, reauditing each step."""
     import hashlib
     import json
@@ -179,8 +180,12 @@ def screen_source_overlap(
 def group_inventory(
     images: dict[str, tuple[str, int, str]],
     no_merge: set[tuple[str, str]] | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Group inventory paths, audit and repair, then exclude conflicting families."""
+    if any(
+        a not in images or b not in images or a == b for a, b in (no_merge or set())
+    ):
+        raise ValueError("Each rated pair must name distinct inventory paths")
     hashes = {key: value for key, (_, value, _) in images.items()}
     labels = {key: label for key, (_, _, label) in images.items()}
     edges = {(a, b): d for a, b, d in dhash_candidates(hashes)}

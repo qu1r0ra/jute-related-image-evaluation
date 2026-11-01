@@ -310,6 +310,8 @@ def build_manifest(
     fractions: dict[str, float] | None = None,
     extra_dependencies: dict[str, str] | None = None,
     identity_resolution: IdentityResolution | None = None,
+    grouping_version: str | None = None,
+    grouping_receipt: dict | None = None,
 ) -> tuple[Manifest, Curation, IdentityResolution]:
     """Curate, resolve identity, split by group and validate.
 
@@ -317,6 +319,25 @@ def build_manifest(
         FreezeBlockedError: the dataset cannot be split with every class supported in
             every partition and every identity constraint respected.
     """
+    if grouping_version is not None:
+        if grouping_version != "dhash-v1" or grouping_receipt is None:
+            raise FreezeBlockedError("A valid grouping receipt is required")
+        receipt = dict(grouping_receipt)
+        digest = receipt.pop("digest", None)
+        actual = hashlib.sha256(
+            json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        if (
+            receipt.get("algorithm_version") != grouping_version
+            or digest != actual
+            or identity_resolution is None
+        ):
+            raise FreezeBlockedError("A valid grouping receipt is required")
+        extra_dependencies = {
+            **(extra_dependencies or {}),
+            "grouping": digest,
+            "grouping_version": grouping_version,
+        }
     fractions = dict(SPLITS if fractions is None else fractions)
     if set(fractions) != set(PARTITIONS) or abs(sum(fractions.values()) - 1) > 1e-9:
         raise ValueError(f"fractions must cover {PARTITIONS} and sum to 1: {fractions}")
@@ -438,12 +459,20 @@ def load_manifest(directory: Path, min_support: int | None = None) -> Manifest:
     if receipt.get("manifest_digest") != manifest.digest():
         raise FreezeBlockedError(f"Receipt does not match the manifest in {directory}")
     grouping_digest = dict(manifest.dependencies).get("grouping")
+    if (
+        dict(manifest.dependencies).get("grouping_version") == "dhash-v1"
+        and not grouping_digest
+    ):
+        raise FreezeBlockedError(f"Missing grouping receipt dependency in {directory}")
     if grouping_digest is not None:
         try:
             grouping = json.loads(
                 (directory / "grouping.json").read_text(encoding="utf-8")
             )
             recorded = grouping.pop("digest")
+            version = dict(manifest.dependencies).get("grouping_version")
+            if version is not None and grouping.get("algorithm_version") != version:
+                raise ValueError("Grouping version mismatch")
             actual = hashlib.sha256(
                 json.dumps(grouping, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest()

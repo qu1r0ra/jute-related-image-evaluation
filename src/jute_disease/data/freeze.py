@@ -13,6 +13,7 @@ Three steps share one output directory:
 None of them fits a model or reads test pixels for any purpose but fingerprinting.
 """
 
+import csv
 import hashlib
 import json
 import re
@@ -37,7 +38,11 @@ from jute_disease.data.cache import (
     write_decision,
 )
 from jute_disease.data.curation import curate, load_rules
-from jute_disease.data.grouping import flip_canonical_dhash, group_inventory
+from jute_disease.data.grouping import (
+    flip_canonical_dhash,
+    group_inventory,
+    screen_source_overlap,
+)
 from jute_disease.data.identity import (
     IdentityResolution,
     MergedFile,
@@ -102,6 +107,10 @@ def freeze_target(
     workers: int = 4,
     force: bool = False,
     grouping_version: str | None = None,
+    no_merge_ratings: Path | None = None,
+    agreement_results: Path | None = None,
+    plantvillage_root: Path | None = None,
+    plantdoc_root: Path | None = None,
 ) -> dict:
     """Freeze the target dataset and return its report.
 
@@ -120,9 +129,15 @@ def freeze_target(
     grouping = None
     grouped_resolution = None
     dependencies = {"preprocessing": PreprocessingSpec().digest()}
+    if grouping_version is None and (
+        no_merge_ratings or agreement_results or plantvillage_root or plantdoc_root
+    ):
+        raise ValueError("Grouping inputs require --grouping-version")
     if grouping_version is not None:
         if grouping_version != "dhash-v1":
             raise ValueError("Unknown grouping version")
+        if plantvillage_root is None or plantdoc_root is None:
+            raise ValueError("Grouped freeze requires both source roots")
         admitted = list(curate(records, rules).admitted)
         images = {}
         for record in admitted:
@@ -132,7 +147,76 @@ def freeze_target(
                     flip_canonical_dhash(image),
                     record.label,
                 )
-        result = group_inventory(images)
+        ratings = set()
+        if no_merge_ratings is not None:
+            with Path(no_merge_ratings).open(
+                encoding="utf-8-sig", newline=""
+            ) as stream:
+                reader = csv.DictReader(stream)
+                if reader.fieldnames != ["image_a", "image_b", "verdict"]:
+                    raise ValueError(
+                        "Ratings CSV must have image_a,image_b,verdict columns"
+                    )
+                for row in reader:
+                    if None in row or row["verdict"] != "no_merge":
+                        raise ValueError("Ratings CSV accepts only no_merge verdicts")
+                    a, b = row["image_a"], row["image_b"]
+                    if a not in images or b not in images or a == b:
+                        raise ValueError(
+                            "Ratings must name two distinct admitted image paths"
+                        )
+                    ratings.add(tuple(sorted((a, b))))
+        agreement = {"status": "pending"}
+        gate = "pending"
+        if agreement_results is not None:
+            agreement = json.loads(Path(agreement_results).read_text(encoding="utf-8"))
+            if not isinstance(agreement, dict) or set(agreement) != {
+                "kappa_interval",
+                "threshold",
+                "pass",
+                "method",
+            }:
+                raise ValueError("Invalid agreement results schema")
+            interval, threshold = agreement["kappa_interval"], agreement["threshold"]
+
+            def number(x: object) -> bool:
+                return type(x) in (int, float) and -1 <= x <= 1
+
+            if (
+                not isinstance(interval, list)
+                or len(interval) != 2
+                or not all(number(x) for x in interval)
+                or interval[0] > interval[1]
+                or not number(threshold)
+                or type(agreement["pass"]) is not bool
+                or not isinstance(agreement["method"], str)
+                or not agreement["method"].strip()
+                or agreement["pass"] != (interval[0] >= threshold)
+            ):
+                raise ValueError("Invalid agreement results values")
+            gate = "pass" if agreement["pass"] else "fail"
+        result = group_inventory(images, ratings)
+        targets = {"target": {}}
+        for record in records:
+            with Image.open(Path(image_root) / record.path) as image:
+                targets["target"][record.path] = (
+                    record.sha256,
+                    flip_canonical_dhash(image),
+                )
+        screening = {}
+        for name, root in (
+            ("plantvillage", plantvillage_root),
+            ("plantdoc", plantdoc_root),
+        ):
+            source_records = build_inventory(root, workers=workers)
+            source = {}
+            for record in source_records:
+                with Image.open(Path(root) / record.path) as image:
+                    source[record.path] = (record.sha256, flip_canonical_dhash(image))
+            screening[name] = {
+                "inventory_digest": inventory_digest(source_records),
+                "exclusions": screen_source_overlap(source, targets),
+            }
         by_path = {r.path: r for r in admitted}
         excluded = set(result["excluded"])
         unique = {}
@@ -178,6 +262,8 @@ def freeze_target(
             },
             "audit_strata": result["audit_history"],
             "removed_edges": result["removed"],
+            "no_merge_ratings": sorted(ratings),
+            "source_screening": screening,
             "families": result["families"],
             "excluded": result["excluded"],
             "denominators": {
@@ -185,9 +271,9 @@ def freeze_target(
                 "families_before_exclusion": len(result["audit"]),
                 "excluded_images": len(excluded),
             },
-            "agreement_results": {"status": "pending"},
+            "agreement_results": agreement,
             "gate_outcomes": {
-                "agreement": "pending",
+                "agreement": gate,
                 "threshold_change": "not_requested",
             },
         }
@@ -202,6 +288,8 @@ def freeze_target(
         seed=seed,
         extra_dependencies=dependencies,
         identity_resolution=grouped_resolution,
+        grouping_version=grouping_version,
+        grouping_receipt=grouping,
     )
     target = output_dir / TARGET_DIR
     try:

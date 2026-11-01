@@ -27,3 +27,27 @@ The scripts in `scripts/` are Linux-only command-line helpers for the validation
 - `verify_transfer.py record ROOT MANIFEST` writes a SHA-256 inventory outside the batch. Run `verify_transfer.py verify ROOT MANIFEST` after copy-back; missing, changed, unexpected, unsafe, hard-linked, non-regular and colliding paths reject the batch.
 
 These helpers do not run real lab sessions or experiments as part of tooling CI. Lab validation and A100 readiness are handled separately under issue 114.
+
+### Grouped target freezes
+
+`freeze target --grouping-version dhash-v1` requires `--plantvillage-root` and
+`--plantdoc-root`, each pointing to an image inventory in the supported
+`<label>/<file>` or `<train|val|test>/<label>/<file>` layout. The freeze screens
+all inventoried target images against both supplied source inventories, records
+source inventory digests and all matching source paths, target paths and match
+methods in `target/grouping.json`, and does not silently discard matches. Verify
+that the supplied roots are the intended source packages. Source intake is a
+separate operation and continues to apply its own quarantine rules.
+
+Optionally, `--no-merge-ratings PATH` reads a UTF-8 CSV with the exact header
+`image_a,image_b,verdict`. Paths are relative to the target image root and must
+identify two different admitted images. Every row must have verdict `no_merge`;
+other verdicts and malformed rows are rejected. Duplicate or reversed pairs are
+collapsed. Exact byte-identical copies remain inseparable.
+
+Optionally, `--agreement-results PATH` reads a JSON object with exactly
+`kappa_interval` (two ordered numbers in [-1, 1]), `threshold` (a number in
+[-1, 1]), `pass` (a boolean), and `method` (a nonempty string). The pass flag
+must equal whether the interval's lower bound meets the threshold. The receipt
+records the input and the resulting pass/fail gate. Without the option, agreement
+remains pending. These grouping inputs are unavailable on the legacy freeze path.

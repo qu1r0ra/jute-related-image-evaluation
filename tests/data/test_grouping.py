@@ -82,3 +82,21 @@ def test_exact_conflicting_copies_cannot_be_repaired_apart() -> None:
         {"a": ("same", 0, "x"), "b": ("same", 1, "y")}, {("a", "b")}
     )
     assert result["excluded"] == ["a", "b"]
+
+
+def test_group_inventory_rejects_unknown_rated_paths() -> None:
+    import pytest
+
+    from jute_disease.data import group_inventory
+
+    with pytest.raises(ValueError, match="rated"):
+        group_inventory({"a": ("sha", 0, "x")}, {("a", "missing")})
+
+
+def test_grouped_split_requires_receipt_before_processing() -> None:
+    import pytest
+
+    from jute_disease.data.manifest import FreezeBlockedError, build_manifest
+
+    with pytest.raises(FreezeBlockedError, match="grouping receipt"):
+        build_manifest([], None, grouping_version="dhash-v1")
