@@ -1,5 +1,8 @@
 # Tooling
 
+See [Continuous integration](ci.md) for pull-request and main-branch checks and
+the response to a failing main run.
+
 ## Supported environment
 
 - Python 3.14.10 is selected by `.python-version`; `pyproject.toml` supports Python 3.14 only.
