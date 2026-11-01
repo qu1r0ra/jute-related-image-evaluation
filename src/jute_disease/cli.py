@@ -94,8 +94,13 @@ def _freeze_target(args: argparse.Namespace) -> None:
             seed=args.seed,
             workers=args.workers,
             force=args.force,
+            grouping_version=args.grouping_version,
+            no_merge_ratings=args.no_merge_ratings,
+            agreement_results=args.agreement_results,
+            plantvillage_root=args.plantvillage_root,
+            plantdoc_root=args.plantdoc_root,
         )
-    except ValueError as error:
+    except (ValueError, OSError) as error:
         raise SystemExit(f"freeze blocked: {error}") from error
     _print_json(report)
 
@@ -393,6 +398,11 @@ def _add_freeze(commands: argparse._SubParsersAction) -> None:
     target.add_argument(
         "--force", action="store_true", help="Replace a different completed freeze."
     )
+    target.add_argument("--grouping-version", choices=("dhash-v1",), default=None)
+    target.add_argument("--no-merge-ratings", type=Path)
+    target.add_argument("--agreement-results", type=Path)
+    target.add_argument("--plantvillage-root", type=Path)
+    target.add_argument("--plantdoc-root", type=Path)
     target.set_defaults(run=_freeze_target)
 
     cache = actions.add_parser(

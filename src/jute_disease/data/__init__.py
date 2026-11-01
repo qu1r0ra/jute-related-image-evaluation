@@ -39,6 +39,15 @@ from jute_disease.data.freeze import (
     load_source_manifest,
     probe_cache,
 )
+from jute_disease.data.grouping import (
+    audit_components,
+    dhash_candidates,
+    flip_canonical_dhash,
+    group_inventory,
+    repair_components,
+    screen_source_overlap,
+    union_find_components,
+)
 from jute_disease.data.identity import (
     IdentityResolution,
     find_candidates,
@@ -179,4 +188,15 @@ __all__ = [
     "write_decision",
     "write_inventory",
     "write_manifest",
+]
+
+
+__all__ += [
+    "audit_components",
+    "dhash_candidates",
+    "flip_canonical_dhash",
+    "group_inventory",
+    "repair_components",
+    "screen_source_overlap",
+    "union_find_components",
 ]

@@ -50,6 +50,14 @@ def _freeze(
     inputs: dict[str, Path], name: str, *extra: str
 ) -> tuple[Path, subprocess.CompletedProcess]:
     out = inputs["base"] / name
+    if "--grouping-version" in extra and "--plantvillage-root" not in extra:
+        extra = (
+            *extra,
+            "--plantvillage-root",
+            str(inputs["images"]),
+            "--plantdoc-root",
+            str(inputs["images"]),
+        )
     result = _run(
         "freeze",
         "target",
@@ -174,3 +182,193 @@ def test_source_command_rejects_invalid_pins_before_scanning(
     assert "source intake blocked" in result.stderr
     assert message in result.stderr
     assert not (inputs["base"] / "no-such-freeze").exists()
+
+
+def test_dhash_freeze_receipt_binds_groups_and_cannot_replace_existing_freeze(
+    inputs: dict[str, Path],
+) -> None:
+    out, first = _freeze(inputs, "dhash", "--grouping-version", "dhash-v1")
+    assert first.returncode == 0, first.stderr
+    report = json.loads(first.stdout)
+    grouping = json.loads((out / "target" / "grouping.json").read_text())
+    assert grouping["algorithm_version"] == "dhash-v1"
+    assert report["receipt"]["dependencies"]["grouping"] == grouping["digest"]
+    assert grouping["denominators"]["images"] > 0
+    manifest = load_manifest(out / "target")
+    groups = {entry.path: entry.group for entry in manifest.entries}
+    assert any(len(family) > 1 for family in grouping["families"])
+    for family in grouping["families"]:
+        assert len({groups[path] for path in family if path in groups}) <= 1
+    _, repeat = _freeze(inputs, "dhash", "--grouping-version", "dhash-v1")
+    assert repeat.returncode == 0
+    assert json.loads(repeat.stdout)["receipt"] == report["receipt"]
+    _, refused = _freeze(
+        inputs, "dhash", "--grouping-version", "dhash-v1", "--seed", "7", "--force"
+    )
+    assert refused.returncode != 0
+
+
+def test_dhash_grouping_receipt_is_verified_before_loading(
+    inputs: dict[str, Path],
+) -> None:
+    from jute_disease.data import FreezeBlockedError
+
+    out, result = _freeze(inputs, "dhash-tamper", "--grouping-version", "dhash-v1")
+    assert result.returncode == 0, result.stderr
+    path = out / "target" / "grouping.json"
+    receipt = json.loads(path.read_text())
+    receipt["parameters"]["threshold"] = 5
+    path.write_text(json.dumps(receipt))
+    with pytest.raises(FreezeBlockedError, match="grouping"):
+        load_manifest(out / "target")
+
+
+def test_grouped_freeze_records_ratings_and_agreement(inputs: dict[str, Path]) -> None:
+    ratings = inputs["base"] / "ratings.csv"
+    ratings.write_text("image_a,image_b,verdict\n", encoding="utf-8")
+    agreement = inputs["base"] / "agreement.json"
+    agreement.write_text(
+        json.dumps(
+            {
+                "kappa_interval": [0.7, 0.9],
+                "threshold": 0.6,
+                "pass": True,
+                "method": "bootstrap",
+            }
+        ),
+        encoding="utf-8",
+    )
+    out, result = _freeze(
+        inputs,
+        "grouped-inputs",
+        "--grouping-version",
+        "dhash-v1",
+        "--no-merge-ratings",
+        str(ratings),
+        "--agreement-results",
+        str(agreement),
+    )
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads((out / "target" / "grouping.json").read_text())
+    assert receipt["no_merge_ratings"] == []
+    assert receipt["agreement_results"]["method"] == "bootstrap"
+    assert receipt["gate_outcomes"]["agreement"] == "pass"
+
+
+def test_grouped_freeze_rejects_invalid_agreement(inputs: dict[str, Path]) -> None:
+    agreement = inputs["base"] / "invalid-agreement.json"
+    agreement.write_text('{"pass": true}', encoding="utf-8")
+    _, result = _freeze(
+        inputs,
+        "bad-agreement",
+        "--grouping-version",
+        "dhash-v1",
+        "--agreement-results",
+        str(agreement),
+    )
+    assert result.returncode != 0
+    assert "freeze blocked:" in result.stderr
+
+
+def test_grouped_freeze_requires_and_records_source_screening(
+    inputs: dict[str, Path],
+) -> None:
+    out, result = _freeze(
+        inputs,
+        "screened",
+        "--grouping-version",
+        "dhash-v1",
+        "--plantvillage-root",
+        str(inputs["images"]),
+        "--plantdoc-root",
+        str(inputs["images"]),
+    )
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads((out / "target" / "grouping.json").read_text())
+    assert receipt["source_screening"]["plantvillage"]["exclusions"]
+    assert receipt["source_screening"]["plantdoc"]["exclusions"]
+
+
+def test_freeze_command_reports_image_io_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from jute_disease import cli
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise OSError("image disappeared")
+
+    monkeypatch.setattr(cli, "freeze_target", fail)
+    with pytest.raises(SystemExit, match="freeze blocked: image disappeared"):
+        cli.main(["freeze", "target"])
+
+
+def test_grouped_freeze_removes_a_rated_edge(inputs: dict[str, Path]) -> None:
+    import shutil
+
+    out, first = _freeze(inputs, "rating-base", "--grouping-version", "dhash-v1")
+    assert first.returncode == 0, first.stderr
+    receipt = json.loads((out / "target" / "grouping.json").read_text())
+    original = receipt["families"][0][0]
+    images = inputs["base"] / "rated-images"
+    shutil.copytree(inputs["images"], images)
+    original_path = images / original
+    variant = original_path.with_name(
+        f"{original_path.stem}_rated{original_path.suffix}"
+    )
+    variant.write_bytes(original_path.read_bytes() + b"rating fixture")
+    pair = sorted((original, variant.relative_to(images).as_posix()))
+    ratings = inputs["base"] / "actual-ratings.csv"
+    ratings.write_text(
+        f"image_a,image_b,verdict\n{pair[0]},{pair[1]},no_merge\n", encoding="utf-8"
+    )
+    out, result = _freeze(
+        {**inputs, "images": images},
+        "rating-repaired",
+        "--grouping-version",
+        "dhash-v1",
+        "--no-merge-ratings",
+        str(ratings),
+    )
+    assert result.returncode == 0, result.stderr
+    repaired = json.loads((out / "target" / "grouping.json").read_text())
+    assert list(pair) in repaired["no_merge_ratings"]
+    assert any(edge[:2] == list(pair) for edge in repaired["removed_edges"])
+
+
+def test_grouped_freeze_requires_source_roots(inputs: dict[str, Path]) -> None:
+    result = _run(
+        "freeze",
+        "target",
+        "--image-root",
+        str(inputs["images"]),
+        "--rules",
+        str(inputs["rules"]),
+        "--reviews",
+        str(inputs["reviews"]),
+        "--output",
+        str(inputs["base"] / "no-sources"),
+        "--grouping-version",
+        "dhash-v1",
+    )
+    assert result.returncode != 0
+    assert "requires both source roots" in result.stderr
+
+
+def test_grouped_manifest_rejects_missing_grouping_dependency(
+    inputs: dict[str, Path],
+) -> None:
+    from dataclasses import replace
+
+    from jute_disease.data import FreezeBlockedError
+    from jute_disease.data.manifest import write_manifest
+
+    out, result = _freeze(inputs, "missing-grouping", "--grouping-version", "dhash-v1")
+    assert result.returncode == 0, result.stderr
+    manifest = load_manifest(out / "target")
+    altered = replace(
+        manifest,
+        dependencies=tuple(
+            (key, value) for key, value in manifest.dependencies if key != "grouping"
+        ),
+    )
+    write_manifest(altered, out / "target")
+    with pytest.raises(FreezeBlockedError, match="grouping"):
+        load_manifest(out / "target")
