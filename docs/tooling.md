@@ -56,3 +56,22 @@ the threshold; a null interval always fails. `data audit-evaluate --gate-output`
 writes this record separately from its full rating report. The receipt records
 the input and the resulting pass/fail gate. Without the option, agreement
 remains pending. These grouping inputs are unavailable on the legacy freeze path.
+
+### Leaf-mask and scene audit
+
+The mask workflow implements the dated amendment to [ADR 0002](adr/0002-measure-background-confound-with-fixed-transforms.md): calibrate scene cutoffs on 100 development images, sample about 300 audit images, and use one blind owner sitting on 120 overlays for both mask quality and scene tag. The earlier 50-overlay paragraph in the original decision is superseded by that amendment.
+
+The development JSON is an array of exactly 100 records with `image_id`, `path`, and `scene_tag`; the three tags are `clean-background`, `field`, and `unknown`. The separate audit inventory is an array of `image_id` and `path` records. Paths may be relative to their JSON file. Calibration stores the development IDs and source SHA-256 values. Audit preparation rejects any ID or image-content overlap with development data and requires the same mask backend that calibrated the cutoffs.
+
+```powershell
+uv run jute-disease data masks-calibrate development.json --output artifacts/scene-thresholds.json
+uv run jute-disease data masks-audit audit-inventory.json artifacts/scene-thresholds.json --output artifacts/mask-audit
+# Complete agent.csv, then complete both owner.csv rating columns in one blind sitting.
+uv run jute-disease data masks-evaluate artifacts/mask-audit/audit.json artifacts/mask-audit/agent.csv artifacts/mask-audit/owner.csv --agent-name "<rater name>" --agent-version "<rater version>" --output artifacts/mask-audit/evaluation.json
+```
+
+Calibration uses a deterministic grid search for the background-fraction and color-uniformity cutoffs. Audit sampling balances the nonempty predicted-scene strata, which oversamples rare scenes, and records each stratum's population and sample counts for the weighted mask-failure estimate. The owner sheet contains only an audit ID, overlay path, and blank mask/scene ratings; automatic scene tags and model outputs remain in `audit.json`. Rate the owner sample before opening the grouping-pair worksheet. Evaluation reports three-category Cohen's κ with a paired-bootstrap 95% interval, requires the lower bound to reach 0.6, reports the full owner-versus-automatic three-category confusion matrix, and gates the population-weighted estimated fail rate below 10%. Production evaluation requires the external agent-rater name and version; no rater is selected by this code.
+
+`data masks-fixture --output PATH` runs this workflow end to end with local synthetic images, a deterministic stub mask backend, and explicitly synthetic ratings. Its output is fixture evidence only; it contains no checkpoint, real threshold, owner rating, or audit result.
+
+SAM 2 refinement is optional and uses the `masks` extra. Supply an existing local checkpoint directory to both calibration and audit commands with `--checkpoint PATH`; the loader sets `local_files_only=True` and never fetches weights. It requires a local model-weight file, includes the weight digest in the backend version, and stores the config digest in per-mask diagnostics. Mask sidecars retain the binary mask, overlay, model/version, and fixed mask rubric. SAM output also records intersection-over-union against the color-threshold mask. The locked Transformers 5.22.1 package was not indexed in Context7, so implementation used the official [Hugging Face SAM2 documentation](https://huggingface.co/docs/transformers/model_doc/sam2) as the API reference.

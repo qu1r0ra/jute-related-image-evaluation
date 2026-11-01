@@ -117,7 +117,7 @@ The unified jute dataset merges three public sources. The repository code is Apa
    uv sync --locked --all-groups
    ```
 
-   uv selects CUDA 13.0 PyTorch wheels on Windows and CUDA 12.6 wheels on Linux. Optional SAM2 support is installed with `uv sync --locked --extra masks --all-groups`; acquire model weights separately before any offline mask run.
+   uv selects CUDA 13.0 PyTorch wheels on Windows and CUDA 12.6 wheels on Linux. Optional SAM2 support is installed with `uv sync --locked --extra masks --all-groups`. Setup does not include or download a model checkpoint. Optional SAM 2 refinement requires an existing local checkpoint and loads it offline.
 
 3. Optional: install [`just`](https://just.systems) to run the recipes shown below. `just --list` shows every recipe, and each one wraps a single `uv run jute-disease` command. `uv run jute-disease --help` lists the commands themselves. The Linux lab helpers are under `scripts/`; ntfy topic and token are supplied through the host's environment secret mechanism, never command arguments.
 
