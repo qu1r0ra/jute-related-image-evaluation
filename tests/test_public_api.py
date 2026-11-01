@@ -221,3 +221,35 @@ def test_lightning_csv_logger_writes_local_metrics_without_a_fit(
         rows = list(csv.DictReader(handle))
     assert rows[0]["val_macro_f1"] == "0.75"
     assert rows[0]["step"] == "1"
+
+
+def test_evaluation_statistics_api() -> None:
+    from jute_disease import evaluation
+    from jute_disease.evaluation import (
+        Agreement,
+        Interval,
+        PredictionSet,
+        Resampling,
+        agreement_gate,
+        kendall_tau,
+        one_image_per_family,
+        resample_metrics,
+        wilson_interval,
+    )
+
+    assert all(
+        item is not None
+        for item in (
+            Agreement,
+            Interval,
+            PredictionSet,
+            Resampling,
+            agreement_gate,
+            kendall_tau,
+            one_image_per_family,
+            resample_metrics,
+            wilson_interval,
+        )
+    )
+    assert len(set(evaluation.__all__)) == len(evaluation.__all__)
+    assert all(hasattr(evaluation, name) for name in evaluation.__all__)
