@@ -9,6 +9,7 @@ import json
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 from jute_disease.config import (
     ARTIFACTS_DIR,
@@ -29,13 +30,22 @@ from jute_disease.data import (
     SOURCES,
     TARGET_DIR,
     FreezeBlockedError,
+    ImageNetExtractor,
     SourceMismatchError,
     download_plant_doc,
     download_plant_village,
+    evaluate_ratings,
+    export_blind,
+    feature_neighbors,
+    fixture_round,
     freeze_target,
     intake_source,
     make_synthetic_data,
+    prepare_cohort,
     probe_cache,
+    residual_sample,
+    sample_edges,
+    synthetic_recall,
     write_policy_manifests,
 )
 from jute_disease.reporting.tables import aggregate_metrics
@@ -79,6 +89,127 @@ def _data_download(_: argparse.Namespace) -> None:
 def _data_synthetic(args: argparse.Namespace) -> None:
     plan = make_synthetic_data(args.root, args.per_class, args.size)
     sys.stdout.write(f"Wrote {len(plan.files)} synthetic images under {plan.root}\n")
+
+
+def _audit_fixture(args: argparse.Namespace) -> None:
+    try:
+        _print_json(fixture_round(args.output))
+    except (ValueError, OSError) as error:
+        raise SystemExit(f"audit blocked: {error}") from error
+
+
+def _audit_sample(args: argparse.Namespace) -> None:
+    from PIL import Image
+
+    try:
+        data = json.loads(args.source.read_text(encoding="utf-8"))
+        if args.kind == "edges":
+            report = sample_edges(data, count=args.count, seed=args.seed)
+        elif args.kind == "features":
+            extractor = ImageNetExtractor()
+            report = {
+                "pairs": feature_neighbors(data, extractor, k=args.k),
+                "feature_provenance": extractor.provenance,
+            }
+        elif args.kind == "residual":
+            extractors: list[ImageNetExtractor] = []
+
+            def extract(paths: Sequence[str]) -> Any:
+                extractor = ImageNetExtractor()
+                extractors.append(extractor)
+                return extractor(paths)
+
+            report = residual_sample(
+                data["protected_test"],
+                data["training"],
+                extract,
+                count=args.count,
+                k=args.k,
+                seed=args.seed,
+            )
+            report["feature_provenance"] = extractors[-1].provenance
+        else:
+            images = []
+            for path in data:
+                with Image.open(path) as image:
+                    images.append(image.convert("RGB"))
+            report = synthetic_recall(images)
+        _print_json(report)
+    except (ValueError, OSError, KeyError) as error:
+        raise SystemExit(f"audit blocked: {error}") from error
+
+
+def _audit_cohort(args: argparse.Namespace) -> None:
+    try:
+        samples = json.loads(args.source.read_text(encoding="utf-8"))
+        cohort = prepare_cohort(samples, seed=args.seed)
+        args.output.mkdir(parents=True, exist_ok=False)
+        (args.output / "agent.json").write_text(
+            json.dumps(cohort, indent=2) + "\n", encoding="utf-8"
+        )
+        export_blind(cohort["pairs"], args.output / "owner.csv")
+        _print_json(
+            {
+                "pairs": len(cohort["pairs"]),
+                "output": str(args.output),
+                "next_action": (
+                    "Fill agent_rating in agent.json and owner ratings "
+                    "in owner.csv independently."
+                ),
+            }
+        )
+    except (ValueError, OSError, KeyError) as error:
+        raise SystemExit(f"audit blocked: {error}") from error
+
+
+def _audit_export(args: argparse.Namespace) -> None:
+    try:
+        data = json.loads(args.source.read_text(encoding="utf-8"))
+        export_blind(data["pairs"], args.sheet)
+    except (ValueError, OSError, KeyError) as error:
+        raise SystemExit(f"audit blocked: {error}") from error
+
+
+def _audit_evaluate(args: argparse.Namespace) -> None:
+    try:
+        data = json.loads(args.source.read_text(encoding="utf-8"))
+        previous = (
+            json.loads(args.previous.read_text(encoding="utf-8"))
+            if args.previous
+            else None
+        )
+        if previous is not None and (
+            previous.get("round") != 1
+            or previous.get("pass") is not False
+            or not args.revision
+        ):
+            raise ValueError(
+                "retry requires a failed first round and a rubric revision"
+            )
+        if previous is None and args.revision:
+            raise ValueError("a rubric revision requires a failed first round")
+        report = evaluate_ratings(
+            data["pairs"],
+            args.sheet,
+            data["denominators"],
+            round_number=2 if previous else 1,
+            previous=previous,
+            revision=args.revision,
+        )
+        if previous is not None:
+            report["revision"] = args.revision
+            report["previous"] = previous
+        if args.gate_output:
+            gate = {
+                key: report[key]
+                for key in ("kappa_interval", "threshold", "pass", "method")
+            }
+            with args.gate_output.open("x", encoding="utf-8") as handle:
+                json.dump(gate, handle, indent=2)
+                handle.write("\n")
+        _print_json(report)
+    except (ValueError, OSError, KeyError) as error:
+        raise SystemExit(f"audit blocked: {error}") from error
 
 
 def _print_json(payload: object) -> None:
@@ -310,6 +441,55 @@ def build_parser() -> argparse.ArgumentParser:
     synthetic.add_argument("--per-class", type=int, default=20)
     synthetic.add_argument("--size", type=int, default=64)
     synthetic.set_defaults(run=_data_synthetic)
+
+    audit = data_actions.add_parser(
+        "audit-fixture", help="Run a synthetic blind rating round."
+    )
+    audit.add_argument("--output", type=Path, required=True)
+    audit.set_defaults(run=_audit_fixture)
+
+    sampler = data_actions.add_parser(
+        "audit-sample", help="Sample grouping audit candidates from JSON inputs."
+    )
+    sampler.add_argument("kind", choices=("edges", "features", "residual", "recall"))
+    sampler.add_argument("source", type=Path)
+    sampler.add_argument("--count", type=int, default=200)
+    sampler.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    sampler.add_argument("--k", type=int, default=5)
+    sampler.set_defaults(run=_audit_sample)
+    cohort = data_actions.add_parser(
+        "audit-cohort",
+        help="Select 60 pairs per hash band and write blind rating sheets.",
+        description=(
+            "Select 60 merged and 60 near-miss pairs, shuffling within "
+            "each stratum and cycling through strata using the given seed. "
+            "After export, independently complete agent_rating in agent.json "
+            "and rating in owner.csv before running audit-evaluate."
+        ),
+    )
+    cohort.add_argument(
+        "source", type=Path, help="JSON output from data audit-sample edges"
+    )
+    cohort.add_argument(
+        "output", type=Path, help="New directory for agent.json and owner.csv"
+    )
+    cohort.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    cohort.set_defaults(run=_audit_cohort)
+    export = data_actions.add_parser("audit-export", help="Export a blind owner sheet.")
+    export.add_argument("source", type=Path)
+    export.add_argument("sheet", type=Path)
+    export.set_defaults(run=_audit_export)
+    evaluate_audit = data_actions.add_parser(
+        "audit-evaluate", help="Import owner ratings and evaluate agreement."
+    )
+    evaluate_audit.add_argument("source", type=Path)
+    evaluate_audit.add_argument("sheet", type=Path)
+    evaluate_audit.add_argument("--previous", type=Path)
+    evaluate_audit.add_argument("--revision")
+    evaluate_audit.add_argument(
+        "--gate-output", type=Path, help="Write a new freeze-compatible gate record."
+    )
+    evaluate_audit.set_defaults(run=_audit_evaluate)
 
     # train: the one fit command the queue launches as a child process
     train = commands.add_parser("train", help="Run one benchmark fit.")

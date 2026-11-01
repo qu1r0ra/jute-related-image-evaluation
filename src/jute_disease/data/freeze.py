@@ -182,16 +182,22 @@ def freeze_target(
             def number(x: object) -> bool:
                 return type(x) in (int, float) and -1 <= x <= 1
 
+            valid_interval = interval is None and agreement["pass"] is False
             if (
-                not isinstance(interval, list)
-                or len(interval) != 2
-                or not all(number(x) for x in interval)
-                or interval[0] > interval[1]
+                isinstance(interval, list)
+                and len(interval) == 2
+                and all(number(x) for x in interval)
+                and number(threshold)
+            ):
+                valid_interval = interval[0] <= interval[1] and agreement["pass"] == (
+                    interval[0] >= threshold
+                )
+            if (
+                not valid_interval
                 or not number(threshold)
                 or type(agreement["pass"]) is not bool
                 or not isinstance(agreement["method"], str)
                 or not agreement["method"].strip()
-                or agreement["pass"] != (interval[0] >= threshold)
             ):
                 raise ValueError("Invalid agreement results values")
             gate = "pass" if agreement["pass"] else "fail"

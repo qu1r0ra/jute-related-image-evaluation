@@ -1,3 +1,14 @@
+from jute_disease.data.audit import (
+    ImageNetExtractor,
+    evaluate_ratings,
+    export_blind,
+    feature_neighbors,
+    fixture_round,
+    prepare_cohort,
+    residual_sample,
+    sample_edges,
+    synthetic_recall,
+)
 from jute_disease.data.cache import (
     DECISION_FILE,
     DEFAULT_BUDGET_SECONDS,
@@ -201,4 +212,17 @@ __all__ += [
     "repair_components",
     "screen_source_overlap",
     "union_find_components",
+]
+
+
+__all__ += [
+    "evaluate_ratings",
+    "export_blind",
+    "feature_neighbors",
+    "prepare_cohort",
+    "fixture_round",
+    "ImageNetExtractor",
+    "residual_sample",
+    "sample_edges",
+    "synthetic_recall",
 ]
