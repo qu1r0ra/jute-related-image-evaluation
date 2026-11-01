@@ -171,13 +171,24 @@ def residual_sample(
     """Uniform protected-test sample and top-k train neighbours per pool."""
     if k < 1 or count < 1 or set(pools) != set(training):
         raise ValueError("positive k and count and matching pools required")
+    for pool in sorted(pools):
+        test, train = pools[pool], training[pool]
+        if len(test) < count:
+            raise ValueError(
+                f"pool {pool} has {len(test)} protected-test images; {count} required"
+            )
+        if len(train) < k:
+            raise ValueError(
+                f"pool {pool} has {len(train)} training images; "
+                f"{k} required for neighbours"
+            )
+        if set(test) & set(train):
+            raise ValueError("test and train must be disjoint")
     rng = random.Random(seed)
     result = {}
     for pool in sorted(pools):
         test, train = pools[pool], training[pool]
-        if set(test) & set(train):
-            raise ValueError("test and train must be disjoint")
-        chosen = rng.sample(sorted(test), min(count, len(test)))
+        chosen = rng.sample(sorted(test), count)
         paths = chosen + sorted(train)
         vectors = np.asarray(extractor(paths), dtype=float)
         if (
@@ -270,6 +281,73 @@ def synthetic_recall(images: Sequence[Image.Image]) -> dict[str, Any]:
     }
 
 
+def prepare_cohort(samples: dict[str, Any], seed: int = 42) -> dict[str, Any]:
+    """Select 60 pairs per band, round-robin across shuffled strata.
+
+    Agent ratings are left blank for independent review. Every population
+    stratum must have a sampled pair so weighted errors remain estimable.
+    """
+    rng = random.Random(seed)
+    rows = []
+    denominators = {}
+    seen = set()
+    for band_name in ("merged", "near_miss"):
+        band = samples["bands"][band_name]
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for pair in band["pairs"]:
+            a, b, distance = pair["image_a"], pair["image_b"], pair["distance"]
+            if a == b or tuple(sorted((a, b))) in seen:
+                raise ValueError("edge samples must contain distinct unique pairs")
+            if not (
+                3 <= distance <= 4 if band_name == "merged" else 5 <= distance <= 16
+            ):
+                raise ValueError("edge distance does not match its band")
+            seen.add(tuple(sorted((a, b))))
+            grouped[pair["stratum"]].append(pair)
+        strata = band["strata"]
+        if set(grouped) != set(strata) or len(strata) > 60:
+            raise ValueError(
+                "each population stratum must be represented in the owner cohort"
+            )
+        if len(band["pairs"]) < 60:
+            raise ValueError(f"{band_name} needs at least 60 sampled pairs")
+        for stratum, detail in strata.items():
+            if detail["population"] < len(grouped[stratum]) or detail["sampled"] != len(
+                grouped[stratum]
+            ):
+                raise ValueError("stratum counts do not match sampled pairs")
+            denominators[f"{band_name}:{stratum}"] = detail["population"]
+            rng.shuffle(grouped[stratum])
+        selected = []
+        while len(selected) < 60:
+            for stratum in sorted(grouped):
+                if grouped[stratum] and len(selected) < 60:
+                    selected.append(grouped[stratum].pop())
+        for pair in selected:
+            rows.append(
+                {
+                    "pair_id": str(len(rows)),
+                    "image_a": pair["image_a"],
+                    "image_b": pair["image_b"],
+                    "agent_rating": "",
+                    "algorithm_merge": band_name == "merged",
+                    "stratum": f"{band_name}:{pair['stratum']}",
+                }
+            )
+    rng.shuffle(rows)
+    for index, row in enumerate(rows):
+        row["pair_id"] = str(index)
+    return {
+        "pairs": rows,
+        "denominators": denominators,
+        "selection": {
+            "seed": seed,
+            "method": "60 per band; shuffled within strata, round-robin, then shuffled",
+            "sample_seed": samples["seed"],
+        },
+    }
+
+
 def export_blind(rows: Sequence[dict[str, Any]], path: Path) -> None:
     """Write only pair identifiers and a blank owner rating."""
     ids = [row["pair_id"] for row in rows]
@@ -297,10 +375,43 @@ def evaluate_ratings(
     denominators: dict[str, int],
     round_number: int = 1,
     seed: int = 42,
+    previous: dict[str, Any] | None = None,
+    revision: str | None = None,
 ) -> dict[str, Any]:
-    """Import exactly one rating per pair and evaluate agreement and weighted error."""
+    """Import ratings; bind a single retry to the same pair cohort and strata."""
     if round_number not in (1, 2):
         raise ValueError("only one rubric revision is permitted")
+    identity = {
+        "pairs": sorted(
+            (
+                {key: row[key] for key in ("pair_id", "image_a", "image_b", "stratum")}
+                | {"algorithm_merge": row.get("algorithm_merge")}
+                for row in rows
+            ),
+            key=lambda row: row["pair_id"],
+        ),
+        "denominators": denominators,
+    }
+    digest = hashlib.sha256(
+        json.dumps(
+            identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+    ).hexdigest()
+    if round_number == 2:
+        if (
+            previous is None
+            or previous.get("round") != 1
+            or previous.get("pass") is not False
+            or not revision
+            or not revision.strip()
+        ):
+            raise ValueError(
+                "retry requires a failed first round and a rubric revision"
+            )
+        if previous.get("cohort_digest") != digest:
+            raise ValueError("retry cohort does not match the first round")
+    elif previous is not None or revision is not None:
+        raise ValueError("previous round and revision apply only to a retry")
     with Path(owner_path).open(newline="", encoding="utf-8") as handle:
         owner = list(csv.DictReader(handle))
     by_id = {row["pair_id"]: row for row in rows}
@@ -371,6 +482,8 @@ def evaluate_ratings(
         }
     return {
         **algorithm,
+        "cohort_digest": digest,
+        "revision": revision,
         "kappa": agreement.kappa,
         "kappa_interval": [agreement.interval.lower, agreement.interval.upper],
         "threshold": agreement.threshold,
@@ -425,34 +538,14 @@ def fixture_round(output: Path) -> dict[str, Any]:
     (output / "samples.json").write_text(
         json.dumps(samples, indent=2) + "\n", encoding="utf-8"
     )
-    rows = []
-    denominators = {}
-    for band_name, band in samples["edges"]["bands"].items():
-        grouped = defaultdict(list)
-        for pair in band["pairs"]:
-            grouped[pair["stratum"]].append(pair)
-        for stratum, detail in band["strata"].items():
-            denominators[f"{band_name}:{stratum}"] = detail["population"]
-        selected = []
-        while len(selected) < 60 and any(grouped.values()):
-            for stratum in sorted(grouped):
-                if grouped[stratum] and len(selected) < 60:
-                    selected.append(grouped[stratum].pop())
-        for pair in selected:
-            merge = band_name == "merged"
-            rows.append(
-                {
-                    "pair_id": str(len(rows)),
-                    "image_a": pair["image_a"],
-                    "image_b": pair["image_b"],
-                    "agent_rating": "near-duplicate" if merge else "different",
-                    "algorithm_merge": merge,
-                    "stratum": f"{band_name}:{pair['stratum']}",
-                }
-            )
+    cohort = prepare_cohort(samples["edges"])
+    rows, denominators = cohort["pairs"], cohort["denominators"]
+    for row in rows:
+        row["agent_rating"] = (
+            "near-duplicate" if row["algorithm_merge"] else "different"
+        )
     (output / "agent.json").write_text(
-        json.dumps({"pairs": rows, "denominators": denominators}, indent=2) + "\n",
-        encoding="utf-8",
+        json.dumps(cohort, indent=2) + "\n", encoding="utf-8"
     )
     export_blind(rows, output / "owner.csv")
     with (output / "owner.csv").open(newline="", encoding="utf-8") as handle:
@@ -478,11 +571,18 @@ def fixture_round(output: Path) -> dict[str, Any]:
         )
         writer.writeheader()
         writer.writerows(owner)
+    first_failed = evaluate_ratings(rows, failed_path, denominators, round_number=1)
     failed = [
-        evaluate_ratings(rows, failed_path, denominators, round_number=1),
-        evaluate_ratings(rows, failed_path, denominators, round_number=2),
+        first_failed,
+        evaluate_ratings(
+            rows,
+            failed_path,
+            denominators,
+            round_number=2,
+            previous=first_failed,
+            revision="synthetic fixture revision",
+        ),
     ]
-    failed[1]["revision"] = "synthetic fixture revision"
     (output / "failed_rounds.json").write_text(
         json.dumps(failed, indent=2) + "\n", encoding="utf-8"
     )

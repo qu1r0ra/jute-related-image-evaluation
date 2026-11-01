@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def test_fixture_rating_round_is_blind_and_evaluated(tmp_path: Path) -> None:
     result = subprocess.run(
@@ -143,3 +145,107 @@ def test_owner_rating_import_reports_weighted_error_and_escalation(
     )
     assert second.returncode == 0, second.stderr
     assert json.loads(second.stdout)["next_action"] == "owner_escalation"
+    assert json.loads(second.stdout)["cohort_digest"] == report["cohort_digest"]
+    for mutation in ("denominator", "pair"):
+        changed = json.loads(source.read_text(encoding="utf-8"))
+        if mutation == "denominator":
+            changed["denominators"]["small"] += 1
+        else:
+            changed["pairs"][0]["image_a"] = "replacement"
+        altered = tmp_path / f"altered-{mutation}.json"
+        altered.write_text(json.dumps(changed), encoding="utf-8")
+        retry = subprocess.run(
+            base
+            + [
+                "audit-evaluate",
+                str(altered),
+                str(sheet),
+                "--previous",
+                str(previous),
+                "--revision",
+                "clarified examples",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert retry.returncode != 0
+        assert "cohort" in retry.stderr
+
+
+def test_prepare_real_cohort_from_edge_samples(tmp_path: Path) -> None:
+    bands = {}
+    for band, distance in [("merged", 3), ("near_miss", 5)]:
+        pairs = [
+            {
+                "image_a": f"{band}-a{i}",
+                "image_b": f"{band}-b{i}",
+                "distance": distance,
+                "stratum": f"{distance}:same_label",
+            }
+            for i in range(75)
+        ]
+        bands[band] = {
+            "population": 100,
+            "strata": {f"{distance}:same_label": {"population": 100, "sampled": 75}},
+            "pairs": pairs,
+        }
+    source = tmp_path / "edges.json"
+    source.write_text(json.dumps({"seed": 42, "bands": bands}), encoding="utf-8")
+    output = tmp_path / "cohort"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "jute_disease.cli",
+            "data",
+            "audit-cohort",
+            str(source),
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    agent = json.loads((output / "agent.json").read_text(encoding="utf-8"))
+    with (output / "owner.csv").open(newline="", encoding="utf-8") as handle:
+        owner = list(csv.DictReader(handle))
+    assert len(agent["pairs"]) == len(owner) == 120
+    assert sum(row["algorithm_merge"] for row in agent["pairs"]) == 60
+    assert {row["algorithm_merge"] for row in agent["pairs"][:60]} == {True, False}
+    assert all(row["agent_rating"] == "" for row in agent["pairs"])
+    assert all(
+        set(row) == {"pair_id", "image_a", "image_b", "rating"} and row["rating"] == ""
+        for row in owner
+    )
+    assert agent["denominators"] == {
+        "merged:3:same_label": 100,
+        "near_miss:5:same_label": 100,
+    }
+
+
+def test_residual_sampler_rejects_short_pool_before_feature_extraction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jute_disease import cli
+
+    source = tmp_path / "short.json"
+    source.write_text(
+        json.dumps(
+            {
+                "protected_test": {"short": {"missing-test": 0}},
+                "training": {"short": {"missing-train": 1}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls = []
+
+    def forbidden_extractor() -> None:
+        calls.append(True)
+        raise AssertionError("pretrained extractor must not be constructed")
+
+    monkeypatch.setattr(cli, "ImageNetExtractor", forbidden_extractor)
+    with pytest.raises(SystemExit, match="short.*200"):
+        cli.main(["data", "audit-sample", "residual", str(source)])
+    assert not calls
