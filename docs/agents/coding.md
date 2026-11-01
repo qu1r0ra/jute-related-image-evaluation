@@ -3,7 +3,6 @@
 - Annotate every function return; use `|` unions and built-in generics such as `list[str]`.
 - Library code raises; command entry points translate errors to exit codes.
 - Ruff output is the formatting authority.
-- Pair every notebook with its Jupytext `.py` script.
 - Keep shared experiment logic in the package or CLI; notebooks are wrappers.
 - Import through a subpackage's `__init__.py` public surface.
 - Use snake_case modules, noun packages, and verb commands. Avoid catch-all helper modules and variant-suffix modules; represent variants as configs.

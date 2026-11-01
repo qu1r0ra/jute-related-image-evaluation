@@ -72,13 +72,10 @@ lint:
 format:
     uv run --locked ruff check --fix . && uv run --locked ruff format .
 
-sync-nb:
-    uv run jupytext --sync "notebooks/*.py"
-
 # Cleanup
 
 clean:
-    rm -rf .coverage htmlcov lightning_logs .pytest_cache .ruff_cache
+    rm -rf lightning_logs .pytest_cache .ruff_cache
 
 clean-artifacts:
     rm -rf artifacts/runs artifacts/features

@@ -62,7 +62,7 @@ A high-level overview of the repository organization:
 ├── data/               # Dataset storage (git-ignored) and the tracked class list
 ├── docs/               # Architecture notes and the submitted paper
 ├── notebooks/          # Local training notebooks and the freeze provenance demo
-│   └── historical/     # Notebooks and Jupytext pairs as run for the paper
+│   └── historical/     # Submitted notebooks for the withdrawn paper
 ├── results/
 │   └── submitted/      # Committed logs and figures behind the reported numbers
 │       ├── figures/    # dl/ and ml/ figures
