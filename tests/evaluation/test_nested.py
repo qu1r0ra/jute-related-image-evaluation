@@ -1,3 +1,8 @@
+import os
+import subprocess
+import sys
+import textwrap
+
 import numpy as np
 import pytest
 
@@ -90,6 +95,49 @@ def test_route_checkpoints_pool_runs_across_splits_before_weighting() -> None:
     )
     # Pooled checkpoint means are A = (1 + 1 + 0) / 3 and B = (0 + 1 + 1) / 3.
     assert result.estimates["route"] == pytest.approx(2 / 3)
+
+
+def test_checkpoint_bootstrap_is_reproducible_across_hash_seeds() -> None:
+    # Checkpoint labels are strings, so set order would vary with PYTHONHASHSEED.
+    script = textwrap.dedent(
+        """
+        from jute_disease.evaluation import PredictionSet, resample_metrics
+
+        patterns = [("a", "b"), ("b", "b"), ("b", "a")]
+
+        def make(seed_ids):
+            predictions = {s: patterns[s % 3] for s in seed_ids}
+            return PredictionSet(
+                ("a", "b"), ("i0", "i1"), ("a", "b"), ("f0", "f1"), ("s", "s"),
+                predictions,
+            )
+
+        # Unequal checkpoint sizes, so which checkpoint receives each draw matters.
+        split0 = make(range(1, 9))
+        split1 = make(range(9, 17))
+        checkpoints = {
+            0: {s: ("alpha" if s <= 4 else "beta" if s <= 6 else "gamma") for s in range(1, 9)},
+            1: {s: ("delta" if s <= 12 else "beta" if s <= 14 else "gamma") for s in range(9, 17)},
+        }
+        result = resample_metrics(
+            {"route": {0: split0, 1: split1}}, "accuracy", 40, seed=42,
+            checkpoints=checkpoints,
+        )
+        print(result.samples["route"].tobytes().hex())
+        """
+    )
+    outputs = set()
+    for hash_seed in ("1", "3"):
+        env = {**os.environ, "PYTHONHASHSEED": hash_seed}
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        outputs.add(completed.stdout.strip())
+    assert len(outputs) == 1
 
 
 def test_one_image_per_family_sensitivity_uses_stable_image_id() -> None:

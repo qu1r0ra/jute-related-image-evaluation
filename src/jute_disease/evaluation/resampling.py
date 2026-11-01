@@ -101,7 +101,7 @@ def resample_metrics(
                 raise ValueError("checkpoint assignment must cover every seed")
             strata = {
                 cp: tuple(s for s in ref.seeds if assignment[s] == cp)
-                for cp in set(assignment.values())
+                for cp in sorted(set(assignment.values()))
             }
         layouts[split] = (families, strata)
 
@@ -129,7 +129,7 @@ def resample_metrics(
             for cp, scores in run_scores(name, split, groups, weights).items():
                 key = cp if checkpoints is not None else position
                 pooled.setdefault(key, []).extend(scores)
-        return float(np.mean([np.mean(values) for values in pooled.values()]))
+        return float(np.mean([np.mean(pooled[key]) for key in sorted(pooled)]))
 
     estimates = {
         name: route_score(
