@@ -6,14 +6,16 @@ from pathlib import Path
 
 import pytest
 
-from jute_disease.data.identity import (
+from jute_disease.data import (
+    InventoryRecord,
+    SyntheticPlan,
     find_candidates,
     load_reviews,
     resolve_identity,
+)
+from jute_disease.data.identity import (
     reviews_digest,
 )
-from jute_disease.data.inventory import InventoryRecord
-from jute_disease.data.synthetic import SyntheticPlan
 
 
 def _by_path(inventory: list[InventoryRecord]) -> dict[str, InventoryRecord]:

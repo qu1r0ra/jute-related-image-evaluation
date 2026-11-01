@@ -6,17 +6,18 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from jute_disease.data.inventory import (
+from jute_disease.data import (
+    InventoryRecord,
+    SyntheticPlan,
     build_inventory,
     inventory_digest,
     read_inventory,
     write_inventory,
 )
-from jute_disease.data.synthetic import SyntheticPlan
 
 
 def test_inventory_covers_every_file_and_leaves_them_untouched(
-    synthetic: SyntheticPlan, inventory: list
+    synthetic: SyntheticPlan, inventory: list[InventoryRecord]
 ) -> None:
     assert [r.path for r in inventory] == synthetic.files
     assert all((synthetic.root / r.path).is_file() for r in inventory)

@@ -291,3 +291,29 @@ def test_internal_authorization_does_not_claim_publisher_or_terms_verification(
             "Source terms remain unverified; owner approval does not grant redistribution rights",
         ],
     }
+
+
+def test_source_readiness_blocks_a_class_without_validation_support(
+    records: list[InventoryRecord], spec: SourceSpec
+) -> None:
+    split = derive_validation(records, seed=42)
+    missing_label = split.val[0].label
+    split_without_class = replace(
+        split,
+        val=tuple(record for record in split.val if record.label != missing_label),
+    )
+    authorized = replace(
+        spec,
+        expected_inventory_digest=inventory_digest(records),
+        owner_internal_use_authorized=True,
+        owner_authorization_record="fixture owner authorization",
+    )
+
+    readiness = provenance(authorized, records, 3, split_without_class, None)[
+        "readiness"
+    ]
+
+    assert readiness["ready"] is False
+    assert readiness["blockers"] == [
+        f"Source validation has no support for class {missing_label!r}"
+    ]

@@ -1,38 +1,52 @@
-"""Aggregate CSV metrics from multiple experiments into a summary report."""
+"""Aggregate the validation metrics of finished fits into a summary table."""
 
 from pathlib import Path
 
 import pandas as pd
 
-from jute_disease.config import LOGS_DIR
+from jute_disease.config import RUNS_DIR
 from jute_disease.training.logger import get_logger
 
 logger = get_logger(__name__)
 
+METRICS_PATH = Path("metrics") / "version_0" / "metrics.csv"
 
-def aggregate_metrics(exp_names: list[str], output_csv: Path) -> None:
-    """Consolidates metrics from all CSVLogger outputs into a master CSV."""
+
+def _latest_metrics(fit_dir: Path) -> Path | None:
+    """The metrics file of the highest numbered attempt that wrote one."""
+    attempts = sorted(
+        (
+            int(child.name.removeprefix("attempt-")),
+            child,
+        )
+        for child in fit_dir.glob("attempt-*")
+        if child.name.removeprefix("attempt-").isdigit()
+    )
+    for _, attempt in reversed(attempts):
+        if (attempt / METRICS_PATH).is_file():
+            return attempt / METRICS_PATH
+    return None
+
+
+def aggregate_metrics(
+    fit_ids: list[str], output_csv: Path, runs_dir: Path = RUNS_DIR
+) -> None:
+    """Write the best-validation-epoch metrics of each fit to one CSV.
+
+    Reads ``<runs_dir>/<fit id>/attempt-N/metrics/version_0/metrics.csv`` from the
+    latest attempt. Training never records test metrics, so none appear here.
+    """
     results = []
-
-    for exp in exp_names:
-        log_dir = LOGS_DIR / exp
-        if not log_dir.exists():
+    for fit_id in fit_ids:
+        path = _latest_metrics(Path(runs_dir) / fit_id)
+        if path is None:
             continue
-
-        # Concatenate fit and test metrics from all versions
-        metrics_files = list(log_dir.glob("*-metrics.csv"))
-        if not metrics_files:
-            continue
-
-        dfs = [pd.read_csv(f) for f in metrics_files]
-        df = pd.concat(dfs, ignore_index=True)
-
-        summary = {"Experiment": exp}
+        df = pd.read_csv(path)
+        summary: dict[str, object] = {"Experiment": fit_id}
 
         if "val_loss" in df.columns:
             val_df = df.dropna(subset=["val_loss"])
             if not val_df.empty:
-                # Pick best epoch based on validation loss
                 best_row = val_df.loc[val_df["val_loss"].idxmin()].to_dict()
                 for key, val in best_row.items():
                     if key.startswith(("val_", "train_")) or key in ["epoch", "step"]:
@@ -42,20 +56,10 @@ def aggregate_metrics(exp_names: list[str], output_csv: Path) -> None:
             if col in df.columns and (col not in summary or pd.isna(summary[col])):
                 summary[col] = df[col].max() if "acc" in col else df[col].min()
 
-        if "test_loss" in df.columns:
-            test_df = df.dropna(subset=["test_loss"])
-            if not test_df.empty:
-                # Get final metrics from the test run
-                test_metrics = test_df.iloc[-1].to_dict()
-                for key, val in test_metrics.items():
-                    if key.startswith("test_"):
-                        summary[key] = val
-
         results.append(summary)
 
     if results:
-        final_df = pd.DataFrame(results)
-        final_df.to_csv(output_csv, index=False)
+        pd.DataFrame(results).to_csv(output_csv, index=False)
         logger.info(f"Summary metrics exported to {output_csv}")
     else:
         logger.warning(f"No metrics found to export to {output_csv}")

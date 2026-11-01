@@ -35,26 +35,22 @@ freeze-source name root *args:
 synthetic:
     uv run jute-disease data synthetic
 
-# Pretraining on external data
+# Training: the queue runs every declared fit; resume by running it again
 
-pretrain *args:
-    uv run jute-disease train pretrain {{args}}
+# Verify the measured CUDA stack
+stack *args:
+    uv run jute-disease stack {{args}}
 
-# Classical ML
+# Show stages and each fit's run state
+queue-plan *args:
+    uv run jute-disease queue plan {{args}}
 
-train-ml:
-    uv run jute-disease train ml --all
+queue-status *args:
+    uv run jute-disease queue status {{args}}
 
-test-ml classifier="rf" feature="crafted":
-    uv run jute-disease evaluate ml --classifier {{classifier}} --feature_type {{feature}}
-
-# Deep learning
-
-train-dl:
-    uv run jute-disease train baselines
-
-train-dl-single model="mobilenet_v2":
-    uv run jute-disease train baselines --config configs/baselines/{{model}}.yaml
+# Run or resume the benchmark; running it again skips completed fits
+queue-run *args:
+    uv run jute-disease queue run {{args}}
 
 # Aggregation
 
@@ -85,4 +81,4 @@ clean:
     rm -rf .coverage htmlcov lightning_logs .pytest_cache .ruff_cache
 
 clean-artifacts:
-    rm -rf artifacts/ml_models artifacts/checkpoints artifacts/features
+    rm -rf artifacts/runs artifacts/features

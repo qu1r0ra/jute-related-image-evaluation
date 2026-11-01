@@ -1,7 +1,6 @@
 """Validate package APIs and local artifact output without experiment fits."""
 
 import csv
-import json
 from pathlib import Path
 
 
@@ -29,6 +28,7 @@ def test_data_api() -> None:
         TARGET_DIR,
         DataModule,
         FreezeBlockedError,
+        ManifestContentVerifier,
         ManifestDataset,
         OverlapReport,
         SourceMismatchError,
@@ -60,6 +60,7 @@ def test_data_api() -> None:
         readiness_blockers,
         scan_source,
         verify_counts,
+        verify_manifest_content,
         write_manifest,
     )
 
@@ -69,6 +70,7 @@ def test_data_api() -> None:
         DECISION_FILE,
         DataModule,
         FreezeBlockedError,
+        ManifestContentVerifier,
         INVENTORY_FILE,
         ManifestDataset,
         OverlapReport,
@@ -106,6 +108,7 @@ def test_data_api() -> None:
         readiness_blockers,
         scan_source,
         verify_counts,
+        verify_manifest_content,
         write_manifest,
     ):
         assert name is not None
@@ -169,11 +172,13 @@ def test_training_api() -> None:
         SPLITS,
     )
     from jute_disease.training import (
+        experiment_loggers,
+        fit_classical,
+        fit_cnn,
         get_logger,
-        pretrain_main,
+        run_queue,
         seed_everything,
-        source_data_module,
-        write_evaluation,
+        verify_stack,
     )
 
     assert ROOT_DIR is not None
@@ -185,10 +190,12 @@ def test_training_api() -> None:
     assert isinstance(DEFAULT_SEED, int)
     assert isinstance(SPLITS, dict)
     assert get_logger is not None
-    assert pretrain_main is not None
     assert seed_everything is not None
-    assert source_data_module is not None
-    assert write_evaluation is not None
+    assert experiment_loggers is not None
+    assert fit_classical is not None
+    assert fit_cnn is not None
+    assert run_queue is not None
+    assert verify_stack is not None
 
 
 def test_pad_fraction_api_reports_letterbox_geometry() -> None:
@@ -197,29 +204,6 @@ def test_pad_fraction_api_reports_letterbox_geometry() -> None:
     assert letterbox_dimensions(400, 200, 64) == (64, 32)
     assert letterbox_pad_fraction(400, 200, 64) == 0.5
     assert letterbox_pad_fraction(200, 200, 64) == 0.0
-
-
-def test_local_evaluation_json_records_metrics_settings_and_class_order(
-    tmp_path: Path,
-) -> None:
-    from jute_disease.training import write_evaluation
-
-    destination = write_evaluation(
-        "synthetic-evaluation",
-        {"test_f1": 0.75},
-        [0, 1, 2, 2],
-        [0, 2, 2, 1],
-        ["healthy", "mosaic", "dieback"],
-        {"seed": 42, "split": "synthetic"},
-        tmp_path,
-    )
-
-    record = json.loads(destination.read_text(encoding="utf-8"))
-    assert record["metrics"] == {"test_f1": 0.75}
-    assert record["classes"] == ["healthy", "mosaic", "dieback"]
-    assert record["confusion_matrix"] == [[1, 0, 0], [0, 0, 1], [0, 1, 1]]
-    assert record["config"] == {"seed": 42, "split": "synthetic"}
-    assert not list(tmp_path.glob("*.tmp"))
 
 
 def test_lightning_csv_logger_writes_local_metrics_without_a_fit(

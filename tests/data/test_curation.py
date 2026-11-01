@@ -7,15 +7,17 @@ from pathlib import Path
 import pytest
 
 from jute_disease.config import CURATION_RULES_PATH
-from jute_disease.data.curation import (
-    UNASSIGNED_SOURCE,
+from jute_disease.data import (
     CurationRules,
+    InventoryRecord,
+    SyntheticPlan,
     curate,
     load_rules,
+)
+from jute_disease.data.curation import (
+    UNASSIGNED_SOURCE,
     source_of,
 )
-from jute_disease.data.inventory import InventoryRecord
-from jute_disease.data.synthetic import SyntheticPlan
 
 
 def test_shipped_rules_load_and_hash_is_stable() -> None:

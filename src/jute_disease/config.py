@@ -9,6 +9,8 @@ ML_SPLIT_DIR = DATA_DIR / "ml_split"
 PLANTDOC_DIR = DATA_DIR / "external" / "plantdoc"
 PLANTVILLAGE_DIR = DATA_DIR / "external" / "plantvillage"
 SOURCE_INVENTORY_DIR = DATA_DIR / "recovered_original_split" / "ml_split"
+CONFIGS_DIR = ROOT_DIR / "configs"
+BENCHMARK_CONFIG = CONFIGS_DIR / "benchmark.json"
 CURATION_RULES_PATH = ROOT_DIR / "configs" / "data" / "curation_rules.json"
 IDENTITY_REVIEWS_PATH = ROOT_DIR / "configs" / "data" / "identity_reviews.json"
 
@@ -21,6 +23,8 @@ ML_FEATURES_DIR = ARTIFACTS_DIR / "features"
 FREEZE_DIR = ARTIFACTS_DIR / "freeze"
 MANIFEST_DIR = FREEZE_DIR / "target"
 IMAGE_CACHE_DIR = ARTIFACTS_DIR / "image_cache"
+
+RUNS_DIR = ARTIFACTS_DIR / "runs"
 
 RESULTS_DIR = ROOT_DIR / "results"
 SUBMITTED_DIR = RESULTS_DIR / "submitted"
@@ -37,9 +41,9 @@ SPLITS = {"train": 0.7, "val": 0.15, "test": 0.15}
 # Execution defaults
 BATCH_SIZE = 32
 NUM_WORKERS = 4
-SEEDS = [42, 1337, 7, 1234, 99]
+SEEDS = (42, 1337, 7)
 DEFAULT_SEED = SEEDS[0]
-DEFAULT_LR = 0.001
+DEFAULT_LR = 3e-4
 DEFAULT_WEIGHT_DECAY = 0.01
 
 # Task configurations
