@@ -32,20 +32,52 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --all-groups --extra masks
 
+      - name: Verify Linux CPU imports
+        if: runner.os == 'Linux'
+        run: uv run python -c "import torch, torchvision, transformers; assert not torch.cuda.is_available(); print(torch.__version__, torchvision.__version__, transformers.__version__)"
+
       - name: Verify installed GPU wheel on Windows
         if: runner.os == 'Windows'
         run: >-
           uv run python -c "import torch, torchvision; assert torch.version.cuda == '13.0'; x=torch.ones(8); assert (x @ x).item() == 8; print(torch.__version__, torchvision.__version__)"
 
-      - name: Verify Linux CPU imports
+      - name: Audit locked dependencies
         if: runner.os == 'Linux'
+        run: uv run --locked python scripts/audit_dependencies.py
+
+      - name: Run tests
+        if: github.event_name == 'push'
+        run: uv run pytest -m ""
+
+  focused-tests:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Set up Python 3.14.10
+        run: uv python install 3.14.10
+
+      - name: Install dependencies
+        run: uv sync --locked --all-groups --extra masks
+
+      - name: Run focused behavior tests
+        run: >-
+          uv run pytest -m "" tests/test_config.py tests/test_cli.py
+          tests/data/test_identity.py tests/evaluation/test_statistics.py
+
+      - name: Verify Linux CPU imports
         run: uv run python -c "import torch, torchvision, transformers; assert not torch.cuda.is_available(); print(torch.__version__, torchvision.__version__, transformers.__version__)"
 
       - name: Audit locked dependencies
         run: uv run --locked python scripts/audit_dependencies.py
-
-      - name: Run tests
-        run: uv run pytest -m ""
 
   linux-target-resolution:
     runs-on: ubuntu-latest
