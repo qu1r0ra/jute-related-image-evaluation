@@ -29,3 +29,7 @@ Fix preprocessing and augmentation before any fit, identically across policies, 
 - The methods section names the mask-rating model. The project's no-AI-attribution rule covers authorship and prose, not disclosed research tools.
 - Letterbox, flips and jitter values have no direct ablation; the manuscript labels them prespecified judgments. Pad fraction is recorded per class and source because padding can become a source cue.
 - Claims about background reliance stay within the boundaries in [issue 108](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/108#issuecomment-6545452441).
+
+## Amendment, 2026-11-01
+
+The owner's blind check grows from 50 to about 120 overlays, and the agreement gate moves from the point estimate to the lower bound of the 95% confidence interval for Cohen's κ (≥ 0.6). With 50 items the interval is roughly ±0.2, too wide to show the threshold is met. The estimated fail-rate condition (under 10%) and the decision to measure rather than mitigate the confound are unchanged. The owner rates mask quality and scene tag on the same images in one sitting. Recorded in [issue 106](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/106).
