@@ -16,11 +16,11 @@ Zotero is the owner's source of record for metadata, PDFs and `paper/references.
 
 ## Saving a paper into Zotero
 
-The Zotero Connector in the owner's Chrome saves the page's metadata and PDF into the collection selected in Zotero desktop. Drive it with `playwright-cli` only, never the Playwright MCP. Only the open-access Frontiers route is verified. Paywalled routes (Animo, IEEE, MDPI, PMC) are unverified: try them, and put the paper on the manual list when the save does not appear.
+The Zotero Connector in the owner's Chrome saves the page's metadata and PDF into the collection selected in Zotero desktop. Drive it with `playwright-cli` only, never the Playwright MCP. Two routes are verified: open-access pages (Frontiers) and paywalled pages through the DLSU library proxy (MIT Press). IEEE, MDPI and PMC are unverified: try them, and put the paper on the manual list when the save does not appear.
 
 1. Confirm Zotero desktop is running: `curl -s http://127.0.0.1:23119/connector/ping`. Confirm the selected collection is `Jute Related Image Evaluation` (key `MYSMTAVL`) through `/connector/getSelectedCollection` with header `Zotero-Allowed-Request: 1`. A different selection means the owner must change it; the save goes wherever the selection points.
 2. Attach: `playwright-cli attach --extension=chrome --session=zotero`. The attach opens a "Welcome" tab that carries the session. Leave it open: closing it kills the session, and later commands fail with "The browser 'zotero' is not open".
-3. Open the article: `playwright-cli -s=zotero tab-new <article URL>`, then wait about 6 seconds for the page to load.
+3. Open the article: `playwright-cli -s=zotero tab-new <article URL>`, then wait about 6 seconds for the page to load. For a paywalled article, open it through the DLSU proxy (next subsection) and confirm the page header shows "DE LA SALLE UNIVERSITY" before the click; a "Sign In" header means the owner is signed out.
 4. Trigger the save. `Ctrl+Shift+S` and key events do nothing, because Chrome ignores synthetic key events for extension commands. A trusted click on a link to `https://www.zotero.org/save` runs the Connector's toolbar action on that tab:
 
    ```
@@ -28,10 +28,19 @@ The Zotero Connector in the owner's Chrome saves the page's metadata and PDF int
    playwright-cli -s=zotero click "#zsave"
    ```
 
-5. Verify through Zotero's local API, never through the browser: after the click the CLI often loses the tab, and the save still completes. Wait up to 30 seconds, then read `http://127.0.0.1:23119/api/users/0/items?limit=5&sort=dateAdded&direction=desc` (header `Zotero-Allowed-Request: 1`; top-level items alone hide a missing PDF). The save is done when a new item sits in collection `MYSMTAVL` with a PDF attachment. Hash the stored PDF from Zotero's `storage` folder and compare it with the manifest row, as in step 6 of "Before citing or fetching a paper".
+5. Verify through Zotero's local API, never through the browser: after the click the CLI often loses the tab, and the save still completes. Wait up to 30 seconds, then read `http://127.0.0.1:23119/api/users/0/items?limit=5&sort=dateAdded&direction=desc` (header `Zotero-Allowed-Request: 1`; top-level items alone hide a missing PDF). The save is done when a new item sits in collection `MYSMTAVL` with a PDF attachment. A hash mismatch against a manifest row is expected when the row's copy came from another host (for example the EBSCO "Animo copy" against the publisher PDF); treat it as a different rendition and confirm the DOI and page count instead.
 6. Close the article tab when it is still listed, and never close the Welcome tab.
 
-Rules:
+### DLSU proxy (paywalled papers)
+
+The owner signs in to the DLSU proxy in Chrome once; the sign-in carries over to the Playwright session. Rewrite the publisher URL to the proxy host: replace each `.` in the host with `-` and append `.dlsu.idm.oclc.org`, keeping the path. Example: `https://direct.mit.edu/neco/article-abstract/10/7/1895/6224/...` becomes `https://direct-mit-edu.dlsu.idm.oclc.org/neco/article-abstract/10/7/1895/6224/...`. A `doi.org` link does not pass through the proxy, so resolve the DOI to the publisher host first. Then run steps 4 and 5. Verified on Dietterich 1998 (journal item plus PDF in `MYSMTAVL`).
+
+### Manual download (last resort)
+
+When the save fails or the proxy cannot reach the paper, brief the owner: list each paper with its DOI or URL and the reason. The owner downloads the files into one folder under Downloads and gives the folder path back. Hash each file, move it into `docs/research/sources/` and update the manifest. The owner imports the files into Zotero.
+
+### Rules
+
 
 - Stay add-only in `Jute Related Image Evaluation`. Leave every other collection (thesis, Staging) and every existing item untouched.
 - An item that lands without a PDF, in another collection, or not at all counts as a failed save: add the paper to the manual list with the reason.
