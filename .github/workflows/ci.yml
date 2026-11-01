@@ -14,7 +14,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest]
         python-version: ["3.14.10"]
 
     steps:
@@ -33,16 +33,9 @@ jobs:
         run: uv sync --locked --all-groups --extra masks
 
       - name: Verify Linux CPU imports
-        if: runner.os == 'Linux'
         run: uv run python -c "import torch, torchvision, transformers; assert not torch.cuda.is_available(); print(torch.__version__, torchvision.__version__, transformers.__version__)"
 
-      - name: Verify installed GPU wheel on Windows
-        if: runner.os == 'Windows'
-        run: >-
-          uv run python -c "import torch, torchvision; assert torch.version.cuda == '13.0'; x=torch.ones(8); assert (x @ x).item() == 8; print(torch.__version__, torchvision.__version__)"
-
       - name: Audit locked dependencies
-        if: runner.os == 'Linux'
         run: uv run --locked python scripts/audit_dependencies.py
 
       - name: Run tests

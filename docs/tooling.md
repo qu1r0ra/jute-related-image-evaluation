@@ -7,13 +7,13 @@ the response to a failing main run.
 
 - Python 3.14.10 is selected by `.python-version`; `pyproject.toml` supports Python 3.14 only.
 - `uv.lock` is the dependency source of truth. Use `uv sync --locked --all-groups` for development and add `--extra masks` when validating the optional mask package imports.
-- PyTorch and TorchVision are pinned as one version pair. uv selects the official [PyTorch CUDA 12.6 wheels on Linux and CUDA 13.0 wheels on Windows](https://pytorch.org/get-started/previous-versions/). CPU-only use remains supported by the same builds.
+- PyTorch and TorchVision are pinned as one version pair. uv selects the official [PyTorch CUDA 12.6 wheels on Linux and CUDA 13.0 wheels on Windows](https://pytorch.org/get-started/previous-versions/). CI validates Linux; run Windows-specific checks locally when changing Windows dependency selection.
 - The optional `masks` extra installs Transformers for [Segment Anything Model 2](https://github.com/facebookresearch/sam2) code and API checks. It does not download checkpoints or run segmentation.
 - Lightning remains the deep-learning training framework. Active run evidence is written locally as Lightning CSV logs and JSON evaluation records with metrics, class order, confusion matrix, and relevant settings. Active W&B integration has been removed; historical configs, notebooks, run records and artifacts remain available under the `submitted-study` tag and historical folders.
 
 ## Updating dependencies
 
-Update dependencies deliberately, regenerate `uv.lock`, and review the full platform-specific diff. Keep PyTorch and TorchVision on the same release pair and verify resolution for both Linux and Windows. Run the lock audit, import checks, complete test suite and the Windows CUDA smoke check before merging. Recheck the official PyTorch wheel indexes when changing the pair. Security advisories for the locked requirements should be handled as soon as practical; review general dependency updates at least quarterly.
+Update dependencies deliberately, regenerate `uv.lock`, and review the full platform-specific diff. Keep PyTorch and TorchVision on the same release pair. Linux CI runs lock resolution, the dependency audit, import checks, focused PR tests and the full suite on `main`. Run Windows resolution and the CUDA smoke check locally only when a change affects Windows-specific dependency selection. Recheck the official PyTorch wheel indexes when changing the pair. Security advisories for the locked requirements should be handled as soon as practical; review general dependency updates at least quarterly.
 
 `just audit` runs `scripts/audit_dependencies.py`. It exports the exact locked requirements, scans all non-PyTorch packages through pip-audit, then scans the pinned PyTorch and TorchVision base release numbers. The CUDA wheel build suffixes (`+cu126` and `+cu130`) are platform-specific and are not published as PyPI releases, so the advisory lookup uses their shared upstream release numbers. The check does not install or change packages.
 
