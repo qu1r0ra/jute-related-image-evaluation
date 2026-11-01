@@ -18,6 +18,8 @@ Zotero is the owner's source of record for metadata, PDFs and `paper/references.
 
 The Zotero Connector in the owner's Chrome saves the page's metadata and PDF into the collection selected in Zotero desktop. Drive it with `playwright-cli` only, never the Playwright MCP. Verified to save the PDF: open-access Frontiers pages, and MIT Press and IEEE Xplore through the DLSU library proxy. Springer chapters and ScienceDirect articles save metadata through the proxy but no PDF, so their PDFs go on the manual list. MDPI and PMC are unverified: try them, and put the paper on the manual list when the save does not appear.
 
+Before saving, search Zotero by DOI, then by title when no DOI is available. If the matching item is already in `Jute Related Image Evaluation`, reuse it. If it exists only in another collection, report the match and ask the owner before changing its collections or saving a second copy.
+
 1. Confirm Zotero desktop is running: `curl -s http://127.0.0.1:23119/connector/ping`. Confirm the selected collection is `Jute Related Image Evaluation` (key `MYSMTAVL`) through `/connector/getSelectedCollection` with header `Zotero-Allowed-Request: 1`. A different selection means the owner must change it; the save goes wherever the selection points.
 2. Attach: `playwright-cli attach --extension=chrome --session=zotero`. The attach opens a "Welcome" tab that carries the session. Leave it open: closing it kills the session, and later commands fail with "The browser 'zotero' is not open".
 3. Open the article: `playwright-cli -s=zotero tab-new <article URL>`, then wait about 6 seconds for the page to load. For a paywalled article, open it through the DLSU proxy (next subsection) and confirm the page header shows "DE LA SALLE UNIVERSITY" before the click; a "Sign In" header means the owner is signed out.
@@ -46,6 +48,16 @@ When the save fails or the proxy cannot reach the paper, brief the owner: list e
 - Stay add-only in `Jute Related Image Evaluation`. Leave every other collection (thesis, Staging) and every existing item untouched.
 - A save with no PDF attachment, in another collection, or not at all counts as failed: add the paper to the manual list with the reason. A metadata-only item stays in the collection and the owner attaches its PDF.
 - The Connector's first-ever save shows a one-time welcome dialog the owner has already dismissed. If it appears again, hand the click to the owner.
+
+## Exporting the bibliography
+
+With Zotero and Better BibTeX running, export the `Jute Related Image Evaluation` collection directly to the ignored working manuscript bibliography:
+
+```sh
+curl -s -H "Zotero-Allowed-Request: 1" "http://127.0.0.1:23119/better-bibtex/export/collection?/1/Jute%20Related%20Image%20Evaluation.bibtex" > paper/references.bib
+```
+
+This overwrites `paper/references.bib`; check the export's keys before updating manuscript citations. The `paper/` directory is ignored and has no Git backup.
 
 ## Before a paper supports a claim
 
