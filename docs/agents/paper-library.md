@@ -45,8 +45,9 @@ When the save fails or the proxy cannot reach the paper, brief the owner: list e
 
 ### Rules
 
-- Stay add-only in `Jute Related Image Evaluation`. Leave every other collection (thesis, Staging) and every existing item untouched.
+- Keep work in `Jute Related Image Evaluation` add-only. Do not change existing items or other collections unless the owner explicitly directs a specific change.
 - A save with no PDF attachment, in another collection, or not at all counts as failed: add the paper to the manual list with the reason. A metadata-only item stays in the collection and the owner attaches its PDF.
+- Keep one PDF-bearing item per paper. The owner decides whether a metadata-only duplicate should be removed; move it to Trash only on the owner's explicit direction, using Zotero's "Move to Trash", never permanent delete, and confirm the Trash listing through the local API.
 - The Connector's first-ever save shows a one-time welcome dialog the owner has already dismissed. If it appears again, hand the click to the owner.
 
 ## Exporting the bibliography
@@ -57,7 +58,9 @@ With Zotero and Better BibTeX running, export the `Jute Related Image Evaluation
 curl -s -H "Zotero-Allowed-Request: 1" "http://127.0.0.1:23119/better-bibtex/export/collection?/1/Jute%20Related%20Image%20Evaluation.bibtex" > paper/references.bib
 ```
 
-This overwrites `paper/references.bib`; check the export's keys before updating manuscript citations. The `paper/` directory is ignored and has no Git backup.
+This overwrites `paper/references.bib`; check the export's keys before updating manuscript citations. `paper/` is Git-ignored. Its designated off-machine copy is the existing one-way PC-to-ThinkPad Syncthing mirror; do not rely on a mirrored copy until issue [#132](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/132) confirms the full folder is present and hash-matched.
+
+Better BibTeX derives each key from the item's title and author, so a key can change when the item is reloaded. To keep a key that the manuscript cites, add a line `Citation Key: <key>` to the item's Extra field in Zotero. Then export again and confirm the pinned key appears. If it does not, report it to the owner rather than editing the `\cite` keys. Confirm every `\cite` key in `paper/sections/*.tex` appears in the export.
 
 ## Before a paper supports a claim
 
