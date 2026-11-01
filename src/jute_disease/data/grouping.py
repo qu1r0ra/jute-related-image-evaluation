@@ -184,11 +184,17 @@ def group_inventory(
     hashes = {key: value for key, (_, value, _) in images.items()}
     labels = {key: label for key, (_, _, label) in images.items()}
     edges = {(a, b): d for a, b, d in dhash_candidates(hashes)}
-    for a, b in combinations(sorted(images), 2):
-        if images[a][0] == images[b][0]:
+    exact: dict[str, list[str]] = {}
+    for key, (sha, _, _) in sorted(images.items()):
+        exact.setdefault(sha, []).append(key)
+    for copies in exact.values():
+        for a, b in combinations(copies, 2):
             edges[(a, b)] = (hashes[a] ^ hashes[b]).bit_count()
     repair = repair_components(
-        hashes, labels, [(a, b, d) for (a, b), d in edges.items()], no_merge or set()
+        hashes,
+        labels,
+        [(a, b, d) for (a, b), d in edges.items()],
+        {(a, b) for a, b in (no_merge or set()) if images[a][0] != images[b][0]},
     )
     excluded = sorted(
         key

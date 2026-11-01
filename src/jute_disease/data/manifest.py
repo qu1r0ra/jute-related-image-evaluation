@@ -309,6 +309,7 @@ def build_manifest(
     seed: int = DEFAULT_SEED,
     fractions: dict[str, float] | None = None,
     extra_dependencies: dict[str, str] | None = None,
+    identity_resolution: IdentityResolution | None = None,
 ) -> tuple[Manifest, Curation, IdentityResolution]:
     """Curate, resolve identity, split by group and validate.
 
@@ -323,7 +324,11 @@ def build_manifest(
         curation = curate(records, rules)
     except ValueError as error:
         raise FreezeBlockedError(str(error)) from error
-    resolution = resolve_identity(list(curation.admitted), reviews)
+    resolution = (
+        identity_resolution
+        if identity_resolution is not None
+        else resolve_identity(list(curation.admitted), reviews)
+    )
 
     ids = [r.image_id for r in resolution.retained]
     group_of = build_groups(ids, resolution.constraints)
@@ -432,5 +437,21 @@ def load_manifest(directory: Path, min_support: int | None = None) -> Manifest:
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     if receipt.get("manifest_digest") != manifest.digest():
         raise FreezeBlockedError(f"Receipt does not match the manifest in {directory}")
+    grouping_digest = dict(manifest.dependencies).get("grouping")
+    if grouping_digest is not None:
+        try:
+            grouping = json.loads(
+                (directory / "grouping.json").read_text(encoding="utf-8")
+            )
+            recorded = grouping.pop("digest")
+            actual = hashlib.sha256(
+                json.dumps(grouping, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            if recorded != grouping_digest or actual != grouping_digest:
+                raise ValueError("digest mismatch")
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise FreezeBlockedError(
+                f"Invalid grouping receipt in {directory}"
+            ) from error
     validate_manifest(manifest, 1 if min_support is None else min_support)
     return manifest

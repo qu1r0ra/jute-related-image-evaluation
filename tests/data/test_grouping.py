@@ -73,3 +73,12 @@ def test_grouping_drops_entire_conflicting_component_after_audit() -> None:
     assert result["audit"][0]["flags"] == ["cross_label"]
     assert result["excluded"] == ["a", "b"]
     assert result["families"] == [("c",)]
+
+
+def test_exact_conflicting_copies_cannot_be_repaired_apart() -> None:
+    from jute_disease.data import group_inventory
+
+    result = group_inventory(
+        {"a": ("same", 0, "x"), "b": ("same", 1, "y")}, {("a", "b")}
+    )
+    assert result["excluded"] == ["a", "b"]

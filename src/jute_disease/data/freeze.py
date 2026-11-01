@@ -20,6 +20,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from PIL import Image
+
 from jute_disease.config import (
     CURATION_RULES_PATH,
     DEFAULT_SEED,
@@ -34,8 +36,14 @@ from jute_disease.data.cache import (
     decide_cache,
     write_decision,
 )
-from jute_disease.data.curation import load_rules
-from jute_disease.data.identity import load_reviews
+from jute_disease.data.curation import curate, load_rules
+from jute_disease.data.grouping import flip_canonical_dhash, group_inventory
+from jute_disease.data.identity import (
+    IdentityResolution,
+    MergedFile,
+    QuarantinedFile,
+    load_reviews,
+)
 from jute_disease.data.inventory import (
     build_inventory,
     inventory_digest,
@@ -93,11 +101,13 @@ def freeze_target(
     seed: int = DEFAULT_SEED,
     workers: int = 4,
     force: bool = False,
+    grouping_version: str | None = None,
 ) -> dict:
     """Freeze the target dataset and return its report.
 
     The original images under ``image_root`` are only read. An existing completed
-    freeze that differs from the new one is kept unless ``force`` is set.
+    legacy freeze that differs is kept unless ``force`` is set. A dHash freeze
+    and any existing freeze being upgraded to it are never replaced.
 
     Raises:
         FreezeBlockedError: the dataset cannot be frozen as specified, or a different
@@ -107,19 +117,110 @@ def freeze_target(
     rules = load_rules(rules_path)
     reviews = load_reviews(reviews_path)
     records = build_inventory(image_root, workers=workers)
+    grouping = None
+    grouped_resolution = None
+    dependencies = {"preprocessing": PreprocessingSpec().digest()}
+    if grouping_version is not None:
+        if grouping_version != "dhash-v1":
+            raise ValueError("Unknown grouping version")
+        admitted = list(curate(records, rules).admitted)
+        images = {}
+        for record in admitted:
+            with Image.open(Path(image_root) / record.path) as image:
+                images[record.path] = (
+                    record.sha256,
+                    flip_canonical_dhash(image),
+                    record.label,
+                )
+        result = group_inventory(images)
+        by_path = {r.path: r for r in admitted}
+        excluded = set(result["excluded"])
+        unique = {}
+        merged = []
+        for record in sorted(admitted, key=lambda r: r.path):
+            if record.path in excluded:
+                continue
+            if record.sha256 in unique:
+                merged.append(
+                    MergedFile(
+                        record.path,
+                        record.image_id,
+                        record.image_id,
+                        "byte-identical copy",
+                    )
+                )
+            else:
+                unique[record.sha256] = record
+        constraints = set()
+        for family in result["families"]:
+            ids = sorted({by_path[path].image_id for path in family})
+            constraints.update((ids[0], other) for other in ids[1:])
+        grouped_resolution = IdentityResolution(
+            retained=tuple(sorted(unique.values(), key=lambda r: r.image_id)),
+            merged=tuple(merged),
+            quarantined=tuple(
+                QuarantinedFile(
+                    path, by_path[path].image_id, "conflicting labels in family"
+                )
+                for path in sorted(excluded)
+            ),
+            constraints=tuple(sorted(constraints)),
+            candidates=(),
+        )
+        grouping = {
+            "algorithm_version": grouping_version,
+            "parameters": {
+                "hash": "flip-canonical-dhash64",
+                "threshold": 4,
+                "bands": 5,
+                "size_percentile": 99,
+                "diameter_limit": 16,
+            },
+            "audit_strata": result["audit_history"],
+            "removed_edges": result["removed"],
+            "families": result["families"],
+            "excluded": result["excluded"],
+            "denominators": {
+                "images": len(admitted),
+                "families_before_exclusion": len(result["audit"]),
+                "excluded_images": len(excluded),
+            },
+            "agreement_results": {"status": "pending"},
+            "gate_outcomes": {
+                "agreement": "pending",
+                "threshold_change": "not_requested",
+            },
+        }
+        grouping["digest"] = hashlib.sha256(
+            json.dumps(grouping, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        dependencies["grouping"] = grouping["digest"]
     manifest, curation, resolution = build_manifest(
         records,
         rules,
         reviews,
         seed=seed,
-        extra_dependencies={"preprocessing": PreprocessingSpec().digest()},
+        extra_dependencies=dependencies,
+        identity_resolution=grouped_resolution,
     )
     target = output_dir / TARGET_DIR
     try:
         existing = load_manifest(target)
-    except FileNotFoundError, FreezeBlockedError:
+    except FileNotFoundError:
         existing = None
-    if existing is not None and existing.digest() != manifest.digest() and not force:
+    if (
+        existing is not None
+        and existing.digest() != manifest.digest()
+        and (
+            not force
+            or grouping is not None
+            or "grouping" in dict(existing.dependencies)
+        )
+    ):
+        if grouping is not None or "grouping" in dict(existing.dependencies):
+            raise FreezeBlockedError(
+                f"A completed freeze exists in {target}; choose a new output directory"
+            )
         raise FreezeBlockedError(
             f"A different completed freeze exists in {target}; "
             "inspect it, then rerun with --force to replace it"
@@ -127,6 +228,9 @@ def freeze_target(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     write_inventory(records, output_dir / INVENTORY_FILE)
+    if grouping is not None:
+        target.mkdir(parents=True, exist_ok=True)
+        _write_json(target / "grouping.json", grouping)
     write_manifest(manifest, target)
     report = {
         "image_root": str(image_root),

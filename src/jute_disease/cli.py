@@ -94,6 +94,7 @@ def _freeze_target(args: argparse.Namespace) -> None:
             seed=args.seed,
             workers=args.workers,
             force=args.force,
+            grouping_version=args.grouping_version,
         )
     except ValueError as error:
         raise SystemExit(f"freeze blocked: {error}") from error
@@ -393,6 +394,7 @@ def _add_freeze(commands: argparse._SubParsersAction) -> None:
     target.add_argument(
         "--force", action="store_true", help="Replace a different completed freeze."
     )
+    target.add_argument("--grouping-version", choices=("dhash-v1",), default=None)
     target.set_defaults(run=_freeze_target)
 
     cache = actions.add_parser(

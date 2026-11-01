@@ -174,3 +174,37 @@ def test_source_command_rejects_invalid_pins_before_scanning(
     assert "source intake blocked" in result.stderr
     assert message in result.stderr
     assert not (inputs["base"] / "no-such-freeze").exists()
+
+
+def test_dhash_freeze_receipt_binds_groups_and_cannot_replace_existing_freeze(
+    inputs: dict[str, Path],
+) -> None:
+    out, first = _freeze(inputs, "dhash", "--grouping-version", "dhash-v1")
+    assert first.returncode == 0, first.stderr
+    report = json.loads(first.stdout)
+    grouping = json.loads((out / "target" / "grouping.json").read_text())
+    assert grouping["algorithm_version"] == "dhash-v1"
+    assert report["receipt"]["dependencies"]["grouping"] == grouping["digest"]
+    assert grouping["denominators"]["images"] > 0
+    _, repeat = _freeze(inputs, "dhash", "--grouping-version", "dhash-v1")
+    assert repeat.returncode == 0
+    assert json.loads(repeat.stdout)["receipt"] == report["receipt"]
+    _, refused = _freeze(
+        inputs, "dhash", "--grouping-version", "dhash-v1", "--seed", "7", "--force"
+    )
+    assert refused.returncode != 0
+
+
+def test_dhash_grouping_receipt_is_verified_before_loading(
+    inputs: dict[str, Path],
+) -> None:
+    from jute_disease.data import FreezeBlockedError
+
+    out, result = _freeze(inputs, "dhash-tamper", "--grouping-version", "dhash-v1")
+    assert result.returncode == 0, result.stderr
+    path = out / "target" / "grouping.json"
+    receipt = json.loads(path.read_text())
+    receipt["parameters"]["threshold"] = 5
+    path.write_text(json.dumps(receipt))
+    with pytest.raises(FreezeBlockedError, match="grouping"):
+        load_manifest(out / "target")
