@@ -180,3 +180,7 @@ __all__ = [
     "write_inventory",
     "write_manifest",
 ]
+
+from jute_disease.data.grouping import dhash_candidates
+
+__all__ += ["dhash_candidates"]
