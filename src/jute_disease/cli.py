@@ -25,28 +25,39 @@ from jute_disease.config import (
     SOURCE_INVENTORY_DIR,
 )
 from jute_disease.data import (
+    AUDIT_COUNT,
     DEFAULT_BUDGET_SECONDS,
     DEFAULT_MAX_BYTES,
+    OWNER_COUNT,
     SOURCES,
     TARGET_DIR,
+    ColorThresholdBackend,
     FreezeBlockedError,
     ImageNetExtractor,
+    Sam2Refiner,
+    SceneThresholds,
     SourceMismatchError,
     download_plant_doc,
     download_plant_village,
+    evaluate_masks_audit,
     evaluate_ratings,
     export_blind,
     feature_neighbors,
+    fit_thresholds_from_manifest,
     fixture_round,
     freeze_target,
     intake_source,
     make_synthetic_data,
     prepare_cohort,
     probe_cache,
+    read_candidates,
     residual_sample,
+    run_masks_audit,
+    run_masks_fixture,
     sample_edges,
     synthetic_recall,
     write_policy_manifests,
+    write_thresholds,
 )
 from jute_disease.reporting.tables import aggregate_metrics
 from jute_disease.training import (
@@ -210,6 +221,82 @@ def _audit_evaluate(args: argparse.Namespace) -> None:
         _print_json(report)
     except (ValueError, OSError, KeyError) as error:
         raise SystemExit(f"audit blocked: {error}") from error
+
+
+def _mask_backend(checkpoint: Path | None) -> ColorThresholdBackend | Sam2Refiner:
+    return Sam2Refiner(checkpoint) if checkpoint else ColorThresholdBackend()
+
+
+def _masks_calibrate(args: argparse.Namespace) -> None:
+    try:
+        thresholds = fit_thresholds_from_manifest(
+            args.development, _mask_backend(args.checkpoint)
+        )
+        write_thresholds(args.output, thresholds)
+    except (ValueError, OSError, KeyError, ImportError) as error:
+        raise SystemExit(f"mask calibration blocked: {error}") from error
+    _print_json(thresholds.to_dict())
+
+
+def _masks_audit(args: argparse.Namespace) -> None:
+    try:
+        thresholds = SceneThresholds.from_dict(
+            json.loads(args.thresholds.read_text(encoding="utf-8"))
+        )
+        manifest = run_masks_audit(
+            read_candidates(args.inventory),
+            thresholds,
+            _mask_backend(args.checkpoint),
+            args.output,
+            seed=args.seed,
+            sample_count=args.sample_count,
+            owner_count=args.owner_count,
+        )
+    except (ValueError, OSError, KeyError, ImportError) as error:
+        raise SystemExit(f"mask audit blocked: {error}") from error
+    _print_json(
+        {
+            "sample_count": manifest["sample_count"],
+            "owner_count": manifest["owner_count"],
+            "output": str(args.output),
+            "sampled_by_scene": manifest["sampling"]["sampled_by_scene"],
+            "next_action": (
+                "Complete agent.csv. In one blind sitting, rate mask quality and "
+                "scene tag in owner.csv; complete the grouping-pair worksheet "
+                "afterward."
+            ),
+        }
+    )
+
+
+def _masks_evaluate(args: argparse.Namespace) -> None:
+    try:
+        manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+        report = evaluate_masks_audit(
+            manifest,
+            args.agent_sheet,
+            args.owner_sheet,
+            seed=args.seed,
+            agent_rater=(
+                {"name": args.agent_name, "version": args.agent_version}
+                if args.agent_name and args.agent_version
+                else None
+            ),
+        )
+        if args.output:
+            with args.output.open("x", encoding="utf-8") as handle:
+                json.dump(report, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+    except (ValueError, OSError, KeyError) as error:
+        raise SystemExit(f"mask evaluation blocked: {error}") from error
+    _print_json(report)
+
+
+def _masks_fixture(args: argparse.Namespace) -> None:
+    try:
+        _print_json(run_masks_fixture(args.output, seed=args.seed))
+    except (ValueError, OSError, KeyError) as error:
+        raise SystemExit(f"mask fixture blocked: {error}") from error
 
 
 def _print_json(payload: object) -> None:
@@ -490,6 +577,57 @@ def build_parser() -> argparse.ArgumentParser:
         "--gate-output", type=Path, help="Write a new freeze-compatible gate record."
     )
     evaluate_audit.set_defaults(run=_audit_evaluate)
+
+    masks_calibrate = data_actions.add_parser(
+        "masks-calibrate",
+        help="Fit scene cutoffs on exactly 100 held-apart labeled dev images.",
+    )
+    masks_calibrate.add_argument("development", type=Path)
+    masks_calibrate.add_argument("--output", type=Path, required=True)
+    masks_calibrate.add_argument(
+        "--checkpoint",
+        type=Path,
+        help="Existing local SAM 2 checkpoint directory; never downloaded.",
+    )
+    masks_calibrate.set_defaults(run=_masks_calibrate)
+
+    masks_audit = data_actions.add_parser(
+        "masks-audit",
+        help="Create stratified mask artifacts and blind agent/owner rating sheets.",
+    )
+    masks_audit.add_argument("inventory", type=Path)
+    masks_audit.add_argument("thresholds", type=Path)
+    masks_audit.add_argument("--output", type=Path, required=True)
+    masks_audit.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    masks_audit.add_argument("--sample-count", type=int, default=AUDIT_COUNT)
+    masks_audit.add_argument("--owner-count", type=int, default=OWNER_COUNT)
+    masks_audit.add_argument(
+        "--checkpoint",
+        type=Path,
+        help="Existing local SAM 2 checkpoint directory matching calibration.",
+    )
+    masks_audit.set_defaults(run=_masks_audit)
+
+    masks_evaluate = data_actions.add_parser(
+        "masks-evaluate",
+        help="Evaluate blind mask ratings and scene-tag agreement.",
+    )
+    masks_evaluate.add_argument("manifest", type=Path)
+    masks_evaluate.add_argument("agent_sheet", type=Path)
+    masks_evaluate.add_argument("owner_sheet", type=Path)
+    masks_evaluate.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    masks_evaluate.add_argument("--output", type=Path)
+    masks_evaluate.add_argument("--agent-name")
+    masks_evaluate.add_argument("--agent-version")
+    masks_evaluate.set_defaults(run=_masks_evaluate)
+
+    masks_fixture = data_actions.add_parser(
+        "masks-fixture",
+        help="Run the complete weight-free mask and scene audit fixture.",
+    )
+    masks_fixture.add_argument("--output", type=Path, required=True)
+    masks_fixture.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    masks_fixture.set_defaults(run=_masks_fixture)
 
     # train: the one fit command the queue launches as a child process
     train = commands.add_parser("train", help="Run one benchmark fit.")
