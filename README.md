@@ -164,7 +164,7 @@ Training runs through a serial, resumable queue declared in `configs/benchmark.j
 
 For optional local SAM2 package imports, use `uv sync --locked --all-groups --extra masks`. No model weights are included or downloaded by setup.
 
-This tooling work does not authorize experiment fits or establish readiness of the lab A100. The synthetic freeze, Windows RTX 5060 smoke check, and Linux CI checks validate the development environment. The validation-only lab pilots and experiment readiness gates remain in [issue 114](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/114). See [Tooling](docs/tooling.md) for update cadence, local evidence, audit limits, preprocessing identity, and helper commands.
+This tooling work does not authorize experiment fits or establish readiness of the lab A100. The synthetic freeze and Linux CI checks validate the development environment. The validation-only lab pilots and experiment readiness gates remain in [issue 114](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/114). See [Tooling](docs/tooling.md) for update cadence, local evidence, audit limits, preprocessing identity, and helper commands.
 
 ## 6. Historical Benchmarked Performance
 
