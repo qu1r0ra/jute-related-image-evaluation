@@ -31,9 +31,12 @@ from jute_disease.training.logger import (
     experiment_loggers,
 )
 from jute_disease.training.results import FitResult
+from jute_disease.training.resume import (
+    CHECKPOINT_DIR,
+    record_progress,
+    verified_progress,
+)
 from jute_disease.training.seed import seed_everything
-
-CHECKPOINT_DIR = "checkpoints"
 
 
 class EpochTimer(Callback):
@@ -50,8 +53,28 @@ class EpochTimer(Callback):
         self.seconds.append(time.perf_counter() - self._start)
 
 
-def training_callbacks(recipe: Recipe, checkpoint_dir: Path | str) -> list[Callback]:
-    """Best-validation-loss checkpointing and patience-based early stopping."""
+class ProgressRecord(Callback):
+    """After each epoch, record the hash of the saved full training state.
+
+    The checkpoint callback has already written ``last.ckpt`` when validation
+    ended, so the record names the bytes a restarted attempt would load.
+    """
+
+    def __init__(self, directory: Path, attempt: str) -> None:
+        self.directory = directory
+        self.attempt = attempt
+
+    def on_train_epoch_end(self, trainer: Trainer, pl_module: Any) -> None:
+        record_progress(self.directory, self.attempt, trainer.current_epoch + 1)
+
+
+def training_callbacks(
+    recipe: Recipe, checkpoint_dir: Path | str, *, resumable: bool = False
+) -> list[Callback]:
+    """Best-validation-loss checkpointing and patience-based early stopping.
+
+    A resumable fit also keeps ``last.ckpt``, the full state a restart loads.
+    """
     return [
         ModelCheckpoint(
             dirpath=str(checkpoint_dir),
@@ -59,7 +82,7 @@ def training_callbacks(recipe: Recipe, checkpoint_dir: Path | str) -> list[Callb
             monitor="val_loss",
             mode="min",
             save_top_k=1,
-            save_last=False,
+            save_last=resumable,
         ),
         EarlyStopping(
             monitor="val_loss",
@@ -146,6 +169,8 @@ def fit_cnn(
     accelerator: str = "auto",
     limit_train_batches: int | None = None,
     limit_val_batches: int | None = None,
+    checkpoint_dir: Path | str | None = None,
+    resume_from: Path | str | None = None,
 ) -> FitResult:
     """Train one source or target CNN stage and describe exactly what happened.
 
@@ -154,9 +179,13 @@ def fit_cnn(
         pretrained: load the timm initialization when there is no upstream.
         limit_train_batches: smoke bound, recorded so a bounded run is never
             mistaken for a final one.
+        checkpoint_dir: a run-level directory shared by the fit's attempts, so
+            a restarted attempt can continue; default is this attempt's own.
+        resume_from: the ``last.ckpt`` in ``checkpoint_dir`` to continue from.
 
     Raises:
-        ValueError: ``fit`` has an upstream but no checkpoint was given.
+        ValueError: ``fit`` has an upstream but no checkpoint was given, or
+            ``resume_from`` is not a recorded checkpoint of ``checkpoint_dir``.
         RuntimeError: no checkpoint was selected, or the backbone never changed.
     """
     attempt = Path(attempt_dir)
@@ -166,6 +195,15 @@ def fit_cnn(
         )
     if fit.upstream is None:
         upstream_checkpoint = None
+    resumed_from = None
+    if resume_from is not None:
+        if checkpoint_dir is None:
+            raise ValueError(f"{fit.fit_id}: resuming needs a checkpoint directory")
+        resumed_from = verified_progress(checkpoint_dir)
+        if resumed_from is None or Path(resume_from).parent != Path(checkpoint_dir):
+            raise ValueError(
+                f"{fit.fit_id}: {resume_from} is not a recorded checkpoint"
+            )
     seed_everything(fit.seed)
 
     cuda = _uses_cuda(accelerator)
@@ -200,7 +238,13 @@ def fit_cnn(
 
     loggers = experiment_loggers(attempt)
     timer = EpochTimer()
-    callbacks = [*training_callbacks(recipe, attempt / CHECKPOINT_DIR), timer]
+    directory = Path(checkpoint_dir) if checkpoint_dir else attempt / CHECKPOINT_DIR
+    callbacks = [
+        *training_callbacks(recipe, directory, resumable=checkpoint_dir is not None),
+        timer,
+    ]
+    if checkpoint_dir is not None:
+        callbacks.append(ProgressRecord(directory, attempt.name))
     stopping = next(c for c in callbacks if isinstance(c, EarlyStopping))
     selection = next(c for c in callbacks if isinstance(c, ModelCheckpoint))
     trainer = Trainer(
@@ -221,11 +265,20 @@ def fit_cnn(
     )
     if cuda:
         torch.cuda.reset_peak_memory_stats()
-    trainer.fit(model, datamodule=module)
+    trainer.fit(
+        model,
+        datamodule=module,
+        ckpt_path=None if resume_from is None else str(resume_from),
+        # The full state holds optimizer and callback objects, not only tensors.
+        # It was hash-verified above against the bytes this run saved itself.
+        weights_only=None if resume_from is None else False,
+    )
 
     if not selection.best_model_path:
         raise RuntimeError(f"{fit.fit_id}: the checkpoint callback selected nothing")
     best = Path(selection.best_model_path)
+    # Relative to the attempt, or to the run when its checkpoints are run-level.
+    best_root = attempt if checkpoint_dir is None else attempt.parent
     counts = _backbone_counts(initial, backbone)
     if counts["updated"] == 0:
         raise RuntimeError(f"{fit.fit_id}: no backbone tensor changed during training")
@@ -235,7 +288,7 @@ def fit_cnn(
         "fit": asdict(fit),
         "recipe": asdict(recipe),
         "checkpoint": {
-            "path": best.relative_to(attempt).as_posix(),
+            "path": best.relative_to(best_root).as_posix(),
             "sha256": file_sha256(best),
             "val_loss": float(selection.best_model_score),
         },
@@ -264,7 +317,10 @@ def fit_cnn(
         "backbone": {**counts, "initial_digest": initial_digest},
         "transfer": None if transfer is None else asdict(transfer),
         "head": {"fresh": True, "equals_upstream": head_equals_upstream},
-        "training_state": {"resumed": False, "optimizer_loaded": False},
+        "training_state": {
+            "resumed": resumed_from is not None,
+            "optimizer_loaded": resumed_from is not None,
+        },
         "lineage": {
             "stage": fit.stage if fit.kind is FitKind.SOURCE else "jute",
             "upstream_fit": fit.upstream,
@@ -272,6 +328,7 @@ def fit_cnn(
                 None if transfer is None else transfer.sha256
             ),
             "manifests": manifests,
+            "resumed_from": resumed_from,
         },
         "bounds": {
             "train_batches": limit_train_batches,

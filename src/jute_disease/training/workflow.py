@@ -27,6 +27,13 @@ from jute_disease.training.inputs import DataInputs
 from jute_disease.training.process import ChildResult, run_child
 from jute_disease.training.queue import Executor, IdentityFor, Outcome
 from jute_disease.training.receipts import Resume, RunState, RunStore, write_json_atomic
+from jute_disease.training.resume import (
+    CHECKPOINT_DIR,
+    RESUME_FILE,
+    ResumePlan,
+    mark_finished,
+    prepare_checkpoints,
+)
 from jute_disease.training.stack import verify_stack
 
 RESULT_FILE = "result.json"
@@ -149,7 +156,8 @@ class Job:
     """One child invocation: a fit, where to work, and what it may start from.
 
     ``bounds`` are train and validation batch limits; a bounded job is a timing
-    or smoke run and is never a fit.
+    or smoke run and is never a fit. A CNN fit given ``checkpoint_dir`` keeps
+    its full training state there, and ``resume_from`` continues from it.
     """
 
     fit_id: str
@@ -157,6 +165,8 @@ class Job:
     result_path: Path
     upstream_checkpoint: Path | None = None
     bounds: tuple[int, int] | None = None
+    checkpoint_dir: Path | None = None
+    resume_from: Path | None = None
 
     def to_args(self) -> list[str]:
         args = [
@@ -171,6 +181,10 @@ class Job:
             args += ["--upstream-checkpoint", str(self.upstream_checkpoint)]
         if self.bounds is not None:
             args += ["--bounds", f"{self.bounds[0]},{self.bounds[1]}"]
+        if self.checkpoint_dir is not None:
+            args += ["--checkpoint-dir", str(self.checkpoint_dir)]
+        if self.resume_from is not None:
+            args += ["--resume-from", str(self.resume_from)]
         return args
 
 
@@ -255,6 +269,8 @@ def run_job(workspace: Workspace, job: Job) -> None:
             upstream_checkpoint=job.upstream_checkpoint,
             pretrained=workspace.pretrained,
             accelerator=workspace.accelerator,
+            checkpoint_dir=job.checkpoint_dir,
+            resume_from=job.resume_from,
             **bounded,
         )
     write_json_atomic(
@@ -355,11 +371,27 @@ def make_executor(
         except UpstreamError as error:
             return Outcome(RunState.FAILED, 0.0, str(error))
         run = store.start(fit.fit_id, identity(fit))
+        checkpoint_dir = None
+        plan = ResumePlan()
+        if fit.kind in CNN_KINDS:
+            checkpoint_dir = store.run_dir(fit.fit_id) / CHECKPOINT_DIR
+            plan = prepare_checkpoints(
+                checkpoint_dir, run.identity, run.attempt_dir.name
+            )
+            write_json_atomic(
+                run.attempt_dir / RESUME_FILE,
+                {
+                    "resumed_from": plan.resumed_from,
+                    "refusal": plan.refusal,
+                },
+            )
         job = Job(
             fit.fit_id,
             run.attempt_dir,
             run.attempt_dir / RESULT_FILE,
             None if upstream is None else upstream[0],
+            checkpoint_dir=checkpoint_dir,
+            resume_from=plan.checkpoint,
         )
         try:
             child = launcher(job, timeout, run.attempt_dir / LOG_FILE)
@@ -384,7 +416,12 @@ def make_executor(
             artifacts = {
                 name: Path(path) for name, path in payload["artifacts"].items()
             }
-            run.complete(payload["results"], artifacts)
+            results = payload["results"]
+            if plan.refusal is not None:
+                results["training_state"]["refused"] = plan.refusal
+            run.complete(results, artifacts)
+            if checkpoint_dir is not None:
+                mark_finished(checkpoint_dir, run.identity, run.attempt_dir.name)
         except (OSError, ValueError, KeyError) as error:
             reason = f"child exited 0 without a usable result: {error}"
             run.fail(RunState.FAILED, reason)

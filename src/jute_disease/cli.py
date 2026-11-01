@@ -156,6 +156,8 @@ def _train_fit(args: argparse.Namespace) -> None:
         args.result,
         args.upstream_checkpoint,
         args.bounds,
+        args.checkpoint_dir,
+        args.resume_from,
     )
     run_job(Workspace.load(args.workspace), job)
 
@@ -301,6 +303,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=_bounds,
         default=None,
         help="TRAIN,VAL batch limits for a timing or smoke run.",
+    )
+    fit.add_argument(
+        "--checkpoint-dir",
+        type=Path,
+        default=None,
+        help="Run-level directory that keeps the full training state.",
+    )
+    fit.add_argument(
+        "--resume-from",
+        type=Path,
+        default=None,
+        help="A last.ckpt in --checkpoint-dir to continue training from.",
     )
     fit.set_defaults(run=_train_fit)
 

@@ -70,7 +70,7 @@ def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-def _read_json(path: Path) -> dict[str, Any] | None:
+def read_json(path: Path) -> dict[str, Any] | None:
     try:
         loaded = json.loads(path.read_text(encoding="utf-8"))
     except OSError, ValueError:
@@ -152,11 +152,11 @@ class RunStore:
         )
 
     def _state_payload(self, fit_id: str) -> dict[str, Any] | None:
-        return _read_json(self.run_dir(fit_id) / STATE_FILE)
+        return read_json(self.run_dir(fit_id) / STATE_FILE)
 
     def _valid_receipt(self, fit_id: str) -> dict[str, Any] | None:
         directory = self.run_dir(fit_id)
-        receipt = _read_json(directory / RECEIPT_FILE)
+        receipt = read_json(directory / RECEIPT_FILE)
         if receipt is None or "identity" not in receipt:
             return None
         artifacts = receipt.get("artifacts")

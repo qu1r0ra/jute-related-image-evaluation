@@ -18,7 +18,9 @@ from jute_disease.training import (
     FitKind,
     FitSpec,
     Job,
+    ProgressRecord,
     QueueReport,
+    Resume,
     RunState,
     RunStore,
     SystemClock,
@@ -34,12 +36,12 @@ from jute_disease.training import (
 from .conftest import Inputs
 
 
-def _benchmark_json(path: Path) -> Path:
+def _benchmark_json(path: Path, epochs: int = 1) -> Path:
     raw = json.loads(BENCHMARK_CONFIG.read_text(encoding="utf-8"))
     raw["recipe"].update(
         image_size=64,
         seeds=[42],
-        max_epochs=1,
+        max_epochs=epochs,
         precision="32-true",
         effective_batch=16,
     )
@@ -436,3 +438,137 @@ def test_benchmark_declares_the_fits_the_workspace_runs(workspace: Workspace) ->
         FitKind.TARGET,
     }
     assert load_benchmark(workspace.benchmark_path) == workspace.benchmark
+
+
+class _Killed(BaseException):
+    """Stands in for the child being killed: nothing in the fit may catch it."""
+
+
+class _KillAfterEpoch(InProcess):
+    """Run the job body, but die once ``epoch`` epochs have been saved."""
+
+    def __init__(self, workspace: Workspace, monkeypatch: pytest.MonkeyPatch) -> None:
+        super().__init__(workspace)
+        self.monkeypatch = monkeypatch
+        self.kill_at: int | None = None
+        original = ProgressRecord.on_train_epoch_end
+
+        def on_train_epoch_end(callback, trainer, module) -> None:
+            original(callback, trainer, module)
+            if trainer.current_epoch + 1 == self.kill_at:
+                raise _Killed
+
+        monkeypatch.setattr(ProgressRecord, "on_train_epoch_end", on_train_epoch_end)
+
+    def __call__(self, job: Job, timeout: float | None, log: Path) -> ChildResult:
+        try:
+            return super().__call__(job, timeout, log)
+        except _Killed:
+            return ChildResult(-9, False, 1.0, "killed")
+
+
+def _three_epoch_workspace(
+    inputs: Inputs, tmp_path: Path, epochs: int = 3
+) -> Workspace:
+    return open_workspace(
+        benchmark_path=_benchmark_json(tmp_path / "benchmark.json", epochs),
+        data=DataInputs(
+            image_root=inputs.image_root,
+            target_dir=inputs.target_dir,
+            sources=inputs.sources,
+        ),
+        runs_dir=tmp_path / "runs",
+        cache_dir=tmp_path / "cache",
+        pretrained=False,
+        require_cuda=False,
+        accelerator="cpu",
+    )
+
+
+def test_a_fit_killed_mid_run_resumes_with_matching_identity_and_lineage(
+    inputs: Inputs, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = _three_epoch_workspace(inputs, tmp_path)
+    store = RunStore(workspace.runs_dir)
+    identity = make_identity(workspace, store)
+    launcher = _KillAfterEpoch(workspace, monkeypatch)
+    execute = make_executor(workspace, store, identity, launcher)
+    fit = _fit(workspace, "cnn/tiny_direct/seed-42")
+    run_dir = store.run_dir(fit.fit_id)
+
+    launcher.kill_at = 2
+    assert execute(fit, 1800).state is RunState.FAILED
+    assert store.state(fit.fit_id) is RunState.FAILED
+    assert launcher.jobs[0].resume_from is None
+    assert (run_dir / "checkpoints" / "last.ckpt").is_file()
+
+    launcher.kill_at = None
+    assert execute(fit, 1800).state is RunState.COMPLETED
+
+    second = launcher.jobs[1]
+    assert second.checkpoint_dir == run_dir / "checkpoints"
+    assert second.resume_from == run_dir / "checkpoints" / "last.ckpt"
+    receipt = store.receipt(fit.fit_id)
+    results = receipt["results"]
+    assert results["training_state"] == {"resumed": True, "optimizer_loaded": True}
+    resumed = results["lineage"]["resumed_from"]
+    assert (resumed["attempt"], resumed["epochs_completed"]) == ("attempt-1", 2)
+    assert results["epochs_run"] == 3
+    # The checkpoint is saved at validation end, so the interrupted epoch only
+    # revalidates: the resumed attempt never repeats all three epochs.
+    assert len(results["epoch_seconds"]) < 3
+    assert receipt["identity"] == identity(fit)
+    assert store.resolve(fit.fit_id, identity(fit)) is Resume.SKIP
+    assert results["checkpoint"]["path"].startswith("checkpoints/best-")
+    resume_note = json.loads((run_dir / "attempt-2" / "resume.json").read_text("utf-8"))
+    assert resume_note["refusal"] is None
+    assert resume_note["resumed_from"] == resumed
+
+
+def test_an_incompatible_resume_is_refused_and_trains_fresh(
+    inputs: Inputs, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = _three_epoch_workspace(inputs, tmp_path)
+    fit = _fit(workspace, "cnn/tiny_direct/seed-42")
+    store = RunStore(workspace.runs_dir)
+    killer = _KillAfterEpoch(workspace, monkeypatch)
+    killer.kill_at = 2
+    first = make_executor(workspace, store, make_identity(workspace, store), killer)
+    assert first(fit, 1800).state is RunState.FAILED
+    killer.kill_at = None
+
+    changed = _three_epoch_workspace(inputs, tmp_path, epochs=2)
+    changed_store = RunStore(changed.runs_dir)
+    launcher = _KillAfterEpoch(changed, monkeypatch)
+    second = make_executor(
+        changed, changed_store, make_identity(changed, changed_store), launcher
+    )
+    assert second(_fit(changed, fit.fit_id), 1800).state is RunState.COMPLETED
+
+    assert launcher.jobs[0].resume_from is None
+    results = changed_store.receipt(fit.fit_id)["results"]
+    assert results["training_state"] == {
+        "resumed": False,
+        "optimizer_loaded": False,
+        "refused": "checkpoints belong to a different run identity",
+    }
+    assert results["lineage"]["resumed_from"] is None
+    assert results["epochs_run"] == 2
+    assert len(results["epoch_seconds"]) == 2
+    run_dir = changed_store.run_dir(fit.fit_id)
+    assert (run_dir / "superseded" / "checkpoints-0" / "last.ckpt").is_file()
+
+
+def test_finished_training_checkpoints_are_not_reused_by_a_rerun(
+    inputs: Inputs, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = _three_epoch_workspace(inputs, tmp_path, epochs=1)
+    store = RunStore(workspace.runs_dir)
+    launcher = _KillAfterEpoch(workspace, monkeypatch)
+    execute = make_executor(workspace, store, make_identity(workspace, store), launcher)
+    fit = _fit(workspace, "cnn/tiny_direct/seed-42")
+    assert execute(fit, 1800).state is RunState.COMPLETED
+    owner = json.loads(
+        (store.run_dir(fit.fit_id) / "checkpoints" / "owner.json").read_text("utf-8")
+    )
+    assert owner["finished"] is True

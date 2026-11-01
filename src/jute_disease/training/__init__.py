@@ -35,6 +35,13 @@ from jute_disease.training.receipts import (
     write_json_atomic,
 )
 from jute_disease.training.results import FitResult
+from jute_disease.training.resume import (
+    ResumePlan,
+    mark_finished,
+    prepare_checkpoints,
+    record_progress,
+    verified_progress,
+)
 from jute_disease.training.seed import seed_everything
 from jute_disease.training.stack import StackError, verify_stack
 from jute_disease.training.workflow import (
@@ -55,6 +62,7 @@ from jute_disease.training.workflow import (
 _ENGINE_EXPORTS = {
     "fit_cnn": "jute_disease.training.engines.dl.fit",
     "training_callbacks": "jute_disease.training.engines.dl.fit",
+    "ProgressRecord": "jute_disease.training.engines.dl.fit",
     "fit_classical": "jute_disease.training.engines.ml.fit",
     "prepare_features": "jute_disease.training.engines.ml.fit",
 }
@@ -101,6 +109,12 @@ __all__ = [
     "prepare_features",
     "fit_identity",
     "training_callbacks",
+    "ProgressRecord",
+    "ResumePlan",
+    "mark_finished",
+    "prepare_checkpoints",
+    "record_progress",
+    "verified_progress",
     "verify_stack",
     "load_benchmark",
     "Clock",
