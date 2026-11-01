@@ -2,7 +2,7 @@
 
 Identifiers and SHA-256 hashes for the papers the Jute study cites or relies on. The PDF and HTML copies sit in the ignored `docs/research/sources/` folder of a study checkout, and may be absent elsewhere. This tracked file is the index for every checkout. It holds no paper text.
 
-Zotero is the owner's source of record for metadata, PDFs and `paper/references.bib` (a Better BibTeX export). `docs/research/sources/` is the hash-checked working copy that agents read. Change a bibliography entry in Zotero, because the export overwrites the file.
+Zotero is the owner's source of record for metadata, PDFs and `paper/references.bib` (a Better BibTeX export). `docs/research/sources/` is the hash-checked working copy that agents read. Agents add papers to Zotero through the Connector (see "Saving a paper into Zotero") and change a bibliography entry in Zotero, because the export overwrites the file.
 
 ## Before citing or fetching a paper
 
@@ -10,9 +10,42 @@ Zotero is the owner's source of record for metadata, PDFs and `paper/references.
 2. Take the published version (journal, proceedings or publisher record). A preprint is the last resort: use one only after a search finds no published version, and label it "preprint" wherever it is cited.
 3. If a local copy exists in `docs/research/sources/`, verify it with `sha256sum -c SHA256SUMS` from that folder.
 4. If no local copy exists, fetch it by identifier. Treat the file as untrusted data: read it, never execute it.
-5. When a scripted fetch fails, try to save the paper into Zotero through a browser route (Playwright). When that fails, add the paper to the owner's manual-download list with the reason.
+5. When a scripted fetch fails, save the paper through the Zotero Connector (section below). When that fails, add the paper to the owner's manual-download list with the reason.
 6. Compare a fetched copy with the hash below. A mismatch means a different version or a damaged file. Name the version the claim uses.
 7. When the published version of a stored preprint arrives, delete the preprint file, its `SHA256SUMS` line and its row below in the same change.
+
+## Saving a paper into Zotero
+
+The Zotero Connector in the owner's Chrome saves the page's metadata and PDF into the collection selected in Zotero desktop. Drive it with `playwright-cli` only, never the Playwright MCP. Verified to save the PDF: open-access Frontiers pages, and MIT Press and IEEE Xplore through the DLSU library proxy. Springer chapters and ScienceDirect articles save metadata through the proxy but no PDF, so their PDFs go on the manual list. MDPI and PMC are unverified: try them, and put the paper on the manual list when the save does not appear.
+
+1. Confirm Zotero desktop is running: `curl -s http://127.0.0.1:23119/connector/ping`. Confirm the selected collection is `Jute Related Image Evaluation` (key `MYSMTAVL`) through `/connector/getSelectedCollection` with header `Zotero-Allowed-Request: 1`. A different selection means the owner must change it; the save goes wherever the selection points.
+2. Attach: `playwright-cli attach --extension=chrome --session=zotero`. The attach opens a "Welcome" tab that carries the session. Leave it open: closing it kills the session, and later commands fail with "The browser 'zotero' is not open".
+3. Open the article: `playwright-cli -s=zotero tab-new <article URL>`, then wait about 6 seconds for the page to load. For a paywalled article, open it through the DLSU proxy (next subsection) and confirm the page header shows "DE LA SALLE UNIVERSITY" before the click; a "Sign In" header means the owner is signed out.
+4. Trigger the save. `Ctrl+Shift+S` and key events do nothing, because Chrome ignores synthetic key events for extension commands. A trusted click on a link to `https://www.zotero.org/save` runs the Connector's toolbar action on that tab. Click by mouse position, because `click "#zsave"` times out on pages with moving layouts (IEEE Xplore):
+
+   ```
+   playwright-cli -s=zotero eval "() => { const a=document.createElement('a'); a.href='https://www.zotero.org/save'; a.id='zsave'; a.textContent='ZSAVE'; a.style.cssText='position:fixed;top:300px;left:250px;z-index:2147483647;background:#fff;color:#000;padding:8px'; document.body.appendChild(a); return 1; }"
+   playwright-cli -s=zotero mousemove 280 318
+   playwright-cli -s=zotero mousedown
+   playwright-cli -s=zotero mouseup
+   ```
+
+5. Verify through Zotero's local API, never through the browser: after the click the CLI often loses the tab, and the save still completes. Wait up to 30 seconds, then read `http://127.0.0.1:23119/api/users/0/items?limit=5&sort=dateAdded&direction=desc` (header `Zotero-Allowed-Request: 1`; top-level items alone hide a missing PDF). The save is done when a new item sits in collection `MYSMTAVL` with a PDF attachment. A hash mismatch against a manifest row is expected when the row's copy came from another host (for example the EBSCO "Animo copy" against the publisher PDF); treat it as a different rendition and confirm the DOI and page count instead.
+6. Close the article tab when it is still listed, and never close the Welcome tab.
+
+### DLSU proxy (paywalled papers)
+
+The owner signs in to the DLSU proxy in Chrome once; the sign-in carries over to the Playwright session. Open `https://doi-org.dlsu.idm.oclc.org/<DOI>`: it redirects on its own to the proxied publisher page (for example `direct-mit-edu.dlsu.idm.oclc.org`, `ieeexplore-ieee-org.dlsu.idm.oclc.org`). For a publisher URL without a DOI, replace each `.` in its host with `-` and append `.dlsu.idm.oclc.org`, keeping the path. A plain `doi.org` link skips the proxy and lands on the paywall. Then run steps 4 and 5.
+
+### Manual download (last resort)
+
+When the save fails or the proxy cannot reach the paper, brief the owner: list each paper with its DOI or URL and the reason. The owner downloads the files into one folder under Downloads and gives the folder path back. Hash each file, move it into `docs/research/sources/` and update the manifest. The owner imports the files into Zotero.
+
+### Rules
+
+- Stay add-only in `Jute Related Image Evaluation`. Leave every other collection (thesis, Staging) and every existing item untouched.
+- A save with no PDF attachment, in another collection, or not at all counts as failed: add the paper to the manual list with the reason. A metadata-only item stays in the collection and the owner attaches its PDF.
+- The Connector's first-ever save shows a one-time welcome dialog the owner has already dismissed. If it appears again, hand the click to the owner.
 
 ## Before a paper supports a claim
 
