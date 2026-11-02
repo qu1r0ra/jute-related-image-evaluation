@@ -26,7 +26,18 @@ def build_plan(benchmark: Benchmark) -> tuple[Stage, ...]:
         fit for fit in fits if fit.kind in (FitKind.PREPARE, FitKind.CLASSICAL)
     ]
     stages = [Stage("core", tuple(direct)), Stage("classical", tuple(classical))]
-    for source_id, source in benchmark.source_fits().items():
-        arm = [fit for fit in targets if fit.upstream == source_id]
-        stages.append(Stage(source.stage, (source, *arm)))
+    sources = benchmark.source_fits()
+    for stage_name in dict.fromkeys(fit.stage for fit in sources.values()):
+        source_tuning = benchmark.source_tuning_fit()
+        tune = (
+            (source_tuning,)
+            if source_tuning is not None and source_tuning.stage == stage_name
+            else ()
+        )
+        source_fits = [
+            fit for fit in sources.values() if fit.stage == stage_name
+        ]
+        source_ids = {fit.fit_id for fit in source_fits}
+        arm = [fit for fit in targets if fit.upstream in source_ids]
+        stages.append(Stage(stage_name, (*tune, *source_fits, *arm)))
     return tuple(stages)

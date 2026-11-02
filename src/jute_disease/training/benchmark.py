@@ -21,7 +21,7 @@ class Recipe:
 
     image_size: int
     seeds: tuple[int, ...]
-    source_seed: int
+    source_seeds: tuple[int, ...]
     learning_rate: float
     weight_decay: float
     max_epochs: int
@@ -68,6 +68,12 @@ class FitSpec:
     estimator: str = ""
     features: str = ""
     upstream: str | None = None
+    pool: str = ""
+    view: int = 0
+    policy: str = ""
+    split: int = 0
+    seed_index: int = 0
+    phase: str = "final"
 
 
 @dataclass(frozen=True)
@@ -78,63 +84,215 @@ class Benchmark:
     features: tuple[str, ...]
     classical_seed: int
     limits: QueueLimits
+    pools: tuple[str, ...]
+    policies: tuple[str, ...]
+    views: tuple[int, ...]
+    splits: tuple[int, ...]
+    primary_split: int
+    assignments: tuple[tuple[int, int, int], ...]
+
+    def _checkpoint_for(self, split: int, seed_index: int) -> int:
+        matches = [
+            checkpoint
+            for row_split, row_seed, checkpoint in self.assignments
+            if (row_split, row_seed) == (split, seed_index)
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                f"assignment table has no unique row for split {split}, seed {seed_index}"
+            )
+        return matches[0]
 
     def fits(self) -> tuple[FitSpec, ...]:
         """Every declared fit, in declaration order."""
+        simple_matrix = (
+            len(self.pools) * len(self.policies) * len(self.views) * len(self.splits)
+            == 1
+        )
         out: list[FitSpec] = [FitSpec("classical/prepare", FitKind.PREPARE, 0)]
         for estimator in self.estimators:
             for features in self.features:
-                out.append(
-                    FitSpec(
-                        f"classical/{estimator}-{features}",
-                        FitKind.CLASSICAL,
-                        self.classical_seed,
-                        estimator=estimator,
-                        features=features,
+                for pool in self.pools:
+                    out.append(
+                        FitSpec(
+                            f"classical/tune/{pool}/{estimator}-{features}",
+                            FitKind.CLASSICAL,
+                            self.classical_seed,
+                            estimator=estimator,
+                            features=features,
+                            pool=pool,
+                            phase="tune",
+                        )
                     )
-                )
+        for estimator in self.estimators:
+            for features in self.features:
+                for pool in self.pools:
+                    for view in self.views:
+                        for policy in self.policies:
+                            for split in self.splits:
+                                repetitions = (
+                                    self.recipe.seeds
+                                    if estimator == "rf"
+                                    else (self.classical_seed,)
+                                )
+                                for seed_index, seed in enumerate(repetitions):
+                                    fit_id = (
+                                        f"classical/{estimator}-{features}/pool-{pool}"
+                                        f"/view-{view}/{policy}/split-{split}/seed-{seed}"
+                                    )
+                                    if simple_matrix:
+                                        fit_id = f"classical/{estimator}-{features}"
+                                    out.append(
+                                        FitSpec(
+                                            fit_id,
+                                            FitKind.CLASSICAL,
+                                            seed,
+                                            estimator=estimator,
+                                            features=features,
+                                            pool=pool,
+                                            view=view,
+                                            policy=policy,
+                                            split=split,
+                                            seed_index=seed_index,
+                                        )
+                                    )
+        source_tuning = self.source_tuning_fit()
+        if source_tuning is not None:
+            out.append(source_tuning)
         sources = self.source_fits()
         out.extend(sources.values())
         for system, definition in self.systems.items():
             chain = definition["chain"]
-            upstream = f"source/{chain[-1]}" if chain else None
-            for seed in self.recipe.seeds:
+            if chain:
+                checkpoint = self._checkpoint_for(self.primary_split, 0)
+                source_seed = self.recipe.source_seeds[checkpoint]
+                upstream = (
+                    f"source/{chain[-1]}"
+                    if len(self.recipe.source_seeds) == 1
+                    else f"source/{chain[-1]}/seed-{source_seed}"
+                )
+            else:
+                upstream = None
+            for pool in self.pools:
                 out.append(
                     FitSpec(
-                        f"cnn/{system}/seed-{seed}",
+                        f"cnn/tune/{system}/pool-{pool}",
                         FitKind.TARGET,
-                        seed,
+                        self.recipe.seeds[0],
                         system=system,
                         model=definition["model"],
                         micro_batch=definition["micro_batch"],
                         accumulation=self.recipe.effective_batch
                         // definition["micro_batch"],
                         upstream=upstream,
+                        pool=pool,
+                        split=self.primary_split,
+                        seed_index=0,
+                        phase="tune",
                     )
                 )
+            split_values = (
+                (self.primary_split,)
+                if definition.get("analysis", "primary") == "secondary"
+                else self.splits
+            )
+            for pool in self.pools:
+                for view in self.views:
+                    for policy in self.policies:
+                        for split in split_values:
+                            for seed_index, seed in enumerate(self.recipe.seeds):
+                                checkpoint = self._checkpoint_for(split, seed_index)
+                                source_seed = self.recipe.source_seeds[checkpoint]
+                                upstream = (
+                                    (
+                                        f"source/{chain[-1]}"
+                                        if len(self.recipe.source_seeds) == 1
+                                        else f"source/{chain[-1]}/seed-{source_seed}"
+                                    )
+                                    if chain
+                                    else None
+                                )
+                                fit_id = (
+                                    f"cnn/{system}/pool-{pool}/view-{view}/{policy}"
+                                    f"/split-{split}/seed-{seed}"
+                                )
+                                if simple_matrix:
+                                    fit_id = f"cnn/{system}/seed-{seed}"
+                                out.append(
+                                    FitSpec(
+                                        fit_id,
+                                        FitKind.TARGET,
+                                        seed,
+                                        system=system,
+                                        model=definition["model"],
+                                        micro_batch=definition["micro_batch"],
+                                        accumulation=self.recipe.effective_batch
+                                        // definition["micro_batch"],
+                                        upstream=upstream,
+                                        pool=pool,
+                                        view=view,
+                                        policy=policy,
+                                        split=split,
+                                        seed_index=seed_index,
+                                    )
+                                )
         return tuple(out)
 
-    def source_fits(self) -> dict[str, FitSpec]:
-        """The shared source stages, each trained once at the source seed."""
-        out: dict[str, FitSpec] = {}
+    def source_tuning_fit(self) -> FitSpec | None:
+        """One source-validation learning-rate sweep shared by every source fit."""
         for definition in self.systems.values():
-            previous: str | None = None
-            for stage in definition["chain"]:
-                fit_id = f"source/{stage}"
-                spec = FitSpec(
-                    fit_id,
+            chain = definition["chain"]
+            if chain:
+                stage = chain[0]
+                return FitSpec(
+                    f"source/tune/{stage}",
                     FitKind.SOURCE,
-                    self.recipe.source_seed,
+                    self.recipe.source_seeds[0],
                     stage=stage,
                     model=definition["model"],
                     micro_batch=definition["micro_batch"],
                     accumulation=self.recipe.effective_batch
                     // definition["micro_batch"],
-                    upstream=previous,
+                    seed_index=0,
+                    phase="tune",
                 )
-                if out.setdefault(fit_id, spec) != spec:
-                    raise ValueError(f"Conflicting definitions of {fit_id}")
-                previous = fit_id
+        return None
+
+    def source_fits(self) -> dict[str, FitSpec]:
+        """The shared source stages, each trained for every declared source seed."""
+        out: dict[str, FitSpec] = {}
+        for definition in self.systems.values():
+            for stage in definition["chain"]:
+                for index, seed in enumerate(self.recipe.source_seeds):
+                    fit_id = (
+                        f"source/{stage}"
+                        if len(self.recipe.source_seeds) == 1
+                        else f"source/{stage}/seed-{seed}"
+                    )
+                    previous = None
+                    if stage != definition["chain"][0]:
+                        previous_stage = definition["chain"][
+                            definition["chain"].index(stage) - 1
+                        ]
+                        previous = (
+                            f"source/{previous_stage}"
+                            if len(self.recipe.source_seeds) == 1
+                            else f"source/{previous_stage}/seed-{seed}"
+                        )
+                    spec = FitSpec(
+                        fit_id,
+                        FitKind.SOURCE,
+                        seed,
+                        stage=stage,
+                        model=definition["model"],
+                        micro_batch=definition["micro_batch"],
+                        accumulation=self.recipe.effective_batch
+                        // definition["micro_batch"],
+                        upstream=previous,
+                        seed_index=index,
+                    )
+                    if out.setdefault(fit_id, spec) != spec:
+                        raise ValueError(f"Conflicting definitions of {fit_id}")
         return out
 
 
@@ -158,7 +316,10 @@ def load_benchmark(path: Path | str) -> Benchmark:
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
     recipe_raw = _checked("recipe", raw["recipe"], Recipe)
     recipe_raw["seeds"] = tuple(recipe_raw["seeds"])
+    recipe_raw["source_seeds"] = tuple(recipe_raw["source_seeds"])
     recipe = Recipe(**recipe_raw)
+    if not recipe.source_seeds:
+        raise ValueError("Benchmark must declare at least one source seed per stage")
     if recipe.precision != "bf16-mixed":
         raise ValueError("Benchmark precision must be bf16-mixed on CUDA")
     if recipe.compile_model:
@@ -171,13 +332,40 @@ def load_benchmark(path: Path | str) -> Benchmark:
             raise ValueError(f"Benchmark queue {name} must be a finite positive number")
     systems = raw["cnn_systems"]
     for name, definition in systems.items():
-        if set(definition) != {"model", "micro_batch", "chain"}:
-            raise ValueError(f"System {name} must define model, micro_batch, chain")
+        if set(definition) not in (
+            {"model", "micro_batch", "chain"},
+            {"model", "micro_batch", "chain", "analysis"},
+        ):
+            raise ValueError(
+                f"System {name} must define model, micro_batch, chain, and optional analysis"
+            )
         if recipe.effective_batch % definition["micro_batch"]:
             raise ValueError(f"System {name}: micro_batch must divide effective_batch")
     classical = raw["classical"]
     if set(classical) != {"estimators", "features", "seed"}:
         raise ValueError("Benchmark classical must define estimators, features, seed")
+    matrix = raw["matrix"]
+    if set(matrix) != {"pools", "policies", "views", "splits", "primary_split"}:
+        raise ValueError("Benchmark matrix has unknown or missing dimensions")
+    matrix_size = (
+        len(matrix["pools"])
+        * len(matrix["policies"])
+        * len(matrix["views"])
+        * len(matrix["splits"])
+    )
+    if matrix_size > 1 and len(recipe.source_seeds) != 3:
+        raise ValueError("The full benchmark must declare three source seeds per stage")
+    assignments = tuple(
+        (row["split"], row["seed"], row["checkpoint"])
+        for row in raw["assignments"]
+    )
+    if len(assignments) != len(set((split, seed) for split, seed, _ in assignments)):
+        raise ValueError("Benchmark assignment table has duplicate split/seed rows")
+    if any(
+        checkpoint != (seed + split) % 3 or checkpoint >= len(recipe.source_seeds)
+        for split, seed, checkpoint in assignments
+    ):
+        raise ValueError("Benchmark assignment table violates its rotation rule")
     return Benchmark(
         recipe=recipe,
         systems=systems,
@@ -185,6 +373,12 @@ def load_benchmark(path: Path | str) -> Benchmark:
         features=tuple(classical["features"]),
         classical_seed=classical["seed"],
         limits=limits,
+        pools=tuple(matrix["pools"]),
+        policies=tuple(matrix["policies"]),
+        views=tuple(matrix["views"]),
+        splits=tuple(matrix["splits"]),
+        primary_split=matrix["primary_split"],
+        assignments=assignments,
     )
 
 

@@ -31,8 +31,8 @@ def test_recipe_matches_the_frozen_specification(benchmark) -> None:
     assert recipe.scheduler_patience == 3
     assert recipe.scheduler_factor == 0.1
     assert recipe.image_size == 256
-    assert recipe.seeds == (42, 1337, 7)
-    assert recipe.source_seed == 42
+    assert recipe.seeds == (42, 1337, 7, 21, 84)
+    assert recipe.source_seeds == (42, 1337, 7)
     assert recipe.compile_model is False
     assert recipe.precision == "bf16-mixed"
     assert recipe.num_workers == 8
@@ -47,6 +47,7 @@ def test_cpu_smoke_workspace_uses_zero_workers(tmp_path) -> None:
             image_root=tmp_path,
             target_dir=tmp_path,
             sources={},
+            policy_dir=tmp_path / "policies",
         ),
         "runs_dir": tmp_path / "runs",
         "cache_dir": tmp_path / "cache",
@@ -65,30 +66,59 @@ def test_ten_classical_fits_cover_every_estimator_on_both_feature_sets(
     benchmark,
 ) -> None:
     classical = [f for f in benchmark.fits() if f.kind is FitKind.CLASSICAL]
-    assert len(classical) == 10
+    final_classical = [f for f in classical if f.phase == "final"]
+    tuning = [f for f in classical if f.phase == "tune"]
+    assert len(final_classical) == 3240
+    assert len(tuning) == 30
     assert {(f.estimator, f.features) for f in classical} == {
         (e, x) for e in ("gnb", "knn", "lr", "rf", "svm") for x in ("raw", "crafted")
     }
-    assert {f.seed for f in classical} == {42}
+    assert {f.seed for f in tuning} == {42}
+    assert len({f.fit_id for f in classical}) == len(classical)
 
 
 def test_twelve_target_fits_across_four_systems_and_three_seeds(benchmark) -> None:
     targets = [f for f in benchmark.fits() if f.kind is FitKind.TARGET]
-    assert len(targets) == 12
+    final_targets = [fit for fit in targets if fit.phase == "final"]
+    tuning = [fit for fit in targets if fit.phase == "tune"]
+    assert len(final_targets) == 2790
+    assert len(tuning) == 12
+    assert {(fit.system, fit.pool) for fit in tuning} == {
+        (system, pool)
+        for system in benchmark.systems
+        for pool in benchmark.pools
+    }
     assert {f.system for f in targets} == {
         "mobilenet_v2_direct",
-        "efficientnet_b5_direct",
+        "efficientnet_b5_imagenet",
         "mobilenet_v2_plantvillage",
         "mobilenet_v2_plantvillage_plantdoc",
     }
-    for system in {f.system for f in targets}:
-        assert {f.seed for f in targets if f.system == system} == {42, 1337, 7}
+    assert {
+        f.seed
+        for f in final_targets
+        if f.system == "mobilenet_v2_direct" and f.split == 0
+    } == {42, 1337, 7, 21, 84}
+    b5 = [f for f in final_targets if f.system == "efficientnet_b5_imagenet"]
+    assert len(b5) == 90
+    assert {fit.split for fit in b5} == {0}
+    assert {fit.view for fit in b5} == {1, 2}
+    assert {fit.pool for fit in b5} == {"A", "B", "C"}
+    assert {fit.policy for fit in b5} == {
+        "image-random",
+        "exact-copy",
+        "near-duplicate",
+    }
 
 
 def test_initialization_recipes_and_batching(benchmark) -> None:
     by_id = {f.fit_id: f for f in benchmark.fits()}
-    mobile = by_id["cnn/mobilenet_v2_direct/seed-42"]
-    b5 = by_id["cnn/efficientnet_b5_direct/seed-42"]
+    mobile = by_id[
+        "cnn/mobilenet_v2_direct/pool-A/view-1/image-random/split-0/seed-42"
+    ]
+    b5 = by_id[
+        "cnn/efficientnet_b5_imagenet/pool-A/view-1/image-random/split-0/seed-42"
+    ]
     assert mobile.model == "mobilenetv2_100.ra_in1k"
     assert (mobile.micro_batch, mobile.accumulation) == (32, 1)
     assert b5.model == "efficientnet_b5.sw_in12k_ft_in1k"
@@ -97,38 +127,56 @@ def test_initialization_recipes_and_batching(benchmark) -> None:
 
 def test_one_shared_source_chain_feeds_both_domain_arms(benchmark) -> None:
     by_id = {f.fit_id: f for f in benchmark.fits()}
-    pv, pd = by_id["source/plantvillage"], by_id["source/plantdoc"]
+    source_tune = by_id["source/tune/plantvillage"]
+    pv = by_id["source/plantvillage/seed-42"]
+    pd = by_id["source/plantdoc/seed-42"]
     assert (pv.kind, pv.stage, pv.seed, pv.upstream) == (
         FitKind.SOURCE,
         "plantvillage",
         42,
         None,
     )
-    assert (pd.stage, pd.seed, pd.upstream) == ("plantdoc", 42, "source/plantvillage")
-    for seed in (42, 1337, 7):
-        assert (
-            by_id[f"cnn/mobilenet_v2_plantvillage/seed-{seed}"].upstream
-            == "source/plantvillage"
-        )
-        assert (
-            by_id[f"cnn/mobilenet_v2_plantvillage_plantdoc/seed-{seed}"].upstream
-            == "source/plantdoc"
-        )
-        assert by_id[f"cnn/mobilenet_v2_direct/seed-{seed}"].upstream is None
+    assert (source_tune.kind, source_tune.stage, source_tune.phase) == (
+        FitKind.SOURCE,
+        "plantvillage",
+        "tune",
+    )
+    assert (pd.stage, pd.seed, pd.upstream) == (
+        "plantdoc",
+        42,
+        "source/plantvillage/seed-42",
+    )
+    target = by_id[
+        "cnn/mobilenet_v2_plantvillage_plantdoc/pool-A/view-1/image-random"
+        "/split-0/seed-42"
+    ]
+    assert target.upstream == "source/plantdoc/seed-42"
+    assert target.split == 0 and target.seed_index == 0
 
 
 def test_plan_order_is_core_classical_plantvillage_then_plantdoc(benchmark) -> None:
     plan = build_plan(benchmark)
     assert [s.name for s in plan] == ["core", "classical", "plantvillage", "plantdoc"]
     core, classical, pv, pd = plan
-    assert [f.system for f in core.fits] == (
-        ["mobilenet_v2_direct"] * 3 + ["efficientnet_b5_direct"] * 3
+    core_final = [fit for fit in core.fits if fit.phase == "final"]
+    assert [f.system for f in core_final] == (
+        ["mobilenet_v2_direct"] * 900 + ["efficientnet_b5_imagenet"] * 90
     )
     assert classical.fits[0].kind is FitKind.PREPARE
-    assert len(classical.fits) == 11
-    assert [f.fit_id for f in pv.fits][0] == "source/plantvillage"
-    assert [f.fit_id for f in pd.fits][0] == "source/plantdoc"
-    assert len(pv.fits) == len(pd.fits) == 4
+    assert len(classical.fits) == 3271
+    assert pv.fits[0].fit_id == "source/tune/plantvillage"
+    assert [f.fit_id for f in pv.fits[1:4]] == [
+        "source/plantvillage/seed-42",
+        "source/plantvillage/seed-1337",
+        "source/plantvillage/seed-7",
+    ]
+    assert [f.fit_id for f in pd.fits[:3]] == [
+        "source/plantdoc/seed-42",
+        "source/plantdoc/seed-1337",
+        "source/plantdoc/seed-7",
+    ]
+    assert len(pv.fits) == 907
+    assert len(pd.fits) == 906
 
 
 def test_every_declared_fit_is_in_exactly_one_stage(benchmark) -> None:
