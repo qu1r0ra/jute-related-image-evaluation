@@ -1270,8 +1270,18 @@ def validate_export(output_dir: Path) -> dict[str, Any]:
     configuration_sha256 = metadata.get("configuration_sha256")
     if not isinstance(configuration_sha256, str):
         raise ValueError("export configuration SHA-256 is malformed")
+    if metadata.get("configuration_file") != "configuration.json":
+        raise ValueError("export configuration file reference is malformed")
     if _sha256_file(output_dir / "configuration.json") != configuration_sha256:
         raise ValueError("export configuration changed after export")
+    configuration_snapshot = metadata.get("configuration")
+    if not isinstance(configuration_snapshot, dict):
+        raise ValueError("export configuration snapshot must be a JSON object")
+    configuration_file = json.loads(
+        (output_dir / "configuration.json").read_text(encoding="utf-8")
+    )
+    if configuration_file != configuration_snapshot:
+        raise ValueError("export configuration snapshot differs from its file")
 
     evaluation_values: dict[str, int | float] = {}
     evaluation_source = metadata.get("evaluation_metrics")

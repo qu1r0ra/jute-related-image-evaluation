@@ -249,6 +249,16 @@ def test_fixture_freezes_exports_rebuilds_and_checks_macros(tmp_path: Path) -> N
     mismatched_path_check = _run("manuscript", "check", str(export_dir))
     assert mismatched_path_check.returncode != 0
     assert "mismatched path" in mismatched_path_check.stderr
+    mismatched_configuration_metadata = json.loads(export_metadata_bytes)
+    mismatched_configuration_metadata["configuration"]["purpose"] = (
+        "tampered embedded configuration"
+    )
+    export_metadata_path.write_text(
+        json.dumps(mismatched_configuration_metadata), encoding="utf-8"
+    )
+    mismatched_configuration_check = _run("manuscript", "check", str(export_dir))
+    assert mismatched_configuration_check.returncode != 0
+    assert "configuration snapshot differs" in mismatched_configuration_check.stderr
     export_metadata_path.write_bytes(export_metadata_bytes)
 
     metadata = json.loads((export_dir / "export.json").read_text(encoding="utf-8"))
