@@ -15,6 +15,7 @@ from jute_disease.data import (
     make_synthetic_data,
     read_inventory,
 )
+from jute_disease.data.manifest import load_complete_manifest
 
 pytestmark = pytest.mark.slow
 
@@ -80,8 +81,11 @@ def test_freeze_command_writes_a_verifiable_receipt(inputs: dict[str, Path]) -> 
     out, result = _freeze(inputs, "first")
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
-    manifest = load_manifest(out / "target")
+    manifest = load_complete_manifest(out / "target")
     manifest_data = json.loads((out / "target" / "manifest.json").read_text())
+    protected_data = json.loads(
+        (out / "target" / "protected-test" / "manifest.json").read_text()
+    )
     receipt = report["receipt"]
     assert receipt["manifest_digest"] == manifest.digest()
     assert receipt["seed"] == 42
@@ -96,6 +100,11 @@ def test_freeze_command_writes_a_verifiable_receipt(inputs: dict[str, Path]) -> 
     assert dependencies["preprocessing"] == PreprocessingSpec().digest()
     assert manifest_data["version"] == 2
     assert all("pad_fraction" in entry for entry in manifest_data["entries"])
+    assert {entry["partition"] for entry in manifest_data["entries"]} == {
+        "train",
+        "val",
+    }
+    assert {entry["partition"] for entry in protected_data["entries"]} == {"test"}
     assert report["pad_fraction_by_source_and_class"]
 
 
@@ -106,7 +115,12 @@ def test_lineage_a_second_process_reproduces_the_same_freeze(
     second_out, second = _freeze(inputs, "lineage-b")
     assert first.returncode == second.returncode == 0
     assert json.loads(first.stdout)["receipt"] == json.loads(second.stdout)["receipt"]
-    for name in ("manifest.json", "receipt.json"):
+    for name in (
+        "manifest.json",
+        "receipt.json",
+        "protected-test/manifest.json",
+        "protected-test/receipt.json",
+    ):
         assert (first_out / "target" / name).read_bytes() == (
             second_out / "target" / name
         ).read_bytes()
@@ -194,7 +208,7 @@ def test_dhash_freeze_receipt_binds_groups_and_cannot_replace_existing_freeze(
     assert grouping["algorithm_version"] == "dhash-v1"
     assert report["receipt"]["dependencies"]["grouping"] == grouping["digest"]
     assert grouping["denominators"]["images"] > 0
-    manifest = load_manifest(out / "target")
+    manifest = load_complete_manifest(out / "target")
     groups = {entry.path: entry.group for entry in manifest.entries}
     assert any(len(family) > 1 for family in grouping["families"])
     for family in grouping["families"]:

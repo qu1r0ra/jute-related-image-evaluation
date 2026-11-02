@@ -26,7 +26,10 @@ from jute_disease.data import (
     ManifestDataset,
     MaskBackend,
     create_pipeline,
-    load_manifest,
+)
+from jute_disease.data.manifest import (
+    load_complete_manifest,
+    load_protected_test_manifest,
 )
 from jute_disease.evaluation.breakdowns import (
     LEAF_SAMPLE_SIZE,
@@ -75,7 +78,7 @@ def leaf_sample_ids(
     must be known before leaf-only checkpoints are scored.
     """
     del freeze_record  # presence proves the gate was passed
-    entries = load_manifest(Path(target_dir)).partition("test")
+    entries = load_protected_test_manifest(target_dir).partition("test")
     return stratified_sample(
         [e.image_id for e in entries], [e.label for e in entries], size, seed
     )
@@ -123,7 +126,7 @@ def evaluate_test(
     seed: int = 42,
 ) -> dict[str, Any]:
     """Score the authorized fits on the test partition and run every analysis."""
-    manifest = load_manifest(Path(target_dir))
+    manifest = load_complete_manifest(target_dir)
     entries = tuple(sorted(manifest.partition("test"), key=lambda e: e.image_id))
     if not entries:
         raise FreezeRecordError("target manifest has no test images")
@@ -247,7 +250,7 @@ def evaluate_image_diagnostics(
     require_analysis(authorization, "gradcam-test-pass", fit_ids)
     assignment = validate_primary_policy_runs(assignment_table_path, authorization.runs)
 
-    manifest = load_manifest(Path(target_dir))
+    manifest = load_complete_manifest(target_dir)
     entries = tuple(sorted(manifest.partition("test"), key=lambda item: item.image_id))
     image_ids = tuple(entry.image_id for entry in entries)
     if not image_ids:

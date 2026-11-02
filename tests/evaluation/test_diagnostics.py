@@ -10,6 +10,7 @@ import pytest
 import torch
 from torch import nn
 
+from jute_disease.data import Manifest, ManifestEntry, write_isolated_manifests
 from jute_disease.evaluation import (
     Authorization,
     FreezeRecordError,
@@ -320,6 +321,38 @@ def test_run_record_binds_checkpoint_validation_and_assignment_receipt(
         directory.mkdir(parents=True)
         (directory / "fixture.txt").write_text("synthetic\n", encoding="utf-8")
     (root / "uv.lock").write_text("synthetic lock\n", encoding="utf-8")
+    target = tmp_path / "target"
+    entries = tuple(
+        ManifestEntry(
+            image_id=f"{index:064x}",
+            path=f"{index}.jpg",
+            label=label,
+            partition=partition,
+            group=f"group-{index}",
+            source="synthetic",
+            width=10,
+            height=10,
+            pad_fraction=0.0,
+        )
+        for index, (label, partition) in enumerate(
+            (label, partition)
+            for partition in ("train", "val", "test")
+            for label in ("a", "b")
+        )
+    )
+    write_isolated_manifests(
+        Manifest(
+            seed=42,
+            fractions=(("train", 0.7), ("val", 0.15), ("test", 0.15)),
+            entries=entries,
+            excluded=(),
+            merged=(),
+            quarantined=(),
+            constraints=(),
+            dependencies=(("inventory", "synthetic"),),
+        ),
+        target,
+    )
 
     fit_id = "cnn/mobilenet_v2_direct/pool-A/view-1/near-duplicate/split-0/seed-42"
     analyses = [
@@ -351,6 +384,7 @@ def test_run_record_binds_checkpoint_validation_and_assignment_receipt(
         },
         tmp_path / "freeze.json",
         root,
+        target_dir=target,
     )
 
     runs = tmp_path / "runs"

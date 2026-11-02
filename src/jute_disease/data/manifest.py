@@ -11,7 +11,7 @@ import json
 import math
 import os
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from jute_disease.config import DEFAULT_SEED, SPLITS
@@ -29,6 +29,8 @@ MANIFEST_VERSION = 2
 MANIFEST_FILE = "manifest.json"
 RECEIPT_FILE = "receipt.json"
 PARTITIONS = ("train", "val", "test")
+FIT_PARTITIONS = ("train", "val")
+PROTECTED_TEST_DIR = "protected-test"
 
 
 class FreezeBlockedError(ValueError):
@@ -324,6 +326,17 @@ def validate_manifest(manifest: Manifest, min_support: int) -> None:
     for entry in manifest.entries:
         if entry.partition not in PARTITIONS:
             problems.append(f"{entry.image_id}: unknown partition {entry.partition!r}")
+    scope = dict(manifest.dependencies).get("manifest_scope")
+    if scope not in (None, "fit", "protected_test"):
+        problems.append(f"unknown manifest scope {scope!r}")
+    elif scope == "fit" and any(
+        entry.partition not in FIT_PARTITIONS for entry in manifest.entries
+    ):
+        problems.append("fit manifest contains a non-fit partition")
+    elif scope == "protected_test" and any(
+        entry.partition != "test" for entry in manifest.entries
+    ):
+        problems.append("protected-test manifest contains a non-test partition")
     partition = {e.image_id: e.partition for e in manifest.entries}
     group_partitions: dict[str, set[str]] = {}
     group_labels: dict[str, set[str]] = {}
@@ -343,9 +356,16 @@ def validate_manifest(manifest: Manifest, min_support: int) -> None:
         elif partition[left] != partition[right]:
             problems.append(f"constraint {left[:12]}/{right[:12]} is violated")
     support = manifest.support()
-    required_partitions = (
-        ("train",) if "source_inventory" in dict(manifest.dependencies) else PARTITIONS
-    )
+    if scope == "fit":
+        required_partitions = FIT_PARTITIONS
+    elif scope == "protected_test":
+        required_partitions = ("test",)
+    else:
+        required_partitions = (
+            ("train",)
+            if "source_inventory" in dict(manifest.dependencies)
+            else PARTITIONS
+        )
     for label in manifest.labels:
         for name in required_partitions:
             have = support[name].get(label, 0)
@@ -494,6 +514,43 @@ def write_manifest(manifest: Manifest, directory: Path) -> Path:
     return receipt
 
 
+def write_isolated_manifests(manifest: Manifest, directory: Path) -> tuple[Path, Path]:
+    """Write fit-visible and evaluator-owned manifests as separate artifacts."""
+    fit_ids = {
+        entry.image_id
+        for entry in manifest.entries
+        if entry.partition in FIT_PARTITIONS
+    }
+    test_ids = {
+        entry.image_id for entry in manifest.entries if entry.partition == "test"
+    }
+
+    def scoped(scope: str, image_ids: set[str]) -> Manifest:
+        dependencies = dict(manifest.dependencies)
+        dependencies["manifest_scope"] = scope
+        return replace(
+            manifest,
+            entries=tuple(
+                entry for entry in manifest.entries if entry.image_id in image_ids
+            ),
+            constraints=tuple(
+                pair for pair in manifest.constraints if set(pair) <= image_ids
+            ),
+            dependencies=tuple(sorted(dependencies.items())),
+        )
+
+    fit_manifest = scoped("fit", fit_ids)
+    test_manifest = scoped("protected_test", test_ids)
+    if not fit_ids or not test_ids:
+        raise FreezeBlockedError(
+            "fit and protected-test manifests must both be non-empty"
+        )
+    return (
+        write_manifest(fit_manifest, Path(directory)),
+        write_manifest(test_manifest, Path(directory) / PROTECTED_TEST_DIR),
+    )
+
+
 def load_manifest(directory: Path, min_support: int | None = None) -> Manifest:
     """Load and verify a frozen manifest.
 
@@ -522,9 +579,10 @@ def load_manifest(directory: Path, min_support: int | None = None) -> Manifest:
         raise FreezeBlockedError(f"Missing grouping receipt dependency in {directory}")
     if grouping_digest is not None:
         try:
-            grouping = json.loads(
-                (directory / "grouping.json").read_text(encoding="utf-8")
-            )
+            grouping_path = directory / "grouping.json"
+            if not grouping_path.is_file():
+                grouping_path = directory.parent / "grouping.json"
+            grouping = json.loads(grouping_path.read_text(encoding="utf-8"))
             recorded = grouping.pop("digest")
             version = dict(manifest.dependencies).get("grouping_version")
             if version is not None and grouping.get("algorithm_version") != version:
@@ -540,3 +598,50 @@ def load_manifest(directory: Path, min_support: int | None = None) -> Manifest:
             ) from error
     validate_manifest(manifest, 1 if min_support is None else min_support)
     return manifest
+
+
+def load_protected_test_manifest(directory: Path | str) -> Manifest:
+    """Load the isolated test manifest; callers must pass the evaluator gate first."""
+    manifest = load_manifest(Path(directory) / PROTECTED_TEST_DIR)
+    if dict(manifest.dependencies).get("manifest_scope") != "protected_test" or any(
+        entry.partition != "test" for entry in manifest.entries
+    ):
+        raise FreezeBlockedError("Protected-test manifest has an invalid scope")
+    return manifest
+
+
+def load_complete_manifest(directory: Path | str) -> Manifest:
+    """Reassemble fit and protected partitions for freeze and split preparation."""
+    fit = load_manifest(Path(directory))
+    test = load_protected_test_manifest(directory)
+    fit_dependencies = dict(fit.dependencies)
+    test_dependencies = dict(test.dependencies)
+    if fit_dependencies.pop("manifest_scope", None) != "fit":
+        raise FreezeBlockedError("Target manifest does not have fit scope")
+    if test_dependencies.pop("manifest_scope", None) != "protected_test":
+        raise FreezeBlockedError("Protected-test manifest does not have test scope")
+    if fit_dependencies != test_dependencies:
+        raise FreezeBlockedError(
+            "Fit and protected-test manifests have mismatched lineage"
+        )
+    if (
+        fit.version != test.version
+        or fit.seed != test.seed
+        or fit.fractions != test.fractions
+        or fit.excluded != test.excluded
+        or fit.merged != test.merged
+        or fit.quarantined != test.quarantined
+    ):
+        raise FreezeBlockedError(
+            "Fit and protected-test manifests have mismatched split rules"
+        )
+    if any(entry.partition not in FIT_PARTITIONS for entry in fit.entries):
+        raise FreezeBlockedError("Target manifest contains a non-fit partition")
+    complete = replace(
+        fit,
+        entries=tuple(sorted((*fit.entries, *test.entries), key=lambda e: e.image_id)),
+        constraints=tuple(sorted(set(fit.constraints) | set(test.constraints))),
+        dependencies=tuple(sorted(fit_dependencies.items())),
+    )
+    validate_manifest(complete, 1)
+    return complete

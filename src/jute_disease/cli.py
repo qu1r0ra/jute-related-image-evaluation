@@ -583,6 +583,7 @@ def _evaluate_freeze_record(args: argparse.Namespace) -> None:
             outcomes,
             args.output,
             args.root,
+            target_dir=args.target_dir,
             required_fit_ids=required,
             reads_log=args.reads_log,
         )
@@ -606,7 +607,7 @@ def _evaluate_run_record(args: argparse.Namespace) -> None:
 
 def _evaluate_leaf_sample(args: argparse.Namespace) -> None:
     try:
-        record = verify_freeze_record(args.freeze_record, args.root)
+        record = verify_freeze_record(args.freeze_record, args.root, args.target_dir)
         log_test_read(
             default_reads_log_path(args.root),
             record["hash"],
@@ -621,7 +622,11 @@ def _evaluate_leaf_sample(args: argparse.Namespace) -> None:
 def _evaluate_test(args: argparse.Namespace) -> None:
     try:
         auth = authorize_test_read(
-            args.freeze_record, args.run_record, args.root, args.fit_id or None
+            args.freeze_record,
+            args.run_record,
+            args.root,
+            args.fit_id or None,
+            args.target_dir,
         )
         default_log = default_reads_log_path(args.root)
         fit_ids = [r.fit_id for r in auth.runs]
@@ -652,7 +657,11 @@ def _evaluate_test(args: argparse.Namespace) -> None:
 def _evaluate_diagnostics(args: argparse.Namespace) -> None:
     try:
         auth = authorize_test_read(
-            args.freeze_record, args.run_record, args.root, args.fit_id
+            args.freeze_record,
+            args.run_record,
+            args.root,
+            args.fit_id,
+            args.target_dir,
         )
         fit_ids = [run.fit_id for run in auth.runs]
         additional_logs = [args.reads_log] if args.reads_log else []
@@ -1007,6 +1016,7 @@ def _add_gated_evaluator(actions: argparse._SubParsersAction) -> None:
         "--outcomes", type=Path, help="Recorded #114 validation outcomes."
     )
     record.add_argument("--output", type=Path, required=True)
+    record.add_argument("--target-dir", type=Path, required=True)
     record.add_argument("--benchmark", type=Path, default=BENCHMARK_CONFIG)
     record.add_argument("--root", type=Path, default=ROOT_DIR)
     record.add_argument("--reads-log", type=Path)

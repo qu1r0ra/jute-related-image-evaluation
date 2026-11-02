@@ -29,7 +29,9 @@ from jute_disease.data import (
     make_synthetic_data,
     observed_counts,
     probe_cache,
+    write_manifest,
 )
+from jute_disease.data.manifest import PROTECTED_TEST_DIR, load_complete_manifest
 
 
 @pytest.fixture(scope="module")
@@ -61,13 +63,40 @@ def test_freeze_writes_inventory_manifest_receipt_and_report(
         json.loads((tmp_path / REPORT_FILE).read_text())["receipt"]
         == (report["receipt"])
     )
-    manifest = load_manifest(tmp_path / TARGET_DIR)
+    manifest = load_complete_manifest(tmp_path / TARGET_DIR)
     assert report["receipt"]["manifest_digest"] == manifest.digest()
     assert report["unchanged"] is False
     assert "preprocessing" in report["receipt"]["dependencies"]
     assert report["receipt"]["dependencies"]["preprocessing"] == (
         PreprocessingSpec().digest()
     )
+
+
+def test_freeze_stores_test_entries_only_in_the_protected_manifest(
+    synthetic: SyntheticPlan, rules_path: Path, tmp_path: Path
+) -> None:
+    _freeze(synthetic, rules_path, tmp_path)
+    target = tmp_path / TARGET_DIR
+    fit_manifest = json.loads((target / "manifest.json").read_text(encoding="utf-8"))
+    protected_manifest = json.loads(
+        (target / "protected-test" / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert {row["partition"] for row in fit_manifest["entries"]} == {"train", "val"}
+    assert {row["partition"] for row in protected_manifest["entries"]} == {"test"}
+
+
+def test_split_manifest_mismatch_fails_closed(
+    synthetic: SyntheticPlan, rules_path: Path, tmp_path: Path
+) -> None:
+    _freeze(synthetic, rules_path, tmp_path)
+    target = tmp_path / TARGET_DIR
+    protected = load_manifest(target / PROTECTED_TEST_DIR)
+    write_manifest(
+        replace(protected, seed=protected.seed + 1), target / PROTECTED_TEST_DIR
+    )
+    with pytest.raises(FreezeBlockedError, match="mismatched split rules"):
+        load_complete_manifest(target)
 
 
 def test_refreezing_the_same_inputs_is_idempotent(
@@ -85,7 +114,7 @@ def test_a_different_completed_freeze_is_kept_unless_forced(
     first = _freeze(synthetic, rules_path, tmp_path)
     with pytest.raises(FreezeBlockedError, match="--force"):
         _freeze(synthetic, rules_path, tmp_path, seed=7)
-    kept = load_manifest(tmp_path / TARGET_DIR)
+    kept = load_complete_manifest(tmp_path / TARGET_DIR)
     assert kept.digest() == first["receipt"]["manifest_digest"]
     replaced = _freeze(synthetic, rules_path, tmp_path, seed=7, force=True)
     assert replaced["receipt"]["manifest_digest"] != first["receipt"]["manifest_digest"]
@@ -216,7 +245,7 @@ def test_source_freeze_excludes_target_overlap_and_pins_content(
 ) -> None:
     output = tmp_path / "freeze"
     _freeze(synthetic, rules_path, output)
-    target = load_manifest(output / TARGET_DIR)
+    target = load_complete_manifest(output / TARGET_DIR)
     package = tmp_path / "package"
     make_synthetic_data(package / "train", per_class=20, labels=("a", "b"), seed=100)
     make_synthetic_data(package / "test", per_class=10, labels=("a", "b"), seed=200)
