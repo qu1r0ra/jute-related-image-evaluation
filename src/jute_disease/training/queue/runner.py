@@ -2,16 +2,15 @@
 
 Fits run one at a time in plan order. Each fit is resumed or skipped through its
 run identity, never through the mere presence of files. Every attempt runs under
-the configured timeout for its kind of step. A failed or timed-out fit is retried
-once with the same seed; if the retry also fails, the fit is reported as a
-persistent failure and its dependants are omitted. Three persistent failures in a
-row abort the queue, because they point to a broken environment rather than to
-one bad fit. Nothing here reads a validation or test outcome.
+the configured timeout for its kind of step. Only infrastructure failures and
+timeouts get one retry with the same seed. Three consecutive persistent failures
+abort the queue. Nothing here reads a test outcome.
 """
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
 
@@ -26,6 +25,12 @@ from jute_disease.training.receipts import (
 
 RETRIES = 1
 MAX_CONSECUTIVE_FAILURES = 3
+
+
+class FailureKind(StrEnum):
+    INFRASTRUCTURE = "infrastructure"
+    DIVERGENCE = "divergence"
+    OTHER = "other"
 
 
 class QueueAbortedError(RuntimeError):
@@ -55,6 +60,15 @@ class Outcome:
     state: RunState
     seconds: float
     reason: str = ""
+    failure_kind: FailureKind | None = None
+
+    @property
+    def retryable(self) -> bool:
+        """Only outcomes classified as infrastructure consume the retry."""
+        return (
+            self.state in (RunState.FAILED, RunState.TIMED_OUT)
+            and self.failure_kind is FailureKind.INFRASTRUCTURE
+        )
 
 
 Executor = Callable[[FitSpec, float], Outcome]
@@ -69,6 +83,214 @@ class QueueReport:
     skipped: list[str] = field(default_factory=list)
     arms: dict[str, str] = field(default_factory=dict)
     escalations: list[str] = field(default_factory=list)
+    planned_fits: list[str] = field(default_factory=list)
+    confirmatory_ready: bool = False
+    confirmatory_blockers: list[str] = field(default_factory=list)
+
+    @property
+    def completion_ready(self) -> bool:
+        """True only when every planned fit completed in the current queue."""
+        return bool(self.planned_fits) and all(
+            self.outcomes.get(fit_id) is RunState.COMPLETED
+            for fit_id in self.planned_fits
+        )
+
+
+class ConfirmatoryAnalysisBlockedError(RuntimeError):
+    """The training receipts do not support confirmatory analysis."""
+
+    def __init__(self, blockers: Sequence[str]) -> None:
+        self.blockers = tuple(blockers)
+        super().__init__(
+            "Confirmatory analysis is blocked: " + "; ".join(self.blockers)
+        )
+
+
+def confirmatory_blockers(
+    benchmark: Benchmark, store: RunStore, identity_for: IdentityFor
+) -> list[str]:
+    """Describe every planned fit that lacks an official, complete receipt."""
+    blockers: list[str] = []
+    required_metadata = {
+        "provenance",
+        "official",
+        "configuration",
+        "environment_lock",
+        "preprocessing",
+        "assignment_table",
+        "source_checkpoint_ancestry",
+        "seed",
+        "runtime_contract",
+        "run_options",
+    }
+    terminal_attempts = {
+        RunState.COMPLETED.value,
+        RunState.FAILED.value,
+        RunState.TIMED_OUT.value,
+        RunState.INTERRUPTED.value,
+        RunState.OMITTED.value,
+    }
+    for fit in benchmark.fits():
+        try:
+            expected_identity = identity_for(fit)
+            receipt = store.receipt(fit.fit_id, missing_ok=True)
+        except Exception as error:
+            blockers.append(f"{fit.fit_id}: receipt check failed ({error})")
+            continue
+        if receipt is None:
+            blockers.append(f"{fit.fit_id}: no completed receipt")
+            continue
+        if store.state(fit.fit_id) is not RunState.COMPLETED:
+            blockers.append(f"{fit.fit_id}: planned fit is not completed")
+            continue
+        if receipt.get("identity") != expected_identity:
+            blockers.append(f"{fit.fit_id}: receipt identity does not match")
+            continue
+        metadata = receipt.get("metadata")
+        if not isinstance(metadata, dict) or not required_metadata.issubset(metadata):
+            blockers.append(f"{fit.fit_id}: receipt is missing contract metadata")
+            continue
+        provenance = metadata.get("provenance")
+        if (
+            metadata.get("official") is not True
+            or not isinstance(provenance, dict)
+            or provenance.get("working_tree_clean") is not True
+            or not provenance.get("commit")
+        ):
+            blockers.append(f"{fit.fit_id}: receipt is not from a clean official tree")
+        if metadata.get("seed") != fit.seed:
+            blockers.append(f"{fit.fit_id}: receipt seed does not match the fit")
+        run_options = metadata.get("run_options")
+        if (
+            not isinstance(run_options, dict)
+            or run_options.get("require_cuda") is not True
+            or run_options.get("accelerator") == "cpu"
+        ):
+            blockers.append(
+                f"{fit.fit_id}: receipt is not from the official CUDA profile"
+            )
+        expected_runtime_contract = {
+            "precision": benchmark.recipe.precision,
+            "tf32_matmul": True,
+            "cudnn_tf32": True,
+            "cudnn_benchmark": False,
+            "torch_compile": False,
+            "num_workers": benchmark.recipe.num_workers,
+        }
+        if metadata.get("runtime_contract") != expected_runtime_contract:
+            blockers.append(f"{fit.fit_id}: runtime contract does not match the recipe")
+        assignment = metadata.get("assignment_table")
+        rows = assignment.get("assignments") if isinstance(assignment, dict) else None
+        if (
+            not isinstance(assignment, dict)
+            or assignment.get("validated") is not True
+            or not assignment.get("sha256")
+            or not isinstance(rows, list)
+            or not rows
+            or any(
+                not isinstance(row, dict)
+                or any(
+                    type(row.get(key)) is not int
+                    for key in ("split", "seed", "checkpoint")
+                )
+                or row["checkpoint"] != (row["seed"] + row["split"]) % 3
+                for row in rows
+            )
+        ):
+            blockers.append(f"{fit.fit_id}: receipt has no validated assignment table")
+        for field_name in ("configuration", "environment_lock", "preprocessing"):
+            section = metadata.get(field_name)
+            if not isinstance(section, dict) or not section.get("sha256"):
+                blockers.append(f"{fit.fit_id}: receipt has no {field_name} digest")
+        runtime = metadata.get("runtime")
+        backend = runtime.get("backend") if isinstance(runtime, dict) else None
+        if (
+            not isinstance(runtime, dict)
+            or not {
+                "python",
+                "torch",
+                "torch_cuda",
+                "cuda_driver",
+                "libraries",
+            }.issubset(runtime)
+            or runtime.get("cuda_available") is not True
+            or runtime.get("precision") != benchmark.recipe.precision
+            or not isinstance(runtime.get("libraries"), dict)
+            or not runtime["libraries"]
+            or not isinstance(backend, dict)
+            or backend
+            != {
+                "tf32_matmul": True,
+                "cudnn_tf32": True,
+                "cudnn_benchmark": False,
+            }
+            or runtime.get("compile_enabled") is not False
+            or not isinstance(runtime.get("deterministic_algorithms"), bool)
+            or not isinstance(runtime.get("cudnn_deterministic"), bool)
+            or not isinstance(runtime.get("float32_matmul_precision"), str)
+        ):
+            blockers.append(f"{fit.fit_id}: receipt is missing runtime observations")
+        attempts = receipt.get("attempts")
+        if (
+            not isinstance(attempts, list)
+            or not attempts
+            or not all(isinstance(attempt, dict) for attempt in attempts)
+            or attempts[-1].get("state") != RunState.COMPLETED.value
+            or any(
+                attempt.get("state") not in terminal_attempts
+                or not required_metadata.issubset(
+                    attempt.get("metadata", {})
+                    if isinstance(attempt.get("metadata"), dict)
+                    else {}
+                )
+                for attempt in attempts
+            )
+        ):
+            blockers.append(f"{fit.fit_id}: attempt history is incomplete")
+            continue
+        if [attempt.get("attempt") for attempt in attempts] != list(
+            range(1, len(attempts) + 1)
+        ):
+            blockers.append(f"{fit.fit_id}: attempt history has missing attempts")
+        if any(attempt.get("identity") != expected_identity for attempt in attempts):
+            blockers.append(f"{fit.fit_id}: an attempt has a different run identity")
+        if any(
+            any(
+                attempt.get("metadata", {}).get(key) != metadata.get(key)
+                for key in required_metadata
+            )
+            for attempt in attempts
+        ):
+            blockers.append(
+                f"{fit.fit_id}: attempt metadata does not match its receipt"
+            )
+        if attempts[-1].get("metadata", {}).get("runtime") != metadata.get("runtime"):
+            blockers.append(
+                f"{fit.fit_id}: completed attempt runtime does not match receipt"
+            )
+        if any(
+            attempt.get("metadata", {}).get("official") is not True
+            or attempt.get("metadata", {})
+            .get("provenance", {})
+            .get("working_tree_clean")
+            is not True
+            for attempt in attempts
+        ):
+            blockers.append(f"{fit.fit_id}: an attempt came from a dirty tree")
+    return blockers
+
+
+def require_confirmatory_completion(
+    benchmark: Benchmark, store: RunStore, identity_for: IdentityFor
+) -> None:
+    """Stop confirmatory analysis unless every planned fit has an official receipt.
+
+    This is the shared analysis gate: it checks every planned fit, not just those
+    that happened to finish during the latest queue invocation.
+    """
+    blockers = confirmatory_blockers(benchmark, store, identity_for)
+    if blockers:
+        raise ConfirmatoryAnalysisBlockedError(blockers)
 
 
 def _arm_status(states: Sequence[RunState]) -> str:
@@ -97,6 +319,9 @@ class _Queue:
         self.report_path = report_path
         self.plan: tuple[Stage, ...] = build_plan(benchmark)
         self.report = QueueReport()
+        self.report.planned_fits = [
+            fit.fit_id for stage in self.plan for fit in stage.fits
+        ]
         # Counted within one run only: restarting the queue after the owner has
         # fixed the environment starts a fresh count.
         self.consecutive: list[str] = []
@@ -114,6 +339,10 @@ class _Queue:
                 "arms": report.arms,
                 "escalations": report.escalations,
                 "consecutive_failures": self.consecutive,
+                "planned_fits": self.report.planned_fits,
+                "completion_ready": self.report.completion_ready,
+                "confirmatory_blockers": self.report.confirmatory_blockers,
+                "confirmatory_ready": self.report.confirmatory_ready,
             },
         )
 
@@ -152,13 +381,26 @@ class _Queue:
             outcome = self.execute(fit, timeout)
         except Exception as error:
             self.store.settle(fit.fit_id)
-            outcome = Outcome(RunState.FAILED, 0.0, f"{type(error).__name__}: {error}")
+            failure_kind = (
+                FailureKind.INFRASTRUCTURE
+                if isinstance(error, OSError | MemoryError | TimeoutError)
+                else FailureKind.OTHER
+            )
+            outcome = Outcome(
+                RunState.FAILED,
+                0.0,
+                f"{type(error).__name__}: {error}",
+                failure_kind,
+            )
         if (
             outcome.state is RunState.COMPLETED
             and self.store.resolve(fit.fit_id, identity) is not Resume.SKIP
         ):
             return Outcome(
-                RunState.FAILED, outcome.seconds, "ended without a valid receipt"
+                RunState.FAILED,
+                outcome.seconds,
+                "ended without a valid receipt",
+                FailureKind.INFRASTRUCTURE,
             )
         return outcome
 
@@ -190,7 +432,7 @@ class _Queue:
             self.report.attempts[fit.fit_id] = number
             outcome = self.attempt(fit, identity)
             self.save()
-            if outcome.state is RunState.COMPLETED:
+            if outcome.state is RunState.COMPLETED or not outcome.retryable:
                 break
         if outcome.state is RunState.COMPLETED:
             self.consecutive.clear()
@@ -210,6 +452,10 @@ class _Queue:
                 targets = [fit for fit in stage.fits if fit.kind is FitKind.TARGET]
                 states = [self.report.outcomes[fit.fit_id] for fit in targets]
                 self.report.arms[stage.name] = _arm_status(states)
+        self.report.confirmatory_blockers = confirmatory_blockers(
+            self.benchmark, self.store, self.identity_for
+        )
+        self.report.confirmatory_ready = not self.report.confirmatory_blockers
         self.save()
         return self.report
 

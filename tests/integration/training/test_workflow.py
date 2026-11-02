@@ -451,14 +451,14 @@ class _KillAfterEpoch(InProcess):
         super().__init__(workspace)
         self.monkeypatch = monkeypatch
         self.kill_at: int | None = None
-        original = ProgressRecord.on_train_epoch_end
+        original = ProgressRecord.on_validation_end
 
-        def on_train_epoch_end(callback, trainer, module) -> None:
+        def on_validation_end(callback, trainer, module) -> None:
             original(callback, trainer, module)
             if trainer.current_epoch + 1 == self.kill_at:
                 raise _Killed
 
-        monkeypatch.setattr(ProgressRecord, "on_train_epoch_end", on_train_epoch_end)
+        monkeypatch.setattr(ProgressRecord, "on_validation_end", on_validation_end)
 
     def __call__(self, job: Job, timeout: float | None, log: Path) -> ChildResult:
         try:

@@ -9,10 +9,12 @@ Imports of ``jute_disease.data`` and the fit engines are deferred: both import
 ``jute_disease.training``, which exports this module.
 """
 
+import hashlib
 import json
+import subprocess
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -25,8 +27,19 @@ from jute_disease.training.benchmark import (
 )
 from jute_disease.training.inputs import DataInputs
 from jute_disease.training.process import ChildResult, run_child
-from jute_disease.training.queue import Executor, IdentityFor, Outcome
-from jute_disease.training.receipts import Resume, RunState, RunStore, write_json_atomic
+from jute_disease.training.queue import (
+    Executor,
+    FailureKind,
+    IdentityFor,
+    Outcome,
+)
+from jute_disease.training.receipts import (
+    Resume,
+    RunState,
+    RunStore,
+    read_json,
+    write_json_atomic,
+)
 from jute_disease.training.resume import (
     CHECKPOINT_DIR,
     RESUME_FILE,
@@ -60,7 +73,13 @@ class Workspace:
     benchmark: Benchmark = field(init=False, compare=False, repr=False)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "benchmark", load_benchmark(self.benchmark_path))
+        benchmark = load_benchmark(self.benchmark_path)
+        if not self.require_cuda:
+            benchmark = replace(
+                benchmark,
+                recipe=replace(benchmark.recipe, num_workers=0),
+            )
+        object.__setattr__(self, "benchmark", benchmark)
 
     def save(self, path: Path | str) -> None:
         sources = {
@@ -236,7 +255,12 @@ def run_job(workspace: Workspace, job: Job) -> None:
     fit = find_fit(workspace, job.fit_id)
     recipe = workspace.benchmark.recipe
     data = workspace.data
-    stack = verify_stack(require_cuda=workspace.require_cuda)
+    stack = verify_stack(
+        require_cuda=workspace.require_cuda,
+        precision=workspace.benchmark.recipe.precision,
+        accelerator=workspace.accelerator,
+    )
+    write_json_atomic(job.attempt_dir / "runtime.json", stack)
     if fit.kind is FitKind.PREPARE:
         result = prepare_features(fit, recipe, data, workspace.cache_dir)
     elif fit.kind is FitKind.CLASSICAL:
@@ -316,6 +340,207 @@ def _upstream_checkpoint(store: RunStore, fit: FitSpec) -> tuple[Path, str] | No
     return store.run_dir(fit.upstream) / entry["path"], entry["sha256"]
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _git_provenance() -> dict[str, Any]:
+    """Capture the checkout identity without exposing dirty path names."""
+    from jute_disease.config import ROOT_DIR
+
+    try:
+        commit = subprocess.run(
+            ["git", "-C", str(ROOT_DIR), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise RuntimeError("training needs a readable Git commit") from error
+    try:
+        dirty = bool(
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(ROOT_DIR),
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=all",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+    except OSError, subprocess.CalledProcessError:
+        dirty = True
+    return {
+        "commit": commit,
+        "working_tree_clean": not dirty,
+        "official": not dirty,
+    }
+
+
+def load_assignment_table(workspace: Workspace) -> dict[str, Any]:
+    """Read and validate the frozen seed/split to source-checkpoint table."""
+    for directory in (
+        workspace.data.target_dir.resolve(),
+        *workspace.data.target_dir.resolve().parents,
+    ):
+        path = directory / "assignments.json"
+        if not path.is_file():
+            continue
+        raw_bytes = path.read_bytes()
+        rows = json.loads(raw_bytes)
+        if not isinstance(rows, list) or not rows:
+            raise ValueError("assignments.json must contain a non-empty row list")
+        seen: set[tuple[int, int]] = set()
+        for row in rows:
+            if not isinstance(row, dict) or not all(
+                type(row.get(key)) is int for key in ("split", "seed", "checkpoint")
+            ):
+                raise ValueError(
+                    "assignment rows need integer split, seed and checkpoint"
+                )
+            split, seed, checkpoint = row["split"], row["seed"], row["checkpoint"]
+            if (split, seed) in seen:
+                raise ValueError("assignment table has duplicate split/seed rows")
+            if checkpoint != (seed + split) % 3:
+                raise ValueError("assignment table violates rotating checkpoint rule")
+            seen.add((split, seed))
+        return {
+            "present": True,
+            "path": "assignments.json",
+            "sha256": hashlib.sha256(raw_bytes).hexdigest(),
+            "assignments": rows,
+            "validated": True,
+        }
+    return {
+        "present": False,
+        "path": None,
+        "sha256": None,
+        "assignments": [],
+        "validated": False,
+    }
+
+
+def _source_checkpoint_ancestry(store: RunStore, fit: FitSpec) -> list[dict[str, str]]:
+    """List verified source checkpoint bytes from oldest ancestor to parent."""
+    chain: list[dict[str, str]] = []
+    upstream = fit.upstream
+    seen: set[str] = set()
+    while upstream is not None:
+        if upstream in seen:
+            raise UpstreamError(f"cycle in source ancestry at {upstream}")
+        seen.add(upstream)
+        receipt = store.receipt(upstream, missing_ok=True)
+        if receipt is None or "checkpoint" not in receipt.get("artifacts", {}):
+            chain.append(
+                {
+                    "fit_id": upstream,
+                    "identity": "unavailable",
+                    "checkpoint_sha256": "unavailable",
+                }
+            )
+            break
+        chain.append(
+            {
+                "fit_id": upstream,
+                "identity": str(receipt["identity"]),
+                "checkpoint_sha256": str(receipt["artifacts"]["checkpoint"]["sha256"]),
+            }
+        )
+        source_fit = receipt.get("results", {}).get("fit", {})
+        upstream = source_fit.get("upstream") if isinstance(source_fit, dict) else None
+    return list(reversed(chain))
+
+
+def _receipt_context(
+    workspace: Workspace, store: RunStore, fit: FitSpec
+) -> dict[str, Any]:
+    from jute_disease.config import ROOT_DIR
+    from jute_disease.data.transforms import PreprocessingSpec
+
+    config_path = workspace.benchmark_path.resolve()
+    lock_path = ROOT_DIR / "uv.lock"
+    if not lock_path.is_file():
+        raise FileNotFoundError("the locked environment file uv.lock is missing")
+    provenance = _git_provenance()
+    assignments = load_assignment_table(workspace)
+    preprocessing = PreprocessingSpec(size=workspace.benchmark.recipe.image_size)
+    preprocessing_payload = asdict(preprocessing)
+    ancestry = _source_checkpoint_ancestry(store, fit)
+    context = {
+        "provenance": provenance,
+        "official": provenance["official"],
+        "configuration": {
+            "path": config_path.name,
+            "sha256": _sha256_file(config_path),
+        },
+        "environment_lock": {"path": "uv.lock", "sha256": _sha256_file(lock_path)},
+        "preprocessing": {
+            "spec": preprocessing_payload,
+            "sha256": preprocessing.digest(),
+        },
+        "assignment_table": assignments,
+        "source_checkpoint_ancestry": ancestry,
+        "seed": fit.seed,
+        "runtime_contract": {
+            "precision": workspace.benchmark.recipe.precision,
+            "tf32_matmul": True,
+            "cudnn_tf32": True,
+            "cudnn_benchmark": False,
+            "torch_compile": False,
+            "num_workers": workspace.benchmark.recipe.num_workers,
+        },
+        "run_options": {
+            "pretrained": workspace.pretrained,
+            "accelerator": workspace.accelerator,
+            "require_cuda": workspace.require_cuda,
+        },
+    }
+    if fit.kind is FitKind.PREPARE:
+        context["run_options"]["cache_dir"] = str(workspace.cache_dir.resolve())
+    return context
+
+
+def _classify_child_failure(returncode: int, tail: str) -> FailureKind:
+    lowered = tail.lower()
+    if any(
+        marker in lowered
+        for marker in (
+            "nan loss",
+            "inf loss",
+            "infinite loss",
+            "non-finite loss",
+            "nonfinite loss",
+            "divergence detected",
+            "training diverged",
+        )
+    ):
+        return FailureKind.DIVERGENCE
+    if returncode < 0 or any(
+        marker in lowered
+        for marker in (
+            "out of memory",
+            "cuda error: out of memory",
+            "no space left on device",
+            "input/output error",
+            "i/o error",
+            "memoryerror",
+            "killed process",
+            "process was killed",
+        )
+    ):
+        return FailureKind.INFRASTRUCTURE
+    return FailureKind.OTHER
+
+
 def make_identity(workspace: Workspace, store: RunStore) -> IdentityFor:
     """The compatibility identity of a fit, covering its current upstream bytes.
 
@@ -333,20 +558,19 @@ def make_identity(workspace: Workspace, store: RunStore) -> IdentityFor:
             sha = None if upstream is None else upstream[1]
         except UpstreamError:
             sha = "unavailable"
-        environment: dict[str, Any] = {}
-        if fit.kind is FitKind.PREPARE:
-            environment["cache_dir"] = str(workspace.cache_dir.resolve())
-        if fit.kind in CNN_KINDS:
-            environment = {
-                "pretrained": workspace.pretrained,
-                "accelerator": workspace.accelerator,
-            }
+        context = _receipt_context(workspace, store, fit)
         return fit_identity(
             fit,
             workspace.benchmark.recipe,
             manifests,
             sha,
-            environment,
+            context["run_options"],
+            config_sha256=context["configuration"]["sha256"],
+            code_commit=context["provenance"]["commit"],
+            environment_lock_sha256=context["environment_lock"]["sha256"],
+            preprocessing_sha256=context["preprocessing"]["sha256"],
+            assignment_table_sha256=context["assignment_table"]["sha256"],
+            source_checkpoint_ancestry=context["source_checkpoint_ancestry"],
         )
 
     return identity
@@ -370,7 +594,21 @@ def make_executor(
             upstream = _upstream_checkpoint(store, fit)
         except UpstreamError as error:
             return Outcome(RunState.FAILED, 0.0, str(error))
-        run = store.start(fit.fit_id, identity(fit))
+        fit_identity_value = identity(fit)
+        context = _receipt_context(workspace, store, fit)
+        run = store.start(fit.fit_id, fit_identity_value, metadata=context)
+
+        def finish_failure(
+            state: RunState, reason: str, failure_kind: FailureKind | None = None
+        ) -> None:
+            metadata: dict[str, Any] = {}
+            runtime = read_json(run.attempt_dir / "runtime.json")
+            if runtime is not None:
+                metadata["runtime"] = runtime
+            if failure_kind is not None:
+                metadata["failure_kind"] = failure_kind.value
+            run.fail(state, reason, metadata=metadata)
+
         checkpoint_dir = None
         plan = ResumePlan()
         if fit.kind in CNN_KINDS:
@@ -401,16 +639,22 @@ def make_executor(
                 if isinstance(error, Exception)
                 else (RunState.INTERRUPTED)
             )
-            run.fail(state, f"{type(error).__name__}: {error}")
+            finish_failure(state, f"{type(error).__name__}: {error}")
             raise
         if child.timed_out:
             reason = f"exceeded the {timeout:.0f} s limit"
-            run.fail(RunState.TIMED_OUT, reason)
-            return Outcome(RunState.TIMED_OUT, child.seconds, reason)
+            finish_failure(RunState.TIMED_OUT, reason, FailureKind.INFRASTRUCTURE)
+            return Outcome(
+                RunState.TIMED_OUT,
+                child.seconds,
+                reason,
+                FailureKind.INFRASTRUCTURE,
+            )
         if child.returncode != 0:
             reason = f"child exited {child.returncode}: {child.tail}"
-            run.fail(RunState.FAILED, reason)
-            return Outcome(RunState.FAILED, child.seconds, reason)
+            failure_kind = _classify_child_failure(child.returncode, child.tail)
+            finish_failure(RunState.FAILED, reason, failure_kind)
+            return Outcome(RunState.FAILED, child.seconds, reason, failure_kind)
         try:
             payload = json.loads(job.result_path.read_text(encoding="utf-8"))
             artifacts = {
@@ -419,13 +663,20 @@ def make_executor(
             results = payload["results"]
             if plan.refusal is not None:
                 results["training_state"]["refused"] = plan.refusal
-            run.complete(results, artifacts)
+            runtime = results.get("stack")
+            receipt_metadata = {**context, "runtime": runtime}
+            run.complete(results, artifacts, metadata=receipt_metadata)
             if checkpoint_dir is not None:
                 mark_finished(checkpoint_dir, run.identity, run.attempt_dir.name)
         except (OSError, ValueError, KeyError) as error:
             reason = f"child exited 0 without a usable result: {error}"
-            run.fail(RunState.FAILED, reason)
-            return Outcome(RunState.FAILED, child.seconds, reason)
+            failure_kind = (
+                FailureKind.INFRASTRUCTURE
+                if isinstance(error, OSError)
+                else FailureKind.OTHER
+            )
+            finish_failure(RunState.FAILED, reason, failure_kind)
+            return Outcome(RunState.FAILED, child.seconds, reason, failure_kind)
         return Outcome(RunState.COMPLETED, child.seconds)
 
     return execute

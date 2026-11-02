@@ -16,11 +16,14 @@ import pytest
 from jute_disease.config import BENCHMARK_CONFIG
 from jute_disease.training import (
     Benchmark,
+    ConfirmatoryAnalysisBlockedError,
+    FailureKind,
     FitKind,
     FitSpec,
     RunState,
     RunStore,
     load_benchmark,
+    require_confirmatory_completion,
 )
 from jute_disease.training.queue import (
     MAX_CONSECUTIVE_FAILURES,
@@ -47,6 +50,67 @@ class FixedClock:
         return datetime(2026, 11, 1, 9, 0)
 
 
+def _receipt_metadata(
+    *,
+    seed: int,
+    official: bool = True,
+    assignment_valid: bool = True,
+) -> dict:
+    return {
+        "official": official,
+        "seed": seed,
+        "provenance": {
+            "commit": "test-commit",
+            "working_tree_clean": official,
+            "official": official,
+        },
+        "configuration": {"sha256": "config-sha"},
+        "environment_lock": {"sha256": "lock-sha"},
+        "preprocessing": {"sha256": "preprocessing-sha"},
+        "assignment_table": {
+            "sha256": "assignment-sha" if assignment_valid else None,
+            "validated": assignment_valid,
+            "assignments": [
+                {"split": 0, "seed": 42, "checkpoint": 0},
+                {"split": 0, "seed": 1337, "checkpoint": 2},
+                {"split": 0, "seed": 7, "checkpoint": 1},
+            ],
+        },
+        "source_checkpoint_ancestry": [],
+        "runtime_contract": {
+            "precision": "bf16-mixed",
+            "tf32_matmul": True,
+            "cudnn_tf32": True,
+            "cudnn_benchmark": False,
+            "torch_compile": False,
+            "num_workers": 8,
+        },
+        "run_options": {
+            "pretrained": True,
+            "accelerator": "auto",
+            "require_cuda": True,
+        },
+        "runtime": {
+            "python": "3.14.0",
+            "torch": "2.6.0",
+            "torch_cuda": "12.6",
+            "cuda_driver": "570.0",
+            "cuda_available": True,
+            "precision": "bf16-mixed",
+            "libraries": {"torchvision": "0.21.0"},
+            "backend": {
+                "tf32_matmul": True,
+                "cudnn_tf32": True,
+                "cudnn_benchmark": False,
+            },
+            "compile_enabled": False,
+            "deterministic_algorithms": False,
+            "cudnn_deterministic": False,
+            "float32_matmul_precision": "highest",
+        },
+    }
+
+
 @dataclass
 class Harness:
     store: RunStore
@@ -56,6 +120,9 @@ class Harness:
     raising: Counter[str] = field(default_factory=Counter)
     no_receipt: set[str] = field(default_factory=set)
     identity_tag: str = "v1"
+    failure_kind: FailureKind = FailureKind.INFRASTRUCTURE
+    official: bool = True
+    assignment_valid: bool = True
     calls: list[str] = field(default_factory=list)
     seeds: list[int] = field(default_factory=list)
     timeouts: dict[str, float] = field(default_factory=dict)
@@ -74,22 +141,56 @@ class Harness:
         try:
             if self.raising[fit.fit_id]:
                 self.raising[fit.fit_id] -= 1
-                self.store.start(fit.fit_id, self.identity(fit))
-                raise RuntimeError("launcher crashed")
-            run = self.store.start(fit.fit_id, self.identity(fit))
+                self.store.start(
+                    fit.fit_id,
+                    self.identity(fit),
+                    metadata=_receipt_metadata(
+                        seed=fit.seed,
+                        official=self.official,
+                        assignment_valid=self.assignment_valid,
+                    ),
+                )
+                raise OSError("launcher crashed")
+            run = self.store.start(
+                fit.fit_id,
+                self.identity(fit),
+                metadata=_receipt_metadata(
+                    seed=fit.seed,
+                    official=self.official,
+                    assignment_valid=self.assignment_valid,
+                ),
+            )
             if self.timing_out[fit.fit_id]:
                 self.timing_out[fit.fit_id] -= 1
                 run.fail(RunState.TIMED_OUT, f"exceeded {timeout:.0f} s")
-                return Outcome(RunState.TIMED_OUT, timeout, "timed out")
+                return Outcome(
+                    RunState.TIMED_OUT,
+                    timeout,
+                    "timed out",
+                    FailureKind.INFRASTRUCTURE,
+                )
             if self.failing[fit.fit_id]:
                 self.failing[fit.fit_id] -= 1
                 run.fail(RunState.FAILED, "boom")
-                return Outcome(RunState.FAILED, 1.0, "boom")
+                return Outcome(
+                    RunState.FAILED,
+                    1.0,
+                    "boom",
+                    failure_kind=self.failure_kind,
+                )
             if fit.fit_id in self.no_receipt:
                 return Outcome(RunState.COMPLETED, 1.0)
             artifact = run.attempt_dir / "model.bin"
             artifact.write_bytes(fit.fit_id.encode())
-            run.complete({"epochs": 50}, artifacts={"model": artifact})
+            run.complete(
+                {"epochs": 50},
+                artifacts={"model": artifact},
+                metadata=_receipt_metadata(
+                    seed=fit.seed,
+                    official=self.official,
+                    assignment_valid=self.assignment_valid,
+                ),
+            )
             return Outcome(RunState.COMPLETED, 1.0)
         finally:
             self.active -= 1
@@ -120,7 +221,22 @@ def _one_seed(benchmark: Benchmark) -> Benchmark:
 
 
 def test_outcome_carries_no_metric_fields() -> None:
-    assert {f.name for f in fields(Outcome)} == {"state", "seconds", "reason"}
+    assert {f.name for f in fields(Outcome)} == {
+        "state",
+        "seconds",
+        "reason",
+        "failure_kind",
+    }
+
+
+def test_only_infrastructure_outcomes_are_retryable() -> None:
+    assert not Outcome(RunState.TIMED_OUT, 1.0).retryable
+    assert Outcome(
+        RunState.TIMED_OUT, 1.0, failure_kind=FailureKind.INFRASTRUCTURE
+    ).retryable
+    assert not Outcome(
+        RunState.FAILED, 1.0, failure_kind=FailureKind.DIVERGENCE
+    ).retryable
 
 
 def test_policy_is_one_retry_and_an_abort_after_three_failures() -> None:
@@ -146,6 +262,84 @@ def test_runs_core_then_classical_then_plantvillage_then_plantdoc(
     assert report.arms == {"plantvillage": "complete", "plantdoc": "complete"}
     assert report.escalations == []
     assert harness.overlapped is False
+    assert report.completion_ready is True
+    assert report.confirmatory_ready is True
+
+
+def test_any_incomplete_planned_fit_blocks_confirmatory_analysis(
+    harness: Harness,
+) -> None:
+    harness.failing[CORE[0]] = 1
+    harness.failure_kind = FailureKind.OTHER
+
+    report = harness.run()
+
+    assert report.completion_ready is False
+    assert report.confirmatory_ready is False
+    with pytest.raises(ConfirmatoryAnalysisBlockedError, match=CORE[0]):
+        require_confirmatory_completion(
+            load_benchmark(BENCHMARK_CONFIG), harness.store, harness.identity
+        )
+
+
+@pytest.mark.parametrize(
+    ("official", "assignment_valid"), [(False, True), (True, False)]
+)
+def test_dirty_or_unbound_runs_block_confirmatory_analysis(
+    harness: Harness, official: bool, assignment_valid: bool
+) -> None:
+    harness.official = official
+    harness.assignment_valid = assignment_valid
+
+    report = harness.run()
+
+    assert report.completion_ready is True
+    assert report.confirmatory_ready is False
+    with pytest.raises(ConfirmatoryAnalysisBlockedError):
+        require_confirmatory_completion(
+            load_benchmark(BENCHMARK_CONFIG), harness.store, harness.identity
+        )
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ["identity", "metadata", "attempt_number", "state", "runtime", "cpu_profile"],
+)
+def test_confirmatory_gate_checks_every_attempt_binding(
+    harness: Harness, tamper: str
+) -> None:
+    harness.failing[CORE[0]] = 1
+    report = harness.run()
+    assert report.confirmatory_ready is True
+
+    receipt_path = harness.store.run_dir(CORE[0]) / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    first_attempt = receipt["attempts"][0]
+    if tamper == "identity":
+        first_attempt["identity"] = "another-run"
+    elif tamper == "metadata":
+        first_attempt["metadata"]["configuration"]["sha256"] = "another-config"
+    elif tamper == "attempt_number":
+        first_attempt["attempt"] = 3
+    elif tamper == "state":
+        state_path = harness.store.run_dir(CORE[0]) / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["state"] = "failed"
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+    elif tamper == "runtime":
+        receipt["metadata"]["runtime"]["backend"]["tf32_matmul"] = False
+        receipt["attempts"][-1]["metadata"]["runtime"]["backend"]["tf32_matmul"] = False
+    else:
+        receipt["metadata"]["run_options"]["require_cuda"] = False
+        for attempt in receipt["attempts"]:
+            attempt["metadata"]["run_options"]["require_cuda"] = False
+    if tamper != "state":
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    with pytest.raises(ConfirmatoryAnalysisBlockedError):
+        require_confirmatory_completion(
+            load_benchmark(BENCHMARK_CONFIG), harness.store, harness.identity
+        )
 
 
 def test_every_step_runs_under_its_configured_timeout(harness: Harness) -> None:
@@ -193,10 +387,31 @@ def test_a_timed_out_fit_is_retried_once(harness: Harness) -> None:
 
 def test_an_executor_crash_settles_the_run_and_is_retried(harness: Harness) -> None:
     harness.raising[CORE[0]] = 1
+    harness.failure_kind = FailureKind.INFRASTRUCTURE
     report = harness.run()
     assert harness.calls.count(CORE[0]) == 2
     assert report.outcomes[CORE[0]] is RunState.COMPLETED
     assert harness.store.state(CORE[0]) is RunState.COMPLETED
+
+
+def test_non_infrastructure_failure_is_not_retried(harness: Harness) -> None:
+    harness.failing[CORE[0]] = 2
+    harness.failure_kind = FailureKind.OTHER
+
+    report = harness.run()
+
+    assert harness.calls.count(CORE[0]) == 1
+    assert report.outcomes[CORE[0]] is RunState.FAILED
+
+
+def test_divergence_is_not_retried(harness: Harness) -> None:
+    harness.failing[CORE[0]] = 2
+    harness.failure_kind = FailureKind.DIVERGENCE
+
+    report = harness.run()
+
+    assert harness.calls.count(CORE[0]) == 1
+    assert report.outcomes[CORE[0]] is RunState.FAILED
 
 
 def test_completion_without_a_valid_receipt_is_a_failure(harness: Harness) -> None:

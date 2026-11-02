@@ -54,37 +54,53 @@ class EpochTimer(Callback):
         self.seconds.append(time.perf_counter() - self._start)
 
 
-class ProgressRecord(Callback):
-    """After each epoch, record the hash of the saved full training state.
+class ProgressRecord(ModelCheckpoint):
+    """Checkpoint after early stopping updates, then record its exact bytes."""
 
-    The checkpoint callback has already written ``last.ckpt`` when validation
-    ended, so the record names the bytes a restarted attempt would load.
-    """
-
-    def __init__(self, directory: Path, attempt: str) -> None:
+    def __init__(self, directory: Path | str, attempt: str) -> None:
+        super().__init__(
+            dirpath=str(directory),
+            filename="best-{epoch:02d}",
+            monitor="val_loss",
+            mode="min",
+            save_top_k=1,
+            save_last=True,
+        )
         self.directory = directory
         self.attempt = attempt
 
-    def on_train_epoch_end(self, trainer: Trainer, pl_module: Any) -> None:
-        record_progress(self.directory, self.attempt, trainer.current_epoch + 1)
+    def on_validation_end(self, trainer: Trainer, pl_module: Any) -> None:
+        super().on_validation_end(trainer, pl_module)
+        if not trainer.sanity_checking:
+            record_progress(self.directory, self.attempt, trainer.current_epoch + 1)
 
 
 def training_callbacks(
-    recipe: Recipe, checkpoint_dir: Path | str, *, resumable: bool = False
+    recipe: Recipe,
+    checkpoint_dir: Path | str,
+    *,
+    resumable: bool = False,
+    attempt: str | None = None,
 ) -> list[Callback]:
     """Best-validation-loss checkpointing and patience-based early stopping.
 
     A resumable fit also keeps ``last.ckpt``, the full state a restart loads.
     """
-    return [
-        ModelCheckpoint(
+    if resumable and attempt is None:
+        raise ValueError("a resumable checkpoint needs its attempt name")
+    checkpoint: ModelCheckpoint = (
+        ProgressRecord(checkpoint_dir, attempt)
+        if resumable and attempt is not None
+        else ModelCheckpoint(
             dirpath=str(checkpoint_dir),
             filename="best-{epoch:02d}",
             monitor="val_loss",
             mode="min",
             save_top_k=1,
-            save_last=resumable,
-        ),
+        )
+    )
+    return [
+        checkpoint,
         EarlyStopping(
             monitor="val_loss",
             mode="min",
@@ -244,11 +260,14 @@ def fit_cnn(
     timer = EpochTimer()
     directory = Path(checkpoint_dir) if checkpoint_dir else attempt / CHECKPOINT_DIR
     callbacks = [
-        *training_callbacks(recipe, directory, resumable=checkpoint_dir is not None),
+        *training_callbacks(
+            recipe,
+            directory,
+            resumable=checkpoint_dir is not None,
+            attempt=attempt.name if checkpoint_dir is not None else None,
+        ),
         timer,
     ]
-    if checkpoint_dir is not None:
-        callbacks.append(ProgressRecord(directory, attempt.name))
     stopping = next(c for c in callbacks if isinstance(c, EarlyStopping))
     selection = next(c for c in callbacks if isinstance(c, ModelCheckpoint))
     trainer = Trainer(

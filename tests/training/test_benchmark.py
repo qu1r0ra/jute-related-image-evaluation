@@ -8,7 +8,9 @@ import pytest
 from jute_disease.config import BENCHMARK_CONFIG
 from jute_disease.training import (
     Benchmark,
+    DataInputs,
     FitKind,
+    Workspace,
     build_plan,
     fit_identity,
     load_benchmark,
@@ -32,9 +34,31 @@ def test_recipe_matches_the_frozen_specification(benchmark) -> None:
     assert recipe.seeds == (42, 1337, 7)
     assert recipe.source_seed == 42
     assert recipe.compile_model is False
-    assert recipe.num_workers == 0
+    assert recipe.precision == "bf16-mixed"
+    assert recipe.num_workers == 8
     assert recipe.weighted_sampler is True
     assert recipe.effective_batch == 32
+
+
+def test_cpu_smoke_workspace_uses_zero_workers(tmp_path) -> None:
+    arguments = {
+        "benchmark_path": BENCHMARK_CONFIG,
+        "data": DataInputs(
+            image_root=tmp_path,
+            target_dir=tmp_path,
+            sources={},
+        ),
+        "runs_dir": tmp_path / "runs",
+        "cache_dir": tmp_path / "cache",
+        "pretrained": False,
+        "accelerator": "auto",
+    }
+
+    official = Workspace(**arguments, require_cuda=True)
+    smoke = Workspace(**arguments, require_cuda=False)
+
+    assert official.benchmark.recipe.num_workers == 8
+    assert smoke.benchmark.recipe.num_workers == 0
 
 
 def test_ten_classical_fits_cover_every_estimator_on_both_feature_sets(
@@ -141,11 +165,53 @@ def test_identity_is_stable_and_sensitive_to_every_input(benchmark) -> None:
     )
     assert base != fit_identity(
         fit,
+        replace(benchmark.recipe, num_workers=0),
+        manifests={"target": "m1"},
+        upstream_sha256=None,
+    )
+    assert base != fit_identity(
+        fit,
         benchmark.recipe,
         manifests={"target": "m1"},
         upstream_sha256=None,
         environment={"pretrained": True},
     )
+
+
+def test_identity_binds_configuration_and_code_commit(benchmark) -> None:
+    fit = benchmark.fits()[0]
+    arguments = {
+        "fit": fit,
+        "recipe": benchmark.recipe,
+        "manifests": {"target": "manifest-sha"},
+        "upstream_sha256": None,
+        "config_sha256": "config-sha",
+        "code_commit": "commit-a",
+        "environment_lock_sha256": "lock-sha",
+        "preprocessing_sha256": "preprocess-sha",
+        "assignment_table_sha256": "assignment-sha",
+        "source_checkpoint_ancestry": [
+            {
+                "fit_id": "source/a",
+                "identity": "source-identity",
+                "checkpoint_sha256": "checkpoint-sha",
+            }
+        ],
+    }
+
+    base = fit_identity(**arguments)
+
+    assert base == fit_identity(**arguments)
+    assert base != fit_identity(**(arguments | {"config_sha256": "config-b"}))
+    assert base != fit_identity(**(arguments | {"code_commit": "commit-b"}))
+    assert base != fit_identity(**(arguments | {"environment_lock_sha256": "lock-b"}))
+    assert base != fit_identity(
+        **(arguments | {"preprocessing_sha256": "preprocess-b"})
+    )
+    assert base != fit_identity(
+        **(arguments | {"assignment_table_sha256": "assignment-b"})
+    )
+    assert base != fit_identity(**(arguments | {"source_checkpoint_ancestry": []}))
 
 
 def test_unknown_configuration_keys_are_rejected(tmp_path) -> None:
@@ -165,6 +231,17 @@ def test_compilation_cannot_be_enabled(tmp_path) -> None:
     path = tmp_path / "benchmark.json"
     path.write_text(text, encoding="utf-8")
     with pytest.raises(ValueError, match="compile"):
+        load_benchmark(path)
+
+
+def test_cuda_recipe_requires_bf16_mixed_precision(tmp_path) -> None:
+    text = BENCHMARK_CONFIG.read_text(encoding="utf-8").replace(
+        '"precision": "bf16-mixed"', '"precision": "16-mixed"', 1
+    )
+    path = tmp_path / "benchmark.json"
+    path.write_text(text, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="bf16-mixed"):
         load_benchmark(path)
 
 
