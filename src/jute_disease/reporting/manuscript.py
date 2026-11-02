@@ -53,6 +53,19 @@ _CLAIM_LISTS = {
     ),
 }
 ALLOWED_FIGURE_LICENSES = {"CC0", "CC BY", "CC BY-SA"}
+_BASE_EXPORT_OUTPUTS = (
+    "configuration.json",
+    "source-metadata.json",
+    "macros.json",
+    "macros.tex",
+    "support.csv",
+    "support.png",
+    "figure-sources.json",
+    "compute-report.json",
+    "compute.csv",
+    "classical-tuning-budget.csv",
+    "rebuild-kit.json",
+)
 _EXPORT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 
 
@@ -1038,19 +1051,9 @@ def export_manuscript(
         os.path.relpath(receipt_path.resolve(), output_dir.resolve())
     ).as_posix()
 
-    output_names = (
-        "configuration.json",
-        "source-metadata.json",
-        "macros.json",
-        "macros.tex",
-        "support.csv",
-        "support.png",
-        "figure-sources.json",
-        "compute-report.json",
-        "compute.csv",
-        "classical-tuning-budget.csv",
-        "rebuild-kit.json",
-    ) + (("evaluation-metrics.csv",) if evaluation_bytes is not None else ())
+    output_names = _BASE_EXPORT_OUTPUTS + (
+        ("evaluation-metrics.csv",) if evaluation_bytes is not None else ()
+    )
     output_names += tuple(sorted(evaluation_artifact_outputs))
     output_names += tuple(sorted(statistics_outputs))
     metadata: dict[str, Any] = {
@@ -1436,10 +1439,18 @@ def validate_export(output_dir: Path) -> dict[str, Any]:
     if not isinstance(outputs, dict) or any(
         not isinstance(name, str)
         or not isinstance(record, dict)
+        or record.get("path") != name
         or not isinstance(record.get("sha256"), str)
         for name, record in outputs.items()
     ):
-        raise ValueError("export output metadata is malformed")
+        raise ValueError("export output metadata is malformed or has a mismatched path")
+    expected_output_names = set(_BASE_EXPORT_OUTPUTS)
+    if evaluation_source is not None:
+        expected_output_names.add("evaluation-metrics.csv")
+    expected_output_names.update(evaluation_artifact_outputs)
+    expected_output_names.update(statistics_outputs)
+    if set(outputs) != expected_output_names:
+        raise ValueError("export output inventory does not match generated artifacts")
     for name, record in outputs.items():
         if _sha256_file(output_dir / name) != record["sha256"]:
             raise ValueError(f"export output changed after export: {name}")

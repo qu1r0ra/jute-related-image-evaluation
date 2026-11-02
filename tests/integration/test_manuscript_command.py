@@ -235,6 +235,20 @@ def test_fixture_freezes_exports_rebuilds_and_checks_macros(tmp_path: Path) -> N
     assert malformed_export_check.returncode != 0
     assert "export metadata must be a JSON object" in malformed_export_check.stderr
     assert "Traceback" not in malformed_export_check.stderr
+    incomplete_metadata = json.loads(export_metadata_bytes)
+    incomplete_metadata["outputs"].pop("support.png")
+    export_metadata_path.write_text(json.dumps(incomplete_metadata), encoding="utf-8")
+    incomplete_export_check = _run("manuscript", "check", str(export_dir))
+    assert incomplete_export_check.returncode != 0
+    assert "output inventory does not match" in incomplete_export_check.stderr
+    mismatched_path_metadata = json.loads(export_metadata_bytes)
+    mismatched_path_metadata["outputs"]["support.png"]["path"] = "elsewhere.png"
+    export_metadata_path.write_text(
+        json.dumps(mismatched_path_metadata), encoding="utf-8"
+    )
+    mismatched_path_check = _run("manuscript", "check", str(export_dir))
+    assert mismatched_path_check.returncode != 0
+    assert "mismatched path" in mismatched_path_check.stderr
     export_metadata_path.write_bytes(export_metadata_bytes)
 
     metadata = json.loads((export_dir / "export.json").read_text(encoding="utf-8"))
