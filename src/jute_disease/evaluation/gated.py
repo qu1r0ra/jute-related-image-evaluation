@@ -8,7 +8,8 @@ import os
 import subprocess
 import tempfile
 from collections import Counter, defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,7 +19,6 @@ from uuid import uuid4
 import numpy as np
 from PIL import Image
 
-from jute_disease.evaluation.statistics import wilson_interval
 from jute_disease.training import load_benchmark
 
 SELECTION_FORMAT = "jute-evaluation-selection-v1"
@@ -57,42 +57,41 @@ def _read_envelope(
     return payload
 
 
-def _write_immutable(path: Path, format_name: str, payload: dict[str, Any]) -> str:
-    path = Path(path)
+@contextmanager
+def _durable_temporary_file(path: Path, content: str) -> Iterator[Path]:
     path.parent.mkdir(parents=True, exist_ok=True)
-    digest = _digest(payload)
-    envelope = {"format": format_name, "record": payload, "sha256": digest}
-    content = json.dumps(envelope, indent=2, sort_keys=True, allow_nan=False) + "\n"
     handle, temporary = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    temporary_path = Path(temporary)
     try:
         with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
+        yield temporary_path
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def _write_immutable(path: Path, format_name: str, payload: dict[str, Any]) -> str:
+    path = Path(path)
+    digest = _digest(payload)
+    envelope = {"format": format_name, "record": payload, "sha256": digest}
+    content = json.dumps(envelope, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    with _durable_temporary_file(path, content) as temporary:
         try:
             # Hard-link publication is exclusive: an existing record is never replaced.
             os.link(temporary, path)
         except FileExistsError as error:
             raise GatedEvaluationError(
-                f"{description_name(path)} already exists; create a new freeze"
+                f"{record_description(path)} already exists; create a new freeze"
             ) from error
         return digest
-    finally:
-        Path(temporary).unlink(missing_ok=True)
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any] | list[Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     content = json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n"
-    handle, temporary = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-    try:
-        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
+    with _durable_temporary_file(path, content) as temporary:
         os.replace(temporary, path)
-    finally:
-        Path(temporary).unlink(missing_ok=True)
 
 
 def _append_test_read_event(path: Path, event: dict[str, Any]) -> None:
@@ -106,8 +105,8 @@ def _append_test_read_event(path: Path, event: dict[str, Any]) -> None:
         os.close(descriptor)
 
 
-def description_name(path: Path) -> str:
-    """Name a protected file in a concise error message."""
+def record_description(path: Path) -> str:
+    """Describe a protected record in a concise error message."""
     return "selection record" if path.name == "selection.json" else "record"
 
 
@@ -817,6 +816,8 @@ def _scene_report(
     predictions: list[str],
     classes: tuple[str, ...],
 ) -> dict[str, Any]:
+    from jute_disease.evaluation import wilson_interval
+
     rows: dict[str, Any] = {}
     for scene in sorted(set(scenes)):
         indices = [index for index, value in enumerate(scenes) if value == scene]
