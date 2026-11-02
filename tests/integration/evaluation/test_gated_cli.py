@@ -210,6 +210,28 @@ def test_cli_refuses_test_read_without_both_records_then_evaluates_fixture(
         main(args)
 
 
+def test_matrix_freeze_translates_file_errors_to_cli_exit(
+    inputs: Inputs, tmp_path: Path
+) -> None:
+    outcomes = tmp_path / "validation-114.json"
+    _outcomes(outcomes)
+    with pytest.raises(SystemExit, match="matrix freeze blocked:.*benchmark.json"):
+        main(
+            [
+                "evaluate",
+                "matrix-freeze",
+                "--validation-outcomes",
+                str(outcomes),
+                "--benchmark",
+                str(tmp_path / "missing-benchmark.json"),
+                "--target-dir",
+                str(inputs.target_dir),
+                "--output",
+                str(tmp_path / "selection.json"),
+            ]
+        )
+
+
 def test_gated_api_runs_hash_bound_artifacts_on_masked_views(
     inputs: Inputs, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

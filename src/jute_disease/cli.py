@@ -60,7 +60,6 @@ from jute_disease.data import (
     write_thresholds,
 )
 from jute_disease.evaluation import (
-    GatedEvaluationError,
     evaluate_gated_test,
     write_fixture_run_record,
     write_matrix_freeze,
@@ -510,7 +509,7 @@ def _evaluate_matrix_freeze(args: argparse.Namespace) -> None:
             target_dir=args.target_dir,
             output_path=args.output,
         )
-    except GatedEvaluationError as error:
+    except (OSError, ValueError) as error:
         raise SystemExit(f"matrix freeze blocked: {error}") from error
     _print_json({"selection": str(path), "sha256": digest})
 
@@ -518,7 +517,7 @@ def _evaluate_matrix_freeze(args: argparse.Namespace) -> None:
 def _evaluate_fixture_run_record(args: argparse.Namespace) -> None:
     try:
         path, digest = write_fixture_run_record(args.selection, args.output)
-    except GatedEvaluationError as error:
+    except (OSError, ValueError) as error:
         raise SystemExit(f"fixture run record blocked: {error}") from error
     _print_json({"run_record": str(path), "sha256": digest})
 
@@ -526,7 +525,7 @@ def _evaluate_fixture_run_record(args: argparse.Namespace) -> None:
 def _evaluate_run_record(args: argparse.Namespace) -> None:
     try:
         path, digest = write_run_record(args.selection, args.model_index, args.output)
-    except GatedEvaluationError as error:
+    except (OSError, ValueError) as error:
         raise SystemExit(f"run record blocked: {error}") from error
     _print_json({"run_record": str(path), "sha256": digest})
 
@@ -542,7 +541,7 @@ def _evaluate_gated(args: argparse.Namespace) -> None:
             fixture=args.fixture,
             mask_checkpoint=args.sam_checkpoint,
         )
-    except GatedEvaluationError as error:
+    except (OSError, ValueError) as error:
         raise SystemExit(f"evaluation blocked: {error}") from error
     _print_json({"evaluation": str(path)})
 

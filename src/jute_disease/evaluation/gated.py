@@ -19,7 +19,7 @@ import numpy as np
 from PIL import Image
 
 from jute_disease.evaluation.statistics import wilson_interval
-from jute_disease.training.benchmark import load_benchmark
+from jute_disease.training import load_benchmark
 
 SELECTION_FORMAT = "jute-evaluation-selection-v1"
 RUN_FORMAT = "jute-evaluation-run-v1"
@@ -1388,22 +1388,40 @@ def evaluate_gated_test(
             if key != "seed"
         }
         seed_metrics: dict[str, dict[str, Any]] = {}
-        if group_spec["kind"] == "cue":
-            family_stats_by_seed = []
-            predicted_counts_by_seed = []
-            for fit_id in fit_ids:
-                seed = selection["selection"]["model_specs"][fit_id]["seed"]
-                predicted = predictions_for(fit_id, entries)
-                seed_metrics[str(seed)] = _metrics(entries, predicted, classes)
-                current_families, family_stats, family_predictions, _ = (
-                    _family_metric_counts(entries, predicted, classes)
+        family_stats_by_seed = []
+        predicted_counts_by_seed = []
+        retained_stats_by_seed = []
+        retained_seed_metrics: dict[str, dict[str, Any]] = {}
+        retained_family_order: list[str] | None = None
+        is_cue = group_spec["kind"] == "cue"
+        for fit_id in fit_ids:
+            seed = selection["selection"]["model_specs"][fit_id]["seed"]
+            predicted = predictions_for(fit_id, entries)
+            seed_metrics[str(seed)] = _metrics(entries, predicted, classes)
+            current_families, family_stats, family_predictions, _ = (
+                _family_metric_counts(entries, predicted, classes)
+            )
+            if current_families != family_ids:
+                raise GatedEvaluationError("border family order changed between seeds")
+            family_stats_by_seed.append(family_stats)
+            predicted_counts_by_seed.append(family_predictions)
+            if not is_cue:
+                retained_predictions = [predicted[index] for index in retained]
+                retained_seed_metrics[str(seed)] = _metrics(
+                    retained_entries, retained_predictions, classes
                 )
-                if current_families != family_ids:
+                current_retained_families, retained_stats, _, _ = _family_metric_counts(
+                    retained_entries, retained_predictions, classes
+                )
+                if retained_family_order is None:
+                    retained_family_order = current_retained_families
+                elif current_retained_families != retained_family_order:
                     raise GatedEvaluationError(
-                        "border family order changed between seeds"
+                        "retained family order changed between border seeds"
                     )
-                family_stats_by_seed.append(family_stats)
-                predicted_counts_by_seed.append(family_predictions)
+                retained_stats_by_seed.append(retained_stats)
+
+        if is_cue:
             intervals = _hierarchical_intervals(
                 np.stack(family_stats_by_seed),
                 seed_draws,
@@ -1431,40 +1449,9 @@ def evaluate_gated_test(
             }
             continue
 
-        full_stats_by_seed = []
-        predicted_counts_by_seed = []
-        retained_stats_by_seed = []
-        retained_seed_metrics: dict[str, dict[str, Any]] = {}
-        retained_family_order: list[str] | None = None
-        for fit_id in fit_ids:
-            seed = selection["selection"]["model_specs"][fit_id]["seed"]
-            predicted = predictions_for(fit_id, entries)
-            seed_metrics[str(seed)] = _metrics(entries, predicted, classes)
-            current_families, family_stats, family_predictions, _ = (
-                _family_metric_counts(entries, predicted, classes)
-            )
-            if current_families != family_ids:
-                raise GatedEvaluationError("border family order changed between seeds")
-            full_stats_by_seed.append(family_stats)
-            predicted_counts_by_seed.append(family_predictions)
-            retained_predictions = [predicted[index] for index in retained]
-            retained_seed_metrics[str(seed)] = _metrics(
-                retained_entries, retained_predictions, classes
-            )
-            current_retained_families, retained_stats, _, _ = _family_metric_counts(
-                retained_entries, retained_predictions, classes
-            )
-            if retained_family_order is None:
-                retained_family_order = current_retained_families
-            elif current_retained_families != retained_family_order:
-                raise GatedEvaluationError(
-                    "retained family order changed between border seeds"
-                )
-            retained_stats_by_seed.append(retained_stats)
-
         if retained_family_order != retained_family_ids:
             raise GatedEvaluationError("retained family order differs from the probe")
-        full_stats_array = np.stack(full_stats_by_seed)
+        full_stats_array = np.stack(family_stats_by_seed)
         retained_stats_array = np.stack(retained_stats_by_seed)
         full_intervals = _hierarchical_intervals(
             full_stats_array,
