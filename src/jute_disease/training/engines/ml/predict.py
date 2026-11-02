@@ -135,7 +135,7 @@ def predict_ml(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--target-dir",
         type=Path,
-        default=MANIFEST_DIR,
+        required=True,
         help="Frozen target manifest used to guard held-out image paths.",
     )
     parser.add_argument(

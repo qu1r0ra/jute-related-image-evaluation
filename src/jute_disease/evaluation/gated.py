@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import subprocess
 import tempfile
@@ -52,6 +53,74 @@ def _is_sha256(value: Any) -> bool:
         and len(value) == 64
         and all(char in "0123456789abcdef" for char in value)
     )
+
+
+def _hyperparameter_key(model_spec: dict[str, Any]) -> str | None:
+    """Return the #106 tuning receipt that supplies a model's frozen choice."""
+    if model_spec.get("kind") == "classical":
+        if "configuration" in model_spec:
+            return None
+        return (
+            f"classical/tune/{model_spec['pool']}/"
+            f"{model_spec['estimator']}-{model_spec['features']}"
+        )
+    if model_spec.get("kind") == "cnn":
+        return f"cnn/tune/{model_spec['system']}/pool-{model_spec['pool']}"
+    return None
+
+
+def _selection_choice_matches(
+    model_spec: dict[str, Any], selected_hyperparameters: dict[str, Any]
+) -> bool:
+    """Check that the fit's bound choice is the one recorded from validation."""
+    kind = model_spec.get("kind")
+    if kind == "cue":
+        return (
+            "selected_parameters" not in model_spec
+            and "selected_learning_rate" not in model_spec
+        )
+    if kind == "classical" and "configuration" in model_spec:
+        return isinstance(model_spec.get("parameters"), dict) and model_spec.get(
+            "selected_parameters"
+        ) == model_spec.get("parameters")
+    try:
+        key = _hyperparameter_key(model_spec)
+    except KeyError:
+        return False
+    if key is None or key not in selected_hyperparameters:
+        return False
+    choice = selected_hyperparameters[key]
+    if kind == "classical":
+        return (
+            isinstance(choice, dict)
+            and model_spec.get("validation_hyperparameters_key") == key
+            and model_spec.get("selected_parameters") == choice
+        )
+    return (
+        kind == "cnn"
+        and isinstance(choice, int | float)
+        and not isinstance(choice, bool)
+        and math.isfinite(choice)
+        and choice > 0
+        and model_spec.get("validation_hyperparameters_key") == key
+        and model_spec.get("selected_learning_rate") == choice
+    )
+
+
+def _receipt_choice_matches(
+    model_spec: dict[str, Any], results: dict[str, Any]
+) -> bool:
+    """Verify the completed fit used the choice bound into its model spec."""
+    if model_spec.get("kind") == "classical":
+        return results.get("selected_parameters") == model_spec.get(
+            "selected_parameters"
+        )
+    if model_spec.get("kind") == "cnn":
+        recipe = results.get("recipe")
+        return isinstance(recipe, dict) and recipe.get(
+            "learning_rate"
+        ) == model_spec.get("selected_learning_rate")
+    return model_spec.get("kind") == "cue"
 
 
 def _pipeline_code_tree_sha256(root: Path | None = None) -> str:
@@ -235,6 +304,7 @@ def _read_selection(path: Path) -> dict[str, Any]:
             != selected_hyperparameters
             or spec.get("validation_hyperparameters_sha256")
             != selected_hyperparameters_sha256
+            or not _selection_choice_matches(spec, selected_hyperparameters)
             for spec in model_specs.values()
         )
     ):
@@ -310,6 +380,16 @@ def probe_plan(benchmark_path: Path | str) -> dict[str, Any]:
     pools, policies = list(benchmark.pools), list(benchmark.policies)
     seeds = list(benchmark.recipe.seeds)
     primary = benchmark.primary_split
+    cnn_systems = [
+        name
+        for name, definition in benchmark.systems.items()
+        if definition["model"] == "mobilenetv2_100.ra_in1k" and not definition["chain"]
+    ]
+    if len(cnn_systems) != 1:
+        raise GatedEvaluationError(
+            "the frozen probe requires one MobileNetV2 ImageNet system"
+        )
+    cnn_system = cnn_systems[0]
     final_ids = [
         fit.fit_id
         for fit in benchmark.fits()
@@ -348,6 +428,7 @@ def probe_plan(benchmark_path: Path | str) -> dict[str, Any]:
                 background.append(fit_id)
                 model_specs[fit_id] = {
                     "kind": "cnn",
+                    "system": cnn_system,
                     "model": "mobilenetv2_100.ra_in1k",
                     "pool": pool,
                     "policy": policy,
@@ -394,6 +475,7 @@ def probe_plan(benchmark_path: Path | str) -> dict[str, Any]:
                 border.append(fit_id)
                 model_specs[fit_id] = {
                     "kind": "cnn",
+                    "system": cnn_system,
                     "model": "mobilenetv2_100.ra_in1k",
                     "pool": pool,
                     "policy": policy,
@@ -434,17 +516,20 @@ def probe_plan(benchmark_path: Path | str) -> dict[str, Any]:
                 "policy": fit.policy,
                 "split": fit.split,
                 "seed": fit.seed,
+                "view": fit.view,
                 "training_view": "raw-test",
                 "input_view": "raw-test",
             }
         else:
             model_specs[fit_id] = {
                 "kind": "cnn",
+                "system": fit.system,
                 "model": fit.model,
                 "pool": fit.pool,
                 "policy": fit.policy,
                 "split": fit.split,
                 "seed": fit.seed,
+                "view": fit.view,
                 "training_view": "raw-test",
                 "input_view": "raw-test",
             }
@@ -487,6 +572,57 @@ def probe_plan(benchmark_path: Path | str) -> dict[str, Any]:
             set(final_ids + background + border + ["gradcam/test-pass"])
         ),
     }
+
+
+def _bind_validation_hyperparameters(
+    plan: dict[str, Any],
+    selected_hyperparameters: dict[str, Any],
+) -> None:
+    """Copy each validation choice onto every fit that must use that choice."""
+    from jute_disease.models.ml import classical_configurations
+
+    model_specs = plan["model_specs"]
+    required_keys = {
+        key
+        for model_spec in model_specs.values()
+        if (key := _hyperparameter_key(model_spec)) is not None
+    }
+    missing = required_keys - set(selected_hyperparameters)
+    if missing:
+        raise GatedEvaluationError(
+            "#114 validation outcomes omit selected hyperparameters for "
+            + ", ".join(sorted(missing))
+        )
+    for model_spec in model_specs.values():
+        if model_spec["kind"] == "cue":
+            continue
+        if model_spec["kind"] == "classical" and "configuration" in model_spec:
+            model_spec["selected_parameters"] = model_spec["parameters"]
+            continue
+        key = _hyperparameter_key(model_spec)
+        if key is None:
+            raise GatedEvaluationError("model has no validation hyperparameter key")
+        choice = selected_hyperparameters[key]
+        if model_spec["kind"] == "classical":
+            if not isinstance(choice, dict) or choice not in classical_configurations(
+                model_spec["estimator"]
+            ):
+                raise GatedEvaluationError(
+                    f"#114 selected parameters are invalid for {key}"
+                )
+            model_spec["selected_parameters"] = choice
+        else:
+            if (
+                isinstance(choice, bool)
+                or not isinstance(choice, int | float)
+                or not math.isfinite(choice)
+                or choice <= 0
+            ):
+                raise GatedEvaluationError(
+                    f"#114 selected learning rate is invalid for {key}"
+                )
+            model_spec["selected_learning_rate"] = float(choice)
+        model_spec["validation_hyperparameters_key"] = key
 
 
 def write_matrix_freeze(
@@ -553,6 +689,7 @@ def write_matrix_freeze(
     lock_hash = _environment_lock_sha256()
     plan = probe_plan(benchmark_path)
     benchmark = load_benchmark(benchmark_path)
+    _bind_validation_hyperparameters(plan, hyperparameters)
     image_size = benchmark.recipe.image_size
     preprocessing = {"resize": letterbox, "size": image_size}
     validation_hyperparameters_sha256 = _digest(hyperparameters)
@@ -687,6 +824,7 @@ def _verified_training_receipt(
     if not isinstance(metadata, dict):
         raise GatedEvaluationError(f"run receipt metadata is missing for {fit_id}")
     attempts = receipt.get("attempts")
+    results = receipt.get("results")
     preprocessing = metadata.get("preprocessing")
     provenance = metadata.get("provenance")
     configuration = metadata.get("configuration")
@@ -764,8 +902,22 @@ def _verified_training_receipt(
     )
     fit_matches_spec = isinstance(fit_inputs, dict) and all(
         fit_inputs.get(key) == model_spec.get(key)
-        for key in ("seed", "pool", "policy", "split", "estimator", "features")
+        for key in (
+            "seed",
+            "pool",
+            "policy",
+            "split",
+            "estimator",
+            "features",
+            "system",
+            "model",
+            "view",
+        )
         if key in model_spec
+    )
+    result_fit = results.get("fit") if isinstance(results, dict) else None
+    result_fit_id = (
+        result_fit.get("fit_id") if isinstance(result_fit, dict) else result_fit
     )
     if (
         metadata.get("official") is not True
@@ -777,6 +929,10 @@ def _verified_training_receipt(
         or not isinstance(fit_inputs, dict)
         or fit_inputs.get("fit_id") != fit_id
         or not fit_matches_spec
+        or not isinstance(results, dict)
+        or result_fit_id != fit_id
+        or results.get("evaluation_fit_spec") != model_spec
+        or not _receipt_choice_matches(model_spec, results)
         or not isinstance(identity_inputs.get("recipe"), dict)
         or identity_inputs.get("recipe") != recipe
         or not isinstance(input_manifests, dict)

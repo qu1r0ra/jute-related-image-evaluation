@@ -60,8 +60,20 @@ def test_command_resolves_to_handler(argv: list[str]) -> None:
 def test_evaluate_predict_forwards_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
     mock_predict = MagicMock()
     monkeypatch.setattr(cli, "predict_ml", mock_predict)
-    main(["evaluate", "predict", "leaf.jpg", "--classifier", "knn"])
-    mock_predict.assert_called_once_with(["leaf.jpg", "--classifier", "knn"])
+    main(
+        [
+            "evaluate",
+            "predict",
+            "leaf.jpg",
+            "--classifier",
+            "knn",
+            "--target-dir",
+            "target",
+        ]
+    )
+    mock_predict.assert_called_once_with(
+        ["leaf.jpg", "--classifier", "knn", "--target-dir", "target"]
+    )
 
 
 @pytest.mark.parametrize(

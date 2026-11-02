@@ -424,10 +424,14 @@ def run_job(workspace: Workspace, job: Job) -> None:
                 resume_from=job.resume_from,
                 **bounded,
             )
+    result_values = dict(result.results)
+    evaluation_fit_spec = workspace.evaluation_fit_specs.get(job.fit_id)
+    if evaluation_fit_spec is not None:
+        result_values["evaluation_fit_spec"] = evaluation_fit_spec
     write_json_atomic(
         job.result_path,
         {
-            "results": {**result.results, "stack": stack},
+            "results": {**result_values, "stack": stack},
             "artifacts": {name: str(path) for name, path in result.artifacts.items()},
         },
     )
@@ -440,6 +444,23 @@ def tuning_selection(workspace: Workspace, store: RunStore, fit: FitSpec) -> Any
         ValueError: the benchmark has receipted policies and the tuning receipt is
             missing, or a receipt holds an invalid selection.
     """
+    evaluation_fit_spec = workspace.evaluation_fit_specs.get(fit.fit_id)
+    if evaluation_fit_spec is not None:
+        if fit.kind is FitKind.CLASSICAL:
+            selected = evaluation_fit_spec.get("selected_parameters")
+            if not isinstance(selected, dict):
+                raise ValueError(f"{fit.fit_id} has no frozen validation parameters")
+            return selected
+        if fit.kind in CNN_KINDS:
+            rate = evaluation_fit_spec.get("selected_learning_rate")
+            if (
+                isinstance(rate, bool)
+                or not isinstance(rate, int | float)
+                or not 0 < rate < float("inf")
+            ):
+                raise ValueError(f"{fit.fit_id} has no frozen learning rate")
+            return float(rate)
+
     tune_id = workspace.benchmark.tuning_dependency(fit)
     if tune_id is None:
         return None

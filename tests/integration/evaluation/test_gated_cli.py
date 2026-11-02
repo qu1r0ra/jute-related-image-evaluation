@@ -14,7 +14,7 @@ from PIL import Image
 from sklearn.dummy import DummyClassifier
 
 from jute_disease.cli import main
-from jute_disease.config import CURATION_RULES_PATH
+from jute_disease.config import BENCHMARK_CONFIG, CURATION_RULES_PATH
 from jute_disease.data import (
     PreprocessingSpec,
     SyntheticPlan,
@@ -27,7 +27,7 @@ from jute_disease.evaluation import (
     write_matrix_freeze,
     write_run_record,
 )
-from jute_disease.training import RunStore, fit_identity_digest
+from jute_disease.training import RunStore, fit_identity_digest, load_benchmark
 
 
 @dataclass(frozen=True)
@@ -102,6 +102,24 @@ def _outcomes(
     letterbox: str = "letterbox",
     border_leaf_share_cutoff: float = 0.05,
 ) -> None:
+    from jute_disease.models.ml import classical_configurations
+
+    benchmark = load_benchmark(BENCHMARK_CONFIG)
+    selected_hyperparameters = {
+        f"classical/tune/{pool}/{estimator}-{features}": (
+            classical_configurations(estimator)[0]
+        )
+        for estimator in benchmark.estimators
+        for features in benchmark.features
+        for pool in benchmark.pools
+    }
+    selected_hyperparameters.update(
+        {
+            f"cnn/tune/{system}/pool-{pool}": benchmark.recipe.learning_rate
+            for system in benchmark.systems
+            for pool in benchmark.pools
+        }
+    )
     path.write_text(
         json.dumps(
             {
@@ -115,7 +133,7 @@ def _outcomes(
                 },
                 "border_frame_width_px": 32,
                 "border_leaf_share_cutoff": border_leaf_share_cutoff,
-                "selected_hyperparameters": {"fixture": {"value": 1}},
+                "selected_hyperparameters": selected_hyperparameters,
             }
         ),
         encoding="utf-8",
@@ -152,7 +170,16 @@ def _complete_fit_receipt(
         "seed": model_spec["seed"],
         **{
             key: model_spec[key]
-            for key in ("pool", "policy", "split", "estimator", "features")
+            for key in (
+                "pool",
+                "policy",
+                "split",
+                "estimator",
+                "features",
+                "system",
+                "model",
+                "view",
+            )
             if key in model_spec
         },
     }
@@ -243,8 +270,19 @@ def _complete_fit_receipt(
     }
     identity = fit_identity_digest(identity_inputs)
     run = store.start(fit_id, identity, metadata=metadata)
+    results = {
+        "fit": {"fit_id": fit_id},
+        "evaluation_fit_spec": model_spec,
+    }
+    if model_spec["kind"] == "classical":
+        results["selected_parameters"] = model_spec["selected_parameters"]
+    elif model_spec["kind"] == "cnn":
+        results["recipe"] = {
+            **training_recipe,
+            "learning_rate": model_spec["selected_learning_rate"],
+        }
     run.complete(
-        results={"fit": {"fit_id": fit_id}},
+        results=results,
         artifacts={"model": artifact_path},
         metadata=metadata,
     )
@@ -314,6 +352,9 @@ def test_cli_refuses_test_read_without_both_records_then_evaluates_fixture(
         )
     )["record"]["entries"]
     test_image = inputs.image_root / test_rows[0]["path"]
+    with pytest.raises(SystemExit) as missing_target_dir:
+        main(["evaluate", "predict", str(test_image)])
+    assert missing_target_dir.value.code == 2
     with pytest.raises(SystemExit, match="target test images can only be read"):
         main(
             [
@@ -322,8 +363,6 @@ def test_cli_refuses_test_read_without_both_records_then_evaluates_fixture(
                 str(test_image),
                 "--target-dir",
                 str(inputs.target_dir),
-                "--image-root",
-                str(inputs.image_root),
             ]
         )
     with pytest.raises(SystemExit, match="image root differs from the freeze report"):
@@ -656,6 +695,22 @@ def test_gated_api_runs_hash_bound_artifacts_on_masked_views(
     finally:
         first_receipt_path.write_bytes(original_receipt)
 
+    invalid_receipt = json.loads(original_receipt)
+    first_spec = selection_record["selection"]["model_specs"][first_fit_id]
+    if first_spec["kind"] == "classical":
+        invalid_receipt["results"]["selected_parameters"] = {"tampered": True}
+    elif first_spec["kind"] == "cnn":
+        invalid_receipt["results"]["recipe"]["learning_rate"] *= 2
+    invalid_receipt["attempts"][-1]["metadata"] = invalid_receipt["metadata"]
+    first_receipt_path.write_text(json.dumps(invalid_receipt), encoding="utf-8")
+    try:
+        with pytest.raises(GatedEvaluationError, match="does not satisfy #107"):
+            write_run_record(
+                selection, index_path, tmp_path / "unbound-fit-choice.json"
+            )
+    finally:
+        first_receipt_path.write_bytes(original_receipt)
+
     missing_analysis = json.loads(index_path.read_text(encoding="utf-8"))
     missing_analysis["analyses"] = {}
     missing_analysis_path = tmp_path / "missing-analysis-index.json"
@@ -749,15 +804,26 @@ def test_default_matrix_freeze_records_all_probe_routes(
             str(selection_path),
         ]
     )
-    selection = json.loads(selection_path.read_text(encoding="utf-8"))["record"][
-        "selection"
-    ]
+    record = json.loads(selection_path.read_text(encoding="utf-8"))["record"]
+    selection = record["selection"]
+    choices = record["validation_selected_hyperparameters"]
     background = selection["background_only"]
     assert background["seeds"] == [42, 1337, 7, 21, 84]
     assert len(background["fit_ids"]) == 495
     assert background["cnn_route"] == "mobilenetv2_100.ra_in1k (ImageNet)"
     background_spec = selection["model_specs"][background["fit_ids"][0]]
     assert background_spec["training_view"] == background_spec["input_view"]
+    assert background_spec["selected_parameters"] == choices["classical/tune/A/gnb-raw"]
+    background_cnn_id = next(
+        fit_id
+        for fit_id in background["fit_ids"]
+        if selection["model_specs"][fit_id]["kind"] == "cnn"
+    )
+    background_cnn_spec = selection["model_specs"][background_cnn_id]
+    assert (
+        background_cnn_spec["selected_learning_rate"]
+        == choices["cnn/tune/mobilenet_v2_direct/pool-A"]
+    )
     assert background["leaf_mask"].endswith("+sam2")
     assert len(selection["pools"]) == 3
     assert len(selection["policies"]) == 3
@@ -772,6 +838,7 @@ def test_default_matrix_freeze_records_all_probe_routes(
     border_spec = selection["model_specs"][selection["border"]["fit_ids"][0]]
     assert border_spec["training_view"] == "border-frame"
     assert border_spec["input_view"] == "border-frame"
+    assert border_spec["selected_parameters"] == border_spec["parameters"]
     assert len(selection["border"]["fit_ids"]) == 2_511
 
 
@@ -794,6 +861,36 @@ def test_matrix_freeze_requires_recorded_issue_114_outcomes(
             ]
         )
     assert not (tmp_path / "selection.json").exists()
+
+
+def test_matrix_freeze_requires_a_validation_choice_for_each_tuning_route(
+    inputs: Inputs, tmp_path: Path
+) -> None:
+    benchmark = _mini_benchmark(tmp_path)
+    outcomes = tmp_path / "validation-114.json"
+    _outcomes(outcomes)
+    recorded = json.loads(outcomes.read_text(encoding="utf-8"))
+    del recorded["selected_hyperparameters"]["classical/tune/A/lr-crafted"]
+    outcomes.write_text(json.dumps(recorded), encoding="utf-8")
+    selection = tmp_path / "selection.json"
+    with pytest.raises(
+        SystemExit, match="validation outcomes omit selected hyperparameters"
+    ):
+        main(
+            [
+                "evaluate",
+                "freeze-matrix",
+                "--validation-outcomes",
+                str(outcomes),
+                "--benchmark",
+                str(benchmark),
+                "--target-dir",
+                str(inputs.target_dir),
+                "--output",
+                str(selection),
+            ]
+        )
+    assert not selection.exists()
 
 
 def test_matrix_freeze_rejects_border_leaf_share_cutoff_above_five_percent(

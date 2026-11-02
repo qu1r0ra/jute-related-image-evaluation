@@ -3,6 +3,7 @@
 import hashlib
 import json
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,12 +12,14 @@ from jute_disease.training import (
     Benchmark,
     DataInputs,
     FitKind,
+    FitSpec,
     Workspace,
     build_plan,
     fit_identity,
     load_benchmark,
     open_workspace,
 )
+from jute_disease.training.workflow import tuning_selection
 
 
 @pytest.fixture(scope="module")
@@ -313,6 +316,46 @@ def test_workspace_carries_hash_valid_evaluation_selection(tmp_path) -> None:
     loaded = Workspace.load(workspace_path)
     assert loaded.evaluation_fit_specs == workspace.evaluation_fit_specs
     assert loaded.evaluation_selection_sha256 == digest
+
+
+@pytest.mark.parametrize(
+    ("fit", "model_spec", "expected"),
+    [
+        (
+            FitSpec(
+                "classical/lr-crafted/pool-A/view-1/image-random/split-0/seed-42",
+                FitKind.CLASSICAL,
+                42,
+                estimator="lr",
+                features="crafted",
+                pool="A",
+                view=1,
+                policy="image-random",
+                split=0,
+            ),
+            {"selected_parameters": {"C": 1.0}},
+            {"C": 1.0},
+        ),
+        (
+            FitSpec(
+                "cnn/mobilenet_v2_direct/pool-A/view-1/image-random/split-0/seed-42",
+                FitKind.TARGET,
+                42,
+                system="mobilenet_v2_direct",
+                model="mobilenetv2_100.ra_in1k",
+                pool="A",
+                view=1,
+                policy="image-random",
+                split=0,
+            ),
+            {"selected_learning_rate": 0.0003},
+            0.0003,
+        ),
+    ],
+)
+def test_tuning_selection_uses_the_frozen_fit_choice(fit, model_spec, expected) -> None:
+    workspace = SimpleNamespace(evaluation_fit_specs={fit.fit_id: model_spec})
+    assert tuning_selection(workspace, store=None, fit=fit) == expected
 
 
 def test_unknown_configuration_keys_are_rejected(tmp_path) -> None:
