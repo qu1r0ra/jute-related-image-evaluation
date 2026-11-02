@@ -1,11 +1,37 @@
 """Environment-only ntfy notifications around an argv command (no shell)."""
 
 import argparse
+import math
 import os
 import subprocess
 import sys
 import threading
+import time
 import urllib.request
+
+
+def heartbeat_interval() -> float:
+    """Return the configured heartbeat interval in seconds."""
+    raw_interval = os.environ.get("NTFY_HEARTBEAT_SEC", "3600")
+    try:
+        interval = float(raw_interval)
+    except ValueError:
+        raise ValueError("NTFY_HEARTBEAT_SEC must be a nonnegative number") from None
+    if not math.isfinite(interval) or interval < 0 or interval > threading.TIMEOUT_MAX:
+        raise ValueError("NTFY_HEARTBEAT_SEC must be a nonnegative number")
+    return interval
+
+
+def _format_duration(seconds: float) -> str:
+    """Format elapsed runtime as a compact duration."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    total_seconds = int(seconds)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds_remainder = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m {seconds_remainder}s"
+    return f"{minutes}m {seconds_remainder}s"
 
 
 def notify(message: str) -> None:
@@ -43,28 +69,39 @@ def main() -> int:
         command = command[1:]
     if not command:
         parser.error("Supply a command or --test")
+    interval = heartbeat_interval()
     notify("Jute run started")
     stopped = threading.Event()
+    started_at = time.monotonic()
 
-    def heartbeat() -> None:
-        while not stopped.wait(3600):
+    def heartbeat(process: subprocess.Popen[bytes]) -> None:
+        while not stopped.wait(interval):
+            if stopped.is_set() or process.poll() is not None:
+                return
             try:
-                notify("Jute run heartbeat")
+                elapsed = _format_duration(time.monotonic() - started_at)
+                notify(f"Jute run heartbeat (elapsed: {elapsed})")
             except Exception:
                 sys.stderr.write("Heartbeat notification failed\n")
 
-    worker = threading.Thread(target=heartbeat, daemon=True)
-    worker.start()
+    worker: threading.Thread | None = None
     try:
         try:
-            result = subprocess.run(command, check=False)
-            return_code = result.returncode
+            process = subprocess.Popen(command)
         except OSError:
             sys.stderr.write("Run command could not be started\n")
             return_code = 127
+        else:
+            if interval > 0:
+                worker = threading.Thread(
+                    target=heartbeat, args=(process,), daemon=True
+                )
+                worker.start()
+            return_code = process.wait()
     finally:
         stopped.set()
-        worker.join(timeout=16)
+        if worker is not None:
+            worker.join()
     try:
         notify("Jute run succeeded" if return_code == 0 else "Jute run failed")
     except Exception:

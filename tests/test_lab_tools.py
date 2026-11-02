@@ -75,6 +75,26 @@ def test_notifier_connectivity_command_hides_credentials(
     assert sentinel not in captured.out + captured.err
 
 
+def test_notifier_heartbeat_interval_defaults_to_one_hour(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _notifier_module()
+    monkeypatch.delenv("NTFY_HEARTBEAT_SEC", raising=False)
+
+    assert module.heartbeat_interval() == 3600
+
+
+@pytest.mark.parametrize("raw_interval", ["not-a-number", "-1", "nan", "inf"])
+def test_notifier_rejects_malformed_or_negative_heartbeat_intervals_safely(
+    monkeypatch: pytest.MonkeyPatch, raw_interval: str
+) -> None:
+    module = _notifier_module()
+    monkeypatch.setenv("NTFY_HEARTBEAT_SEC", raw_interval)
+
+    with pytest.raises(ValueError, match="NTFY_HEARTBEAT_SEC must be a nonnegative"):
+        module.heartbeat_interval()
+
+
 @pytest.mark.parametrize(("child", "expected"), [("pass", 0), ("fail", 7)])
 def test_notifier_reports_child_completion(
     monkeypatch: pytest.MonkeyPatch, child: str, expected: int
@@ -106,6 +126,50 @@ def test_notifier_reports_child_completion(
     assert messages[-1] == (
         "Jute run succeeded" if expected == 0 else "Jute run failed"
     )
+    assert len(messages) == 2
+
+
+def test_notifier_sends_elapsed_heartbeats_while_child_runs_and_stops_afterward(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _notifier_module()
+    messages: list[str] = []
+
+    def fake_urlopen(request: object, timeout: int) -> io.BytesIO:
+        messages.append(request.data.decode())
+        return io.BytesIO()
+
+    monkeypatch.setenv("NTFY_TOPIC", "jute-test-topic")
+    monkeypatch.setenv("NTFY_TOKEN", "secret-token-sentinel")
+    monkeypatch.setenv("NTFY_HEARTBEAT_SEC", "0.03")
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(NOTIFIER_COMMAND),
+            "--",
+            sys.executable,
+            "-c",
+            "import time; time.sleep(0.18)",
+        ],
+    )
+
+    assert module.main() == 0
+    heartbeat_messages = [
+        message for message in messages if message.startswith("Jute run heartbeat")
+    ]
+    assert len(heartbeat_messages) >= 2
+    assert all("elapsed: " in message for message in heartbeat_messages)
+    assert all(
+        message.endswith("s)") or "m " in message for message in heartbeat_messages
+    )
+    assert messages[0] == "Jute run started"
+    assert messages[-1] == "Jute run succeeded"
+
+    notifications_after_completion = len(messages)
+    time.sleep(0.06)
+    assert len(messages) == notifications_after_completion
 
 
 def test_notifier_cli_rejects_missing_credentials_without_echoing_them() -> None:
