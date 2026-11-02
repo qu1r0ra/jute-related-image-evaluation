@@ -15,6 +15,7 @@ FIT = "fixture/mobilenet_v2_direct/seed-{}"
 ANALYSES = [
     "background-probe",
     "border-probe",
+    "embeddings-test-pass",
     "gradcam-test-pass",
     "leaf-only",
     "scene-cells",

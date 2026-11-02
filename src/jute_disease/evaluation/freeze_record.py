@@ -25,6 +25,7 @@ LOCKFILE = "uv.lock"
 REQUIRED_ANALYSES = (
     "background-probe",
     "border-probe",
+    "embeddings-test-pass",
     "gradcam-test-pass",
     "leaf-only",
     "scene-cells",
@@ -276,6 +277,16 @@ class RunEntry:
     predictions: str
     predictions_sha256: str
     of: str | None = None
+    checkpoint: str | None = None
+    checkpoint_sha256: str | None = None
+    training_receipt_sha256: str | None = None
+    validation_macro_f1: float | None = None
+    pool: str | None = None
+    view: int | None = None
+    policy: str | None = None
+    split: int | None = None
+    seed_index: int | None = None
+    assignment_table_sha256: str | None = None
 
 
 VARIANTS = ("full", "leaf_only", "background_only", "border", "pad_cue")
@@ -291,6 +302,9 @@ def write_run_record(
     record = load_freeze_record(freeze_record)
     listed = set(record["body"]["fit_ids"])
     entries: dict[str, dict[str, Any]] = {}
+    from jute_disease.training import RunStore
+
+    store = RunStore(base_dir)
     for run in runs:
         fit_id = run.get("fit_id")
         if fit_id not in listed:
@@ -309,7 +323,7 @@ def write_run_record(
             digest = _file_hash(path)
         except OSError as error:
             raise FreezeRecordError(f"cannot read predictions: {path}") from error
-        entries[fit_id] = {
+        entry = {
             "system": run["system"],
             "seed": int(run["seed"]),
             "variant": variant,
@@ -317,6 +331,79 @@ def write_run_record(
             "predictions_sha256": digest,
             "of": run.get("of"),
         }
+        if variant == "full":
+            receipt = store.receipt(str(fit_id), missing_ok=True)
+            if receipt is not None:
+                try:
+                    raw_receipt = (
+                        store.run_dir(str(fit_id)) / "receipt.json"
+                    ).read_bytes()
+                    checkpoint = receipt.get("artifacts", {}).get("checkpoint")
+                    results = receipt.get("results", {})
+                    fit = results.get("fit", {})
+                    metrics = results.get("metrics", {})
+                    score = metrics.get("val_f1", metrics.get("val_macro_f1"))
+                    if not isinstance(fit, dict):
+                        raise FreezeRecordError(
+                            f"training receipt has no fit metadata for {fit_id}"
+                        )
+                    if fit.get("fit_id", fit_id) != fit_id:
+                        raise FreezeRecordError(
+                            f"training receipt fit ID does not match {fit_id}"
+                        )
+                    if fit.get("seed") != int(run["seed"]):
+                        raise FreezeRecordError(
+                            "training receipt seed does not match run record "
+                            f"for {fit_id}"
+                        )
+                    receipt_system = fit.get("system")
+                    if receipt_system is not None and receipt_system != run["system"]:
+                        raise FreezeRecordError(
+                            "training receipt system does not match run record "
+                            f"for {fit_id}"
+                        )
+                    if isinstance(checkpoint, dict):
+                        relative_checkpoint = str(checkpoint["path"])
+                        fit_dir = store.run_dir(str(fit_id))
+                        checkpoint_path = (fit_dir / relative_checkpoint).resolve()
+                        checkpoint_path.relative_to(Path(base_dir).resolve())
+                        if not checkpoint_path.is_file() or _file_hash(
+                            checkpoint_path
+                        ) != checkpoint.get("sha256"):
+                            raise FreezeRecordError(
+                                "checkpoint artifact does not match training "
+                                f"receipt for {fit_id}"
+                            )
+                        entry["checkpoint"] = checkpoint_path.relative_to(
+                            Path(base_dir).resolve()
+                        ).as_posix()
+                        entry["checkpoint_sha256"] = str(checkpoint["sha256"])
+                        entry["training_receipt_sha256"] = hashlib.sha256(
+                            raw_receipt
+                        ).hexdigest()
+                        if isinstance(score, int | float) and not isinstance(
+                            score, bool
+                        ):
+                            entry["validation_macro_f1"] = float(score)
+                    for field in ("pool", "view", "policy", "split", "seed_index"):
+                        if field in fit:
+                            entry[field] = fit[field]
+                    metadata = receipt.get("metadata")
+                    if not isinstance(metadata, dict):
+                        metadata = {}
+                    assignment = metadata.get("assignment_table")
+                    if not isinstance(assignment, dict):
+                        assignment = {}
+                    assignment_digest = assignment.get("sha256")
+                    if isinstance(assignment_digest, str):
+                        entry["assignment_table_sha256"] = assignment_digest
+                except (KeyError, TypeError, ValueError, OSError) as error:
+                    if isinstance(error, FreezeRecordError):
+                        raise
+                    raise FreezeRecordError(
+                        f"cannot read checkpoint lineage for {fit_id}"
+                    ) from error
+        entries[fit_id] = entry
     if not entries:
         raise FreezeRecordError("a run record needs at least one run")
     body = {"freeze_record_hash": record["hash"], "fits": entries}

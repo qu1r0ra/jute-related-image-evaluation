@@ -1,0 +1,704 @@
+"""Reproducible, descriptive embedding and CAM diagnostics.
+
+This module contains the numerical kernels and the shared authorization/export
+helpers used by the gated evaluator. It never assigns scientific meaning to
+embedding distances or CAM locations.
+"""
+
+from __future__ import annotations
+
+import csv
+import hashlib
+import json
+from collections import defaultdict
+from collections.abc import Mapping, Sequence
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import torch
+from PIL import Image
+from scipy.stats import spearmanr
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+from torch import nn
+
+from jute_disease.data import POLICIES
+from jute_disease.evaluation.freeze_record import (
+    Authorization,
+    FreezeRecordError,
+    RunEntry,
+)
+
+EMBEDDING_ANALYSIS_ID = "embeddings-test-pass"
+GRADCAM_ANALYSIS_ID = "gradcam-test-pass"
+EMBEDDING_SEED = 0
+PCA_COMPONENTS = 50
+TSNE_PERPLEXITIES = (30, 50)
+UMAP_NEIGHBORS = (15, 50)
+CAM_SAMPLE_PER_CLASS = 8
+CAM_SAMPLE_SEED = 0
+
+
+def diagnostic_configuration() -> dict[str, Any]:
+    """Return the frozen settings used by the diagnostic kernels."""
+    return {
+        "embeddings": {
+            "pca_components": PCA_COMPONENTS,
+            "pca_solver": "full",
+            "pca_whiten": False,
+            "tsne_perplexities": list(TSNE_PERPLEXITIES),
+            "umap_n_neighbors": list(UMAP_NEIGHBORS),
+            "seed": EMBEDDING_SEED,
+            "coordinates": 2,
+            "feature_distance": "euclidean",
+            "umap_n_epochs": 500,
+            "umap_min_dist": 0.1,
+            "interpretation": "supplementary descriptive plots only",
+        },
+        "gradcam": {
+            "sample_per_class_correct": CAM_SAMPLE_PER_CLASS,
+            "sample_per_class_errors": CAM_SAMPLE_PER_CLASS,
+            "sample_seed": CAM_SAMPLE_SEED,
+            "target_layer": "MobileNetV2 conv_head (last convolutional block)",
+            "normalization": "ImageNet mean/std",
+            "attention_score": (
+                "positive CAM mass in leaf mask minus leaf area fraction"
+            ),
+            "padding": "exclude letterbox padding from mass and area",
+            "sanity_checks": ["parameter-randomization", "label-randomization"],
+        },
+    }
+
+
+def require_analysis(
+    authorization: Authorization, analysis_id: str, fit_ids: Sequence[str]
+) -> None:
+    """Require a listed analysis ID and authorized fit IDs before test reads."""
+    if analysis_id not in authorization.body.get("analysis_ids", ()):
+        raise FreezeRecordError(
+            f"test read refused: analysis {analysis_id!r} is not listed "
+            "in the freeze record"
+        )
+    authorized = {run.fit_id for run in authorization.runs}
+    missing = sorted(set(fit_ids) - authorized)
+    if missing:
+        raise FreezeRecordError(
+            f"test read refused: diagnostic fits are not authorized: {missing}"
+        )
+
+
+def select_median_validation_run(runs: Sequence[RunEntry]) -> RunEntry:
+    """Select the validation-median run, breaking equal scores by lower seed."""
+    if not runs:
+        raise ValueError("at least one authorized run is required")
+    if any(run.validation_macro_f1 is None for run in runs):
+        raise ValueError(
+            "every candidate run needs a receipt-bound validation macro-F1"
+        )
+    median_score = sorted(float(run.validation_macro_f1) for run in runs)[
+        len(runs) // 2
+    ]
+    median_runs = [
+        run for run in runs if float(run.validation_macro_f1) == median_score
+    ]
+    return min(median_runs, key=lambda run: run.seed)
+
+
+def validate_primary_policy_runs(
+    assignment_table_path: Path | str, runs: Sequence[RunEntry]
+) -> dict[str, Any]:
+    """Bind one primary-split ImageNet policy's five seeds to #137 assignments."""
+    if len(runs) != 5:
+        raise FreezeRecordError(
+            "diagnostics require all five authorized seeds for one policy"
+        )
+    if any(
+        run.system != "mobilenet_v2_direct"
+        or run.variant != "full"
+        or run.split != 0
+        or run.policy not in POLICIES
+        or run.seed_index is None
+        or run.pool is None
+        or run.view is None
+        or run.policy is None
+        for run in runs
+    ):
+        raise FreezeRecordError(
+            "diagnostics require full-image ImageNet runs for primary split 0"
+        )
+    if (
+        len({run.seed for run in runs}) != 5
+        or {run.seed_index for run in runs} != set(range(5))
+        or len({(run.pool, run.view, run.policy) for run in runs}) != 1
+    ):
+        raise FreezeRecordError(
+            "diagnostics runs must cover five unique seeds for one pool, "
+            "view and policy"
+        )
+
+    path = Path(assignment_table_path)
+    raw = path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    if any(run.assignment_table_sha256 != digest for run in runs):
+        raise FreezeRecordError(
+            "assignment table digest does not match every authorized training receipt"
+        )
+    try:
+        rows = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise FreezeRecordError("assignment table is not valid JSON") from error
+    if not isinstance(rows, list) or not rows:
+        raise FreezeRecordError("assignment table must contain its frozen rows")
+    assignments: dict[tuple[int, int], int] = {}
+    for row in rows:
+        if (
+            not isinstance(row, dict)
+            or any(
+                type(row.get(key)) is not int for key in ("split", "seed", "checkpoint")
+            )
+            or row["checkpoint"] != (row["seed"] + row["split"]) % 3
+        ):
+            raise FreezeRecordError("assignment table fails the #137 rotation rule")
+        key = (row["split"], row["seed"])
+        if key in assignments:
+            raise FreezeRecordError("assignment table has duplicate split/seed rows")
+        assignments[key] = row["checkpoint"]
+    selected_assignments = {}
+    for run in runs:
+        key = (0, int(run.seed_index))
+        if key not in assignments:
+            raise FreezeRecordError(f"assignment table is missing row {key}")
+        selected_assignments[str(run.seed)] = assignments[key]
+    pool, view, policy = next(iter({(run.pool, run.view, run.policy) for run in runs}))
+    return {
+        "path": str(path.resolve()),
+        "sha256": digest,
+        "primary_split": 0,
+        "pool": pool,
+        "view": view,
+        "policy": policy,
+        "source_checkpoint_by_seed": selected_assignments,
+    }
+
+
+def embedding_coordinates(
+    features: np.ndarray, image_ids: Sequence[str]
+) -> dict[str, Any]:
+    """Compute frozen-feature PCA, t-SNE and UMAP coordinates deterministically.
+
+    Each requested setting is fitted to the complete, ID-aligned input matrix.
+    The t-SNE perplexities require at least 51 test images, and PCA requires at
+    least 50 feature dimensions.
+    """
+    values = np.asarray(features, dtype=np.float64)
+    ids = tuple(image_ids)
+    if values.ndim != 2 or values.shape[0] != len(ids):
+        raise ValueError("features must be a 2D matrix aligned to image_ids")
+    if not ids or len(set(ids)) != len(ids):
+        raise ValueError("image_ids must be non-empty and unique")
+    if not np.isfinite(values).all():
+        raise ValueError("features must contain only finite values")
+    if values.shape[0] <= max(TSNE_PERPLEXITIES):
+        raise ValueError("t-SNE perplexity 50 requires at least 51 test images")
+    if values.shape[1] < PCA_COMPONENTS:
+        raise ValueError("PCA to 50 dimensions requires at least 50 feature columns")
+
+    pca = PCA(
+        n_components=PCA_COMPONENTS,
+        svd_solver="full",
+        whiten=False,
+        copy=True,
+        tol=0.0,
+    )
+    reduced = pca.fit_transform(values)
+    coordinates: dict[str, list[list[float]]] = {}
+    for perplexity in TSNE_PERPLEXITIES:
+        embedded = TSNE(
+            n_components=2,
+            perplexity=perplexity,
+            init="pca",
+            learning_rate="auto",
+            max_iter=1000,
+            random_state=EMBEDDING_SEED,
+            method="barnes_hut",
+            metric="euclidean",
+            angle=0.5,
+            early_exaggeration=12.0,
+            n_iter_without_progress=300,
+            min_grad_norm=1e-7,
+            n_jobs=1,
+        ).fit_transform(reduced)
+        coordinates[f"tsne_perplexity_{perplexity}"] = embedded.tolist()
+
+    try:
+        sklearn_version = version("scikit-learn")
+        umap_version = version("umap-learn")
+    except PackageNotFoundError as error:
+        raise RuntimeError(
+            "scikit-learn and umap-learn are required for embedding diagnostics"
+        ) from error
+    import umap
+
+    for neighbors in UMAP_NEIGHBORS:
+        if neighbors >= values.shape[0]:
+            raise ValueError(
+                f"UMAP n_neighbors {neighbors} requires more than {neighbors} images"
+            )
+        embedded = umap.UMAP(
+            n_components=2,
+            n_neighbors=neighbors,
+            random_state=EMBEDDING_SEED,
+            transform_seed=EMBEDDING_SEED,
+            n_jobs=1,
+            metric="euclidean",
+            n_epochs=500,
+            min_dist=0.1,
+            spread=1.0,
+            learning_rate=1.0,
+            repulsion_strength=1.0,
+            negative_sample_rate=5,
+        ).fit_transform(reduced)
+        coordinates[f"umap_n_neighbors_{neighbors}"] = embedded.tolist()
+
+    return {
+        "image_ids": list(ids),
+        "pca": {
+            "components": PCA_COMPONENTS,
+            "solver": "full",
+            "explained_variance_ratio": pca.explained_variance_ratio_.tolist(),
+        },
+        "coordinates": coordinates,
+        "settings": {
+            **diagnostic_configuration()["embeddings"],
+            "pca": {
+                "n_components": PCA_COMPONENTS,
+                "svd_solver": "full",
+                "whiten": False,
+                "copy": True,
+                "tol": 0.0,
+            },
+            "tsne": {
+                "n_components": 2,
+                "perplexities": list(TSNE_PERPLEXITIES),
+                "init": "pca",
+                "learning_rate": "auto",
+                "max_iter": 1000,
+                "method": "barnes_hut",
+                "metric": "euclidean",
+                "angle": 0.5,
+                "early_exaggeration": 12.0,
+                "n_iter_without_progress": 300,
+                "min_grad_norm": 1e-7,
+                "n_jobs": 1,
+                "random_state": EMBEDDING_SEED,
+            },
+            "umap": {
+                "n_components": 2,
+                "n_neighbors": list(UMAP_NEIGHBORS),
+                "metric": "euclidean",
+                "n_jobs": 1,
+                "random_state": EMBEDDING_SEED,
+                "transform_seed": EMBEDDING_SEED,
+                "n_epochs": 500,
+                "min_dist": 0.1,
+                "spread": 1.0,
+                "learning_rate": 1.0,
+                "repulsion_strength": 1.0,
+                "negative_sample_rate": 5,
+                "version": umap_version,
+            },
+            "software_versions": {
+                "scikit-learn": sklearn_version,
+                "umap-learn": umap_version,
+            },
+        },
+        "claim_boundary": "Do not interpret cluster size or inter-point distance.",
+    }
+
+
+def target_classes_for_image(true_class: int, predicted_class: int) -> tuple[int, ...]:
+    """Return the true target and, on an error, the predicted target as well."""
+    if true_class < 0 or predicted_class < 0:
+        raise ValueError("class indices must be non-negative")
+    return (
+        (true_class,)
+        if true_class == predicted_class
+        else (true_class, predicted_class)
+    )
+
+
+def penultimate_features(model: nn.Module, images: torch.Tensor) -> torch.Tensor:
+    """Extract pooled pre-classifier features from a timm-backed classifier."""
+    extractor = getattr(model, "feature_extractor", None)
+    backbone = getattr(extractor, "backbone", None)
+    if backbone is None:
+        raise ValueError("model must expose feature_extractor.backbone")
+    if hasattr(backbone, "forward_features") and hasattr(backbone, "forward_head"):
+        features = backbone.forward_features(images)
+        return backbone.forward_head(features, pre_logits=True)
+    return extractor(images)
+
+
+def last_mobilenetv2_conv(model: nn.Module) -> nn.Module:
+    """Return the last convolutional block used by the MobileNetV2 route."""
+    backbone = getattr(getattr(model, "feature_extractor", None), "backbone", None)
+    layer = getattr(backbone, "conv_head", None)
+    if not isinstance(layer, nn.Module):
+        raise ValueError(
+            "MobileNetV2 checkpoint has no conv_head last convolution block"
+        )
+    return layer
+
+
+def gradcam_maps(
+    model: nn.Module,
+    images: torch.Tensor,
+    target_classes: Sequence[int],
+    target_layer: nn.Module | None = None,
+) -> np.ndarray:
+    """Compute ReLU Grad-CAM maps for the specified class on each input image."""
+    if images.ndim != 4 or len(target_classes) != images.shape[0]:
+        raise ValueError("images must be NCHW and target_classes must align")
+    layer = target_layer or last_mobilenetv2_conv(model)
+    activations: list[torch.Tensor] = []
+
+    def capture(
+        _: nn.Module, __: tuple[torch.Tensor, ...], output: torch.Tensor
+    ) -> None:
+        activations.append(output)
+
+    handle = layer.register_forward_hook(capture)
+    maps: list[np.ndarray] = []
+    try:
+        was_training = model.training
+        model.eval()
+        try:
+            for image, target in zip(images, target_classes, strict=True):
+                if target < 0:
+                    raise ValueError("target class indices must be non-negative")
+                model.zero_grad(set_to_none=True)
+                activations.clear()
+                logits = model(image.unsqueeze(0))
+                if logits.ndim != 2 or target >= logits.shape[1]:
+                    raise ValueError("target class index is outside model outputs")
+                if not activations:
+                    raise RuntimeError("target layer did not run during model forward")
+                activation = activations[-1]
+                gradient = torch.autograd.grad(logits[0, target], activation)[0]
+                weights = gradient.mean(dim=(2, 3), keepdim=True)
+                cam = torch.relu((weights * activation).sum(dim=1, keepdim=True))
+                cam = torch.nn.functional.interpolate(
+                    cam,
+                    size=images.shape[-2:],
+                    mode="bilinear",
+                    align_corners=False,
+                )
+                maps.append(cam[0, 0].detach().cpu().numpy())
+        finally:
+            model.train(was_training)
+    finally:
+        handle.remove()
+    return np.stack(maps, axis=0)
+
+
+def select_gradcam_sample(
+    image_ids: Sequence[str],
+    truth: Sequence[str],
+    predictions: Sequence[str],
+    classes: Sequence[str],
+    *,
+    policy_predictions: Mapping[str, Mapping[str, str]] | None = None,
+    per_class: int = CAM_SAMPLE_PER_CLASS,
+    seed: int = CAM_SAMPLE_SEED,
+) -> dict[str, Any]:
+    """Select correct/error examples per class and retain every disagreement."""
+    ids, labels, predicted = tuple(image_ids), tuple(truth), tuple(predictions)
+    if (
+        not ids
+        or len(set(ids)) != len(ids)
+        or not (len(ids) == len(labels) == len(predicted))
+    ):
+        raise ValueError("image_ids, truth and predictions must be aligned and unique")
+    if per_class < 0:
+        raise ValueError("per_class must be non-negative")
+    rng = np.random.default_rng(seed)
+    selected: dict[str, set[str]] = {
+        "correct": set(),
+        "error": set(),
+        "disagreement": set(),
+    }
+    for label in classes:
+        class_indices = [index for index, value in enumerate(labels) if value == label]
+        for outcome, predicate in (
+            ("correct", lambda index: predicted[index] == labels[index]),
+            ("error", lambda index: predicted[index] != labels[index]),
+        ):
+            candidates = [index for index in class_indices if predicate(index)]
+            take = min(per_class, len(candidates))
+            if take:
+                chosen = rng.choice(np.asarray(candidates), size=take, replace=False)
+                selected[outcome].update(ids[int(index)] for index in chosen)
+
+    if policy_predictions:
+        if set(policy_predictions) != set(POLICIES):
+            raise ValueError("policy predictions must cover all three split policies")
+        if any(
+            not isinstance(values, Mapping) for values in policy_predictions.values()
+        ):
+            raise ValueError("each policy must map image IDs to predictions")
+        for image_id in ids:
+            votes = {
+                predictions_for_policy[image_id]
+                for predictions_for_policy in policy_predictions.values()
+                if image_id in predictions_for_policy
+            }
+            if len(votes) > 1:
+                selected["disagreement"].add(image_id)
+
+    return {
+        "seed": seed,
+        "per_class": per_class,
+        "classes": list(classes),
+        "selected": {
+            key: [image_id for image_id in ids if image_id in values]
+            for key, values in selected.items()
+        },
+        "all_policy_disagreements_included": True,
+    }
+
+
+def leaf_attention_score(
+    cam: np.ndarray, leaf_mask: np.ndarray, content_mask: np.ndarray
+) -> float | None:
+    """Return CAM mass enrichment over leaf area; ``None`` means all-zero CAM."""
+    heatmap = np.asarray(cam, dtype=np.float64)
+    leaf = np.asarray(leaf_mask, dtype=bool)
+    content = np.asarray(content_mask, dtype=bool)
+    if (
+        heatmap.ndim != 2
+        or heatmap.shape != leaf.shape
+        or heatmap.shape != content.shape
+    ):
+        raise ValueError("CAM, leaf mask and content mask must be aligned 2D arrays")
+    if not np.isfinite(heatmap).all():
+        raise ValueError("CAM must contain finite values")
+    mass = np.maximum(heatmap, 0.0) * content
+    total = float(mass.sum())
+    content_area = int(content.sum())
+    if content_area == 0:
+        raise ValueError("content mask cannot be empty")
+    if total == 0:
+        return None
+    leaf_content = leaf & content
+    return float(mass[leaf_content].sum() / total - leaf_content.sum() / content_area)
+
+
+def letterbox_leaf_mask(mask: np.ndarray, content_mask: np.ndarray) -> np.ndarray:
+    """Resize an original-image binary mask onto the ADR 0002 letterbox canvas."""
+    source = np.asarray(mask, dtype=bool)
+    content = np.asarray(content_mask, dtype=bool)
+    if source.ndim != 2 or content.ndim != 2 or not content.any():
+        raise ValueError("leaf and content masks must be non-empty 2D arrays")
+    ys, xs = np.nonzero(content)
+    top, bottom = int(ys.min()), int(ys.max()) + 1
+    left, right = int(xs.min()), int(xs.max()) + 1
+    resized = (
+        np.asarray(
+            Image.fromarray(source.astype(np.uint8) * 255).resize(
+                (right - left, bottom - top), Image.Resampling.NEAREST
+            )
+        )
+        > 0
+    )
+    result = np.zeros_like(content)
+    result[top:bottom, left:right] = resized
+    return result
+
+
+def parameter_randomization_correlations(
+    reference: np.ndarray, randomized: Mapping[str, np.ndarray]
+) -> dict[str, list[float | None]]:
+    """Record map sensitivity at each parameter-randomization stage."""
+    baseline = np.asarray(reference, dtype=np.float64)
+    if baseline.ndim != 3:
+        raise ValueError("reference CAMs must have shape (images, height, width)")
+    result: dict[str, list[float | None]] = {}
+    for stage, candidate in randomized.items():
+        values = np.asarray(candidate, dtype=np.float64)
+        if values.shape != baseline.shape:
+            raise ValueError(
+                f"randomized CAMs for {stage} do not match reference shape"
+            )
+        correlations: list[float | None] = []
+        for before, after in zip(baseline, values, strict=True):
+            if not np.isfinite(before).all() or not np.isfinite(after).all():
+                raise ValueError("CAM maps must contain finite values")
+            if np.ptp(before) == 0 or np.ptp(after) == 0:
+                correlations.append(None)
+                continue
+            correlation = float(spearmanr(before.ravel(), after.ravel()).statistic)
+            correlations.append(correlation if np.isfinite(correlation) else None)
+        result[stage] = correlations
+    return result
+
+
+def sanity_check_record(
+    parameter_randomization: Mapping[str, Any] | None,
+    label_randomization: Mapping[str, Any] | None,
+    *,
+    checkpoint_sha256: str,
+) -> dict[str, Any]:
+    """Record Adebayo check evidence and a separately reviewed pass/fail state."""
+    if len(checkpoint_sha256) != 64 or any(
+        char not in "0123456789abcdef" for char in checkpoint_sha256
+    ):
+        raise ValueError("sanity checks need the selected checkpoint SHA-256")
+
+    def outcome(value: Mapping[str, Any] | None, name: str) -> dict[str, Any]:
+        if value is None:
+            return {"status": "not-run", "evidence": None}
+        status = value.get("status")
+        if status not in ("pass", "fail"):
+            raise ValueError(f"{name} status must be 'pass' or 'fail'")
+        evidence = value.get("evidence")
+        if not isinstance(evidence, Mapping) or not evidence:
+            raise ValueError(f"{name} must include recorded evidence")
+        if evidence.get("checkpoint_sha256") != checkpoint_sha256:
+            raise ValueError(f"{name} evidence must match the selected checkpoint")
+        return {"status": status, "evidence": dict(evidence)}
+
+    return {
+        "method": "Adebayo parameter-randomization and label-randomization checks",
+        "parameter_randomization": outcome(
+            parameter_randomization, "parameter randomization"
+        ),
+        "label_randomization": outcome(label_randomization, "label randomization"),
+    }
+
+
+def aggregate_leaf_scores(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Aggregate defined per-image scores by class and scene using median/IQR."""
+    groups: dict[tuple[str, str], list[float]] = defaultdict(list)
+    undefined: dict[tuple[str, str], int] = defaultdict(int)
+    for row in rows:
+        class_name = str(row["class"])
+        scene = str(row.get("scene", "unknown"))
+        group = (class_name, scene)
+        score = row.get("score")
+        if score is None:
+            undefined[group] += 1
+        else:
+            value = float(score)
+            if not np.isfinite(value):
+                raise ValueError("defined CAM scores must be finite")
+            groups[group].append(value)
+    aggregates: list[dict[str, Any]] = []
+    for group in sorted(set(groups) | set(undefined)):
+        values = np.asarray(groups[group], dtype=np.float64)
+        aggregates.append(
+            {
+                "class": group[0],
+                "scene": group[1],
+                "n_defined": int(values.size),
+                "undefined_all_zero_cam": undefined[group],
+                "median": float(np.median(values)) if values.size else None,
+                "q1": float(np.quantile(values, 0.25)) if values.size else None,
+                "q3": float(np.quantile(values, 0.75)) if values.size else None,
+                "iqr": (
+                    float(np.quantile(values, 0.75) - np.quantile(values, 0.25))
+                    if values.size
+                    else None
+                ),
+            }
+        )
+    by_class: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    by_scene: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for row in rows:
+        by_class[str(row["class"])].append(row)
+        by_scene[str(row.get("scene", "unknown"))].append(row)
+
+    def summary(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+        values = np.asarray(
+            [float(row["score"]) for row in items if row.get("score") is not None]
+        )
+        return {
+            "n_defined": int(values.size),
+            "undefined_all_zero_cam": sum(row.get("score") is None for row in items),
+            "median": float(np.median(values)) if values.size else None,
+            "q1": float(np.quantile(values, 0.25)) if values.size else None,
+            "q3": float(np.quantile(values, 0.75)) if values.size else None,
+        }
+
+    return {
+        "class_scene": aggregates,
+        "by_class": {key: summary(value) for key, value in sorted(by_class.items())},
+        "by_scene": {key: summary(value) for key, value in sorted(by_scene.items())},
+    }
+
+
+def leaf_score_gate(
+    *, parameter_randomization: bool, label_randomization: bool, mask_audit_passed: bool
+) -> dict[str, Any]:
+    """Report whether the protocol permits a leaf-score summary."""
+    allowed = parameter_randomization and label_randomization and mask_audit_passed
+    return {
+        "reported": allowed,
+        "checks": {
+            "parameter_randomization": parameter_randomization,
+            "label_randomization": label_randomization,
+            "adr_0002_mask_audit": mask_audit_passed,
+        },
+        "reason": None
+        if allowed
+        else "withheld until both sanity checks and mask audit pass",
+    }
+
+
+def write_diagnostics_export(
+    output: Path | str,
+    payload: Mapping[str, Any],
+    *,
+    generating_command: Sequence[str],
+    configuration: Mapping[str, Any],
+    source_artifacts: Sequence[Path | str],
+) -> Path:
+    """Write a provenance-bound JSON export and aligned coordinate CSV files."""
+    directory = Path(output)
+    if (directory / "diagnostics.json").exists():
+        raise ValueError(f"refusing to replace {directory / 'diagnostics.json'}")
+    sources = []
+    for source in source_artifacts:
+        path = Path(source).resolve()
+        if not path.is_file():
+            raise ValueError(f"source artifact is missing: {path}")
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        sources.append({"path": str(path), "sha256": digest})
+    directory.mkdir(parents=True, exist_ok=True)
+    export = {
+        "schema": 1,
+        "generating_command": list(generating_command),
+        "configuration": dict(configuration),
+        "source_artifacts": sources,
+        "diagnostics": dict(payload),
+    }
+    path = directory / "diagnostics.json"
+    path.write_text(
+        json.dumps(export, indent=2, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+    for feature_set, result in payload.get("embeddings", {}).items():
+        ids = result["image_ids"]
+        for name, coordinates in result["coordinates"].items():
+            coordinate_path = directory / f"{feature_set}-{name}.csv"
+            with coordinate_path.open("x", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(("image_id", "x", "y"))
+                writer.writerows(
+                    (image_id, *coordinate)
+                    for image_id, coordinate in zip(ids, coordinates, strict=True)
+                )
+    return path

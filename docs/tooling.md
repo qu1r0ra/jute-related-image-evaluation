@@ -74,6 +74,22 @@ leaf under `metrics` or `statistics` is emitted as an export-ID macro;
 These options import existing results only; they do not score data or open
 partition images.
 
+### Gated image diagnostics
+
+`jute-disease evaluate diagnostics` reads one authorized test manifest after
+checking the freeze and run records. Repeat it for each primary-split target
+manifest and policy group, passing all five seed fits with repeated `--fit-id`
+options. `--assignment-table` must be the table whose digest is recorded in
+every fit receipt. The required `--context` JSON contains a scene tag for each
+test image, prediction maps for `image-random`, `exact-copy` and
+`near-duplicate`, and recorded parameter- and label-randomization outcomes
+whose evidence names the selected checkpoint SHA-256. Its contents and the
+freeze record, run record, lockfile and project configuration are hashed into
+the export. The command writes `diagnostics.json`, aligned coordinate CSV files
+and prespecified Grad-CAM figures. The command itself does not train models or
+benchmark hardware; reported compute totals come from verified training
+receipts.
+
 Classical estimators and their nine-configuration grids: k-NN with k in {1, 3, 5, 7, 11, 15, 21, 31, 51}; L2 logistic regression with C from 1e-4 to 1e4 in nine log-spaced values; RBF-SVC with C in {1, 10, 100} and gamma in {0.1, 1, 10} times scale; random forest with 500 trees, max_features in {sqrt, 0.1, 0.3} and min_samples_leaf in {1, 3, 10}. Gaussian naive Bayes searches `var_smoothing` over 1e-12 to 1e-4 in nine decades. The crafted feature vector has 548 values; z-scores are fitted on the training fold only.
 
 ## Lab helpers

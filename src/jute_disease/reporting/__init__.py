@@ -1,6 +1,7 @@
 """Figures, tables and reproducible manuscript exports for the study."""
 
 from jute_disease.reporting.manuscript import (
+    compute_training_costs,
     export_manuscript,
     rebuild_kit_splits,
     run_manuscript_fixture,
@@ -15,6 +16,7 @@ from jute_disease.reporting.tables import (
 )
 
 __all__ = [
+    "compute_training_costs",
     "export_manuscript",
     "aggregate_metric_rows",
     "aggregate_metrics",
