@@ -1456,14 +1456,22 @@ def evaluate_gated_test(
     ]
     retained_entries = [entries[index] for index in retained]
     retained_family_ids = sorted({entry.group for entry in retained_entries})
-    survival_seed_draws, survival_family_weights = _hierarchical_bootstrap_plan(
-        len(border_seeds),
-        len(retained_family_ids),
-        resamples=null_count,
-        seed=43,
+    retained_class_counts = dict.fromkeys(classes, 0)
+    retained_class_counts.update(Counter(entry.label for entry in retained_entries))
+    retained_scene_counts = dict.fromkeys(sorted(set(scenes)), 0)
+    retained_scene_counts.update(Counter(scenes[index] for index in retained))
+    headline_allowed = mask_audit_passed and all(
+        retained_class_counts.get(label, 0) >= 50 for label in classes
     )
-    retained_class_counts = dict(Counter(entry.label for entry in retained_entries))
-    retained_scene_counts = dict(Counter(scenes[index] for index in retained))
+    survival_seed_draws: np.ndarray | None = None
+    survival_family_weights: np.ndarray | None = None
+    if headline_allowed:
+        survival_seed_draws, survival_family_weights = _hierarchical_bootstrap_plan(
+            len(border_seeds),
+            len(retained_family_ids),
+            resamples=null_count,
+            seed=43,
+        )
     border_results: dict[str, Any] = {}
     cue_baselines: dict[str, Any] = {}
     expected_seed_count = len(border_seeds)
@@ -1501,7 +1509,7 @@ def evaluate_gated_test(
                 raise GatedEvaluationError("border family order changed between seeds")
             family_stats_by_seed.append(family_stats)
             predicted_counts_by_seed.append(family_predictions)
-            if not is_cue:
+            if not is_cue and headline_allowed:
                 retained_predictions = [predicted[index] for index in retained]
                 retained_seed_metrics[str(seed)] = _metrics(
                     retained_entries, retained_predictions, classes
@@ -1545,22 +1553,30 @@ def evaluate_gated_test(
             }
             continue
 
-        if retained_family_order != retained_family_ids:
-            raise GatedEvaluationError("retained family order differs from the probe")
         full_stats_array = np.stack(family_stats_by_seed)
-        retained_stats_array = np.stack(retained_stats_by_seed)
         full_intervals = _hierarchical_intervals(
             full_stats_array,
             seed_draws,
             family_weights,
             len(classes),
         )
-        survival_intervals = _hierarchical_intervals(
-            retained_stats_array,
-            survival_seed_draws,
-            survival_family_weights,
-            len(classes),
-        )
+        survival_intervals: dict[str, Any] | None = None
+        symptom_survival: dict[str, Any] | None = None
+        if headline_allowed:
+            if retained_family_order != retained_family_ids:
+                raise GatedEvaluationError(
+                    "retained family order differs from the probe"
+                )
+            if survival_seed_draws is None or survival_family_weights is None:
+                raise GatedEvaluationError("symptom-survival bootstrap plan is missing")
+            retained_stats_array = np.stack(retained_stats_by_seed)
+            survival_intervals = _hierarchical_intervals(
+                retained_stats_array,
+                survival_seed_draws,
+                survival_family_weights,
+                len(classes),
+            )
+            symptom_survival = _mean_seed_metrics(retained_seed_metrics)
         null = _family_permutation_macro_f1(
             np.stack(predicted_counts_by_seed),
             permuted_family_labels,
@@ -1570,11 +1586,7 @@ def evaluate_gated_test(
             full_intervals["macro_f1"]["lower"] if full_intervals["macro_f1"] else None
         )
         upper_null = float(np.percentile(null, 95))
-        headline_allowed = mask_audit_passed and all(
-            retained_class_counts.get(label, 0) >= 50 for label in classes
-        )
         unrestricted = _mean_seed_metrics(seed_metrics)
-        symptom_survival = _mean_seed_metrics(retained_seed_metrics)
         border_results[group_id] = {
             "fit_ids": fit_ids,
             "fit_spec": group_spec,
@@ -1587,8 +1599,12 @@ def evaluate_gated_test(
             "majority_class_accuracy": max(Counter(truths).values()) / len(truths),
             "accuracy_ci_95": full_intervals["accuracy"],
             "macro_f1_ci_95": full_intervals["macro_f1"],
-            "symptom_survival_accuracy_ci_95": survival_intervals["accuracy"],
-            "symptom_survival_macro_f1_ci_95": survival_intervals["macro_f1"],
+            "symptom_survival_accuracy_ci_95": None
+            if survival_intervals is None
+            else survival_intervals["accuracy"],
+            "symptom_survival_macro_f1_ci_95": None
+            if survival_intervals is None
+            else survival_intervals["macro_f1"],
             "macro_f1_lower_95": lower,
             "permutation_macro_f1_95th": upper_null,
             "permutations": null_count,
@@ -1668,6 +1684,10 @@ def evaluate_gated_test(
         },
         "border": border_results,
         "border_cue_baselines": cue_baselines,
+        "frame_leaf_shares": [
+            {"image_id": entry.image_id, "leaf_pixel_share": share}
+            for entry, share in zip(entries, border_leaf_shares, strict=True)
+        ],
         "class_by_scene": scene_tables,
         "class_by_scene_status": (
             "completed" if mask_audit_passed else "blocked by mask audit"

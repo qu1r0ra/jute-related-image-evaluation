@@ -4,11 +4,13 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import joblib
 import numpy as np
 import pytest
 import torch
+from PIL import Image
 from sklearn.dummy import DummyClassifier
 
 from jute_disease.cli import main
@@ -380,7 +382,18 @@ def test_gated_api_runs_hash_bound_artifacts_on_masked_views(
     border_result = next(iter(report["border"].values()))
     assert len(border_result["fit_ids"]) == 3
     assert "seeds within primary split" in border_result["bootstrap_method"]
-    assert border_result["symptom_survival"]
+    if border_result["headline"] is None:
+        assert border_result["symptom_survival"] is None
+        assert border_result["symptom_survival_accuracy_ci_95"] is None
+        assert border_result["symptom_survival_macro_f1_ci_95"] is None
+        assert border_result["headline_omission_reason"] in {
+            "mask audit failed",
+            "a class has fewer than 50 retained test images",
+        }
+    else:
+        assert border_result["symptom_survival"] == border_result["headline"]
+    assert len(report["frame_leaf_shares"]) == report["test_images"]
+    assert all(0 <= row["leaf_pixel_share"] <= 1 for row in report["frame_leaf_shares"])
     assert border_result["rule"] in {
         "border information detected",
         "no detectable border information at this frame width",
@@ -513,4 +526,89 @@ def test_failed_mask_audit_blocks_mask_dependent_report_scores(
     assert report["leaf_only"]["sample_size"] == 0
     assert report["leaf_only"]["fit_scores"] is None
     assert not report["class_by_scene"]
-    assert all(row["headline"] is None for row in report["border"].values())
+    for row in report["border"].values():
+        assert row["headline"] is None
+        assert row["symptom_survival"] is None
+        assert row["symptom_survival_accuracy_ci_95"] is None
+        assert row["symptom_survival_macro_f1_ci_95"] is None
+        assert row["headline_omission_reason"] == "mask audit failed"
+    assert len(report["frame_leaf_shares"]) == report["test_images"]
+
+
+def test_symptom_survival_is_withheld_below_class_support_gate(
+    inputs: Inputs, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import jute_disease.data as data
+
+    class AllLeafMaskBackend:
+        model = "synthetic-all-leaf"
+        version = "fixture"
+
+        def predict(self, image: Image.Image) -> SimpleNamespace:
+            return SimpleNamespace(
+                mask=np.ones((image.height, image.width), dtype=np.bool_)
+            )
+
+    monkeypatch.setattr(data, "ColorThresholdBackend", AllLeafMaskBackend)
+    benchmark = _mini_benchmark(tmp_path)
+    outcomes = tmp_path / "validation-114.json"
+    _outcomes(outcomes)
+    selection = tmp_path / "selection.json"
+    run_record = tmp_path / "run.json"
+    output = tmp_path / "evaluation"
+    main(
+        [
+            "evaluate",
+            "freeze-matrix",
+            "--validation-outcomes",
+            str(outcomes),
+            "--benchmark",
+            str(benchmark),
+            "--target-dir",
+            str(inputs.target_dir),
+            "--output",
+            str(selection),
+        ]
+    )
+    main(
+        [
+            "evaluate",
+            "write-fixture-run-record",
+            "--selection",
+            str(selection),
+            "--output",
+            str(run_record),
+        ]
+    )
+    main(
+        [
+            "evaluate",
+            "score-test",
+            "--selection",
+            str(selection),
+            "--run-record",
+            str(run_record),
+            "--target-dir",
+            str(inputs.target_dir),
+            "--image-root",
+            str(inputs.image_root),
+            "--output-dir",
+            str(output),
+            "--fixture",
+        ]
+    )
+
+    report = json.loads((output / "evaluation.json").read_text(encoding="utf-8"))
+    assert all(row["leaf_pixel_share"] == 1 for row in report["frame_leaf_shares"])
+    for row in report["border"].values():
+        assert any(count < 50 for count in row["retained_class_counts"].values())
+        assert all(count == 0 for count in row["retained_class_counts"].values())
+        assert all(count == 0 for count in row["retained_scene_counts"].values())
+        assert row["unrestricted"]
+        assert row["headline"] is None
+        assert row["symptom_survival"] is None
+        assert row["symptom_survival_accuracy_ci_95"] is None
+        assert row["symptom_survival_macro_f1_ci_95"] is None
+        assert row["headline_omission_reason"] == (
+            "a class has fewer than 50 retained test images"
+        )
