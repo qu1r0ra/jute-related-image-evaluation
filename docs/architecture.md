@@ -27,6 +27,37 @@ Runtime artifacts stay under the gitignored `artifacts/` directory inside the ch
 
 Closing the browser terminal does not stop a detached process. The 72-hour JupyterLab cull or a host restart can stop it without a final failure notification; a missed heartbeat signals interruption. After relaunch, run `just queue-unattended` again to resume from compatible receipts. After every completed invocation, copy `artifacts/runs/` and its new transfer manifest to the PC, then run `uv run --locked python scripts/verify_transfer.py verify artifacts/runs artifacts/transfer-manifests/queue-<batch-id>.json` there. Accept the batch only when every hash matches. Delete nothing on the lab until the PC copy is verified.
 
+## Manuscript exports
+
+`jute-disease manuscript export` reads a receipt-verified freeze and a JSON
+configuration snapshot. Each export has an ID and writes a support table,
+figure, `macros.json`, and `macros.tex`. Every exported support count is keyed
+by export ID in both macro files. `export.json` records the command, embedded
+configuration and its SHA-256, plus the manifest and receipt paths and hashes.
+`jute-disease manuscript check EXPORT_DIR` recomputes the counts from the
+authoritative frozen manifest and rejects changed macro values, source
+artifacts, table values, or generated files.
+
+The export also writes `rebuild-kit.json` with the source, URL, version, path,
+SHA-256, family ID, split and label for every retained image. Run
+`uv run --locked python scripts/rebuild_splits.py --kit-manifest EXPORT_DIR/rebuild-kit.json --image-root IMAGE_ROOT --output rebuilt-splits.json`
+to verify source bytes and reconstruct the family-level split assignments.
+`jute-disease manuscript fixture --output DIR` exercises synthetic image
+creation, target freeze, table/figure and macro export, split reconstruction,
+and the mechanical macro check without real-data training or scoring.
+
+`claim-audit.json` starts as a pending review record linked to the #108
+may-report and may-not-claim lists. A reviewer in a fresh context from a
+different provider than the writer records pass, fail or unsupported for every
+macro and flagged claim, plus any unflagged numeric statements. Any fail or
+unsupported row blocks submission; changed manuscript claims require a
+re-audit. The owner records a random 10% spot check and final sign-off in that
+record. The synthetic fixture does not perform or imply either review.
+
+External figure images are admitted only with CC0, CC BY or CC BY-SA licenses
+and nonempty source, URL and attribution fields in `figure-sources.json`.
+Generated plots from project artifacts need no external image attribution.
+
 ## Decided, not yet implemented
 
 These items are decided but are not current behavior. Each bullet states the target. When its issue lands, move the rule into the section above it belongs to and delete the bullet.

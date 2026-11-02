@@ -39,6 +39,16 @@ freeze-source name root *args:
 synthetic:
     uv run jute-disease data synthetic
 
+# End-to-end synthetic manuscript export, including the mechanical macro check
+manuscript-fixture output:
+    uv run jute-disease manuscript fixture --output {{output}}
+
+manuscript-check export_dir:
+    uv run jute-disease manuscript check {{export_dir}}
+
+rebuild-splits kit_manifest image_root output:
+    uv run --locked python scripts/rebuild_splits.py --kit-manifest {{kit_manifest}} --image-root {{image_root}} --output {{output}}
+
 # Training: the queue runs every declared fit; resume by running it again
 
 # Verify the measured CUDA stack

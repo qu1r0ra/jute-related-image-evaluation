@@ -25,6 +25,20 @@ Preprocessing identity revision 2 covers the shared 256-pixel letterbox, bilinea
 
 `jute-disease queue plan` and `queue status` list every declared fit and need no policy directory. `queue run` over the full matrix requires `--policy-dir`, the directory of receipted policy manifests (with `assignments.json`), and reads each pool's images from `--pool-a-root`, `--pool-b-root` and `--pool-c-root` (falling back to `--image-root`). The same options reach `just queue-run` and `just queue-unattended` (an optional leading timeout in seconds, then the options). Tuning fits (`classical/tune/...`, `cnn/tune/...`, `source/tune/...`) run before the finals that reuse their selection and write a `tuning.json` that records `test_accessed: false`.
 
+### Manuscript export fixture
+
+Run `just manuscript-fixture artifacts/manuscript-fixture` to exercise a
+synthetic freeze, support table and figure export, export-ID keyed TeX/JSON
+macros, rebuild kit, split reconstruction and macro-to-artifact check. The
+fixture makes no real-data training or scoring claims. For a real frozen
+manifest, run `jute-disease manuscript export --freeze-dir artifacts/freeze/target
+--config CONFIG.json --output EXPORT_DIR --source-url URL --source-version VERSION`,
+then `jute-disease manuscript check EXPORT_DIR`. Use
+`just rebuild-splits EXPORT_DIR/rebuild-kit.json IMAGE_ROOT rebuilt-splits.json`
+to validate source bytes and reproduce the split assignment. The export's
+`claim-audit.json` is a pending record: the independent claim review, owner
+spot check and owner sign-off remain human gates.
+
 Classical estimators and their nine-configuration grids: k-NN with k in {1, 3, 5, 7, 11, 15, 21, 31, 51}; L2 logistic regression with C from 1e-4 to 1e4 in nine log-spaced values; RBF-SVC with C in {1, 10, 100} and gamma in {0.1, 1, 10} times scale; random forest with 500 trees, max_features in {sqrt, 0.1, 0.3} and min_samples_leaf in {1, 3, 10}. Gaussian naive Bayes searches `var_smoothing` over 1e-12 to 1e-4 in nine decades. The crafted feature vector has 548 values; z-scores are fitted on the training fold only.
 
 ## Lab helpers

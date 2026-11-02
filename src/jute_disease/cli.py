@@ -59,6 +59,11 @@ from jute_disease.data import (
     write_policy_manifests,
     write_thresholds,
 )
+from jute_disease.reporting.manuscript import (
+    export_manuscript,
+    run_manuscript_fixture,
+    validate_export,
+)
 from jute_disease.reporting.tables import aggregate_metrics
 from jute_disease.training import (
     WORKSPACE_FILE,
@@ -495,6 +500,37 @@ def _evaluate_aggregate(args: argparse.Namespace) -> None:
     aggregate_metrics(args.fit_ids, args.output, args.runs_dir)
 
 
+def _manuscript_fixture(args: argparse.Namespace) -> None:
+    try:
+        _print_json(run_manuscript_fixture(args.output))
+    except (ValueError, OSError, KeyError) as error:
+        raise SystemExit(f"manuscript fixture blocked: {error}") from error
+
+
+def _manuscript_export(args: argparse.Namespace) -> None:
+    try:
+        result = export_manuscript(
+            args.freeze_dir,
+            args.config,
+            args.output,
+            source_url=args.source_url,
+            source_version=args.source_version,
+            figure_sources_path=args.figure_sources,
+            export_id=args.export_id,
+            command="jute-disease " + " ".join(sys.argv[1:]),
+        )
+        _print_json(result)
+    except (ValueError, OSError, KeyError) as error:
+        raise SystemExit(f"manuscript export blocked: {error}") from error
+
+
+def _manuscript_check(args: argparse.Namespace) -> None:
+    try:
+        _print_json(validate_export(args.export_dir))
+    except (ValueError, OSError, KeyError) as error:
+        raise SystemExit(f"manuscript check blocked: {error}") from error
+
+
 def _bounds(text: str) -> tuple[int, int]:
     try:
         train, val = (int(part) for part in text.split(","))
@@ -734,6 +770,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     aggregate.set_defaults(run=_evaluate_aggregate)
     evaluate_actions.add_parser("predict", help="Classify one image (forwarded).")
+
+    manuscript = commands.add_parser(
+        "manuscript", help="Export and verify manuscript tables, figures and macros."
+    )
+    manuscript_actions = manuscript.add_subparsers(
+        dest="manuscript_action", metavar="ACTION", required=True
+    )
+    manuscript_fixture = manuscript_actions.add_parser(
+        "fixture", help="Run synthetic freeze through export and macro validation."
+    )
+    manuscript_fixture.add_argument("--output", type=Path, required=True)
+    manuscript_fixture.set_defaults(run=_manuscript_fixture)
+    manuscript_export = manuscript_actions.add_parser(
+        "export", help="Export a verified freeze as manuscript artifacts."
+    )
+    manuscript_export.add_argument("--freeze-dir", type=Path, required=True)
+    manuscript_export.add_argument("--config", type=Path, required=True)
+    manuscript_export.add_argument("--output", type=Path, required=True)
+    manuscript_export.add_argument("--source-url", required=True)
+    manuscript_export.add_argument("--source-version", required=True)
+    manuscript_export.add_argument("--figure-sources", type=Path)
+    manuscript_export.add_argument("--export-id")
+    manuscript_export.set_defaults(run=_manuscript_export)
+    manuscript_check = manuscript_actions.add_parser(
+        "check", help="Check exported macros against the authoritative freeze."
+    )
+    manuscript_check.add_argument("export_dir", type=Path)
+    manuscript_check.set_defaults(run=_manuscript_check)
 
     # planned commands owned by open tickets
     _add_freeze(commands)
