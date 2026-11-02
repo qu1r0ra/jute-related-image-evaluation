@@ -117,7 +117,7 @@ from jute_disease.data.masks_audit import (
     run_masks_fixture,
     write_thresholds,
 )
-from jute_disease.data.policies import write_policy_manifests
+from jute_disease.data.policies import load_policy_manifest, write_policy_manifests
 from jute_disease.data.readers import (
     ManifestContentVerifier,
     ManifestDataset,
@@ -146,6 +146,7 @@ from jute_disease.data.sources import (
 )
 from jute_disease.data.synthetic import SyntheticPlan, make_synthetic_data
 from jute_disease.data.transforms import (
+    ImageWithMask,
     PreprocessingSpec,
     classical_pipeline,
     create_pipeline,
@@ -171,6 +172,7 @@ __all__ = [
     "FreezeBlockedError",
     "HeldOutPartitionError",
     "IdentityResolution",
+    "ImageWithMask",
     "ImageFingerprint",
     "InventoryRecord",
     "Manifest",
@@ -235,6 +237,7 @@ __all__ = [
     "write_inventory",
     "write_manifest",
     "write_policy_manifests",
+    "load_policy_manifest",
 ]
 
 

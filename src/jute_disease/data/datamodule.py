@@ -45,6 +45,7 @@ class DataModule(LightningDataModule):
         self,
         data_dir: Path | str | None = None,
         manifest_dir: Path | str | None = None,
+        frozen_manifest: Manifest | None = None,
         image_root: Path | str | None = None,
         target_manifest_dir: Path | str | None = None,
         cache_root: Path | str | None = None,
@@ -60,17 +61,25 @@ class DataModule(LightningDataModule):
         allow_test: bool = False,
     ) -> None:
         super().__init__()
-        if (data_dir is None) == (manifest_dir is None):
-            raise ValueError("Provide exactly one of data_dir or manifest_dir")
+        if (
+            sum(
+                value is not None for value in (data_dir, manifest_dir, frozen_manifest)
+            )
+            != 1
+        ):
+            raise ValueError(
+                "Provide exactly one of data_dir, manifest_dir or frozen_manifest"
+            )
         if manifest_dir is not None and image_root is None:
             raise ValueError("manifest_dir requires image_root")
         if data_dir is not None and k_fold > 1:
             raise ValueError(
                 "k_fold needs group-aware folds; use manifest_dir, not data_dir"
             )
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore=["frozen_manifest"])
         self.data_dir = None if data_dir is None else Path(data_dir).resolve()
         self.manifest_dir = None if manifest_dir is None else Path(manifest_dir)
+        self._frozen_manifest = frozen_manifest
         self.image_root = None if image_root is None else Path(image_root)
         self.target_manifest_dir = (
             None if target_manifest_dir is None else Path(target_manifest_dir)
@@ -128,14 +137,18 @@ class DataModule(LightningDataModule):
             raise HeldOutPartitionError(
                 f"Stage {stage!r} would open the held-out test partition"
             )
-        if self.manifest_dir is not None:
+        if self.manifest_dir is not None or self._frozen_manifest is not None:
             self._setup_manifest(stage)
         else:
             self._setup_folders(stage)
 
     def _setup_manifest(self, stage: str | None) -> None:
-        assert self.manifest_dir is not None
-        manifest = load_manifest(self.manifest_dir)
+        manifest = (
+            self._frozen_manifest
+            if self._frozen_manifest is not None
+            else load_manifest(self.manifest_dir)
+        )
+        assert manifest is not None
         if "source_inventory" in dict(manifest.dependencies):
             if self.target_manifest_dir is None:
                 raise FreezeBlockedError(

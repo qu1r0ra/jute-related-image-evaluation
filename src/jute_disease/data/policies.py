@@ -3,13 +3,144 @@
 import hashlib
 import json
 import math
+from collections import defaultdict
 from pathlib import Path
 
+from jute_disease.config import IMAGE_SIZE
 from jute_disease.data.inventory import inventory_digest, read_inventory
-from jute_disease.data.manifest import load_manifest
+from jute_disease.data.manifest import Manifest, ManifestEntry, load_manifest
+from jute_disease.data.transforms import letterbox_pad_fraction
 
 POLICIES = ("image-random", "exact-copy", "near-duplicate")
 PARTITIONS = ("train", "val", "test")
+
+
+def load_policy_manifest(
+    policy_dir: Path | str,
+    *,
+    pool: str,
+    image_size: int = IMAGE_SIZE,
+    view: int | None = None,
+    policy: str | None = None,
+    draw: int | None = None,
+    reserve: bool = False,
+) -> Manifest:
+    """Load fit-visible partitions from one receipted policy artifact.
+
+    The returned manifest contains only train and validation entries. The
+    reserve is divided into family-disjoint tuning train and validation groups
+    with a stable, class-stratified hash rank.
+    """
+    if pool not in {"A", "B", "C"}:
+        raise ValueError("pool must be A, B or C")
+    if reserve:
+        if view is not None or policy is not None or draw is not None:
+            raise ValueError("reserve loading does not accept a view, policy or draw")
+        relative = Path(pool) / "reserve.json"
+    else:
+        if view not in (1, 2) or policy not in POLICIES or draw is None:
+            raise ValueError("policy loading needs a view, policy and draw")
+        relative = Path(pool) / f"view{view}" / str(policy) / f"draw-{draw}.json"
+    root = Path(policy_dir).resolve()
+    path = root / relative
+    encoded = path.read_bytes()
+    receipt_path = root / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    expected_digest = receipt.get("files", {}).get(relative.as_posix())
+    observed_digest = hashlib.sha256(encoded).hexdigest()
+    if expected_digest != observed_digest:
+        raise ValueError(f"Policy artifact is not covered by its receipt: {relative}")
+    payload = json.loads(encoded)
+    if payload.get("pool") != pool:
+        raise ValueError("Policy artifact pool does not match its path")
+    if not reserve and any(
+        payload.get(key) != value
+        for key, value in (("view", view), ("policy", policy), ("draw", draw))
+    ):
+        raise ValueError("Policy artifact dimensions do not match its path")
+
+    rows = payload.get("entries")
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("Policy artifact must contain entries")
+    if reserve:
+        families: dict[str, list[dict]] = defaultdict(list)
+        for row in rows:
+            family = row.get("family")
+            label = row.get("label")
+            if not isinstance(family, str) or not family or not isinstance(label, str):
+                raise ValueError("Reserve entries need a family and class label")
+            families[label].append(row)
+        family_partitions: dict[str, str] = {}
+        for label, family_rows in families.items():
+            family_ids = sorted({row["family"] for row in family_rows})
+            if len(family_ids) < 2:
+                raise ValueError(f"Reserve needs at least two families for {label}")
+            ranked = sorted(
+                family_ids,
+                key=lambda family: hashlib.sha256(
+                    f"reserve:{pool}:{label}:{family}".encode()
+                ).hexdigest(),
+            )
+            val_count = min(len(ranked) - 1, max(1, round(len(ranked) * 0.2)))
+            validation = set(ranked[:val_count])
+            for family in ranked:
+                family_partitions[family] = "val" if family in validation else "train"
+        entries = [
+            _manifest_entry(row, family_partitions[row["family"]], image_size)
+            for row in rows
+        ]
+    else:
+        entries = [
+            _manifest_entry(row, row["partition"], image_size)
+            for row in rows
+            if row.get("partition") in ("train", "val")
+        ]
+    if (
+        not entries
+        or not any(entry.partition == "train" for entry in entries)
+        or not any(entry.partition == "val" for entry in entries)
+    ):
+        raise ValueError("Policy artifact needs non-empty train and validation data")
+    dependencies = {
+        "policy_file": observed_digest,
+        "config": str(payload.get("config_digest", "")),
+    }
+    return Manifest(
+        seed=int(payload.get("draw_seed", payload.get("seed", 0))),
+        fractions=(("train", 0.0), ("val", 0.0), ("test", 0.0)),
+        entries=tuple(
+            sorted(entries, key=lambda entry: (entry.partition, entry.image_id))
+        ),
+        excluded=(),
+        merged=(),
+        quarantined=(),
+        constraints=(),
+        dependencies=tuple(sorted(dependencies.items())),
+        version=2,
+    )
+
+
+def _manifest_entry(row: dict, partition: str, image_size: int) -> ManifestEntry:
+    try:
+        width, height = int(row["width"]), int(row["height"])
+        entry = ManifestEntry(
+            image_id=str(row["sha256"]),
+            path=str(row["path"]),
+            label=str(row["label"]),
+            partition=partition,
+            group=str(row["family"]),
+            source=str(row["source"]),
+            width=width,
+            height=height,
+            pad_fraction=letterbox_pad_fraction(width, height, image_size),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("Policy entry is missing valid manifest fields") from error
+    if partition not in ("train", "val") or width < 1 or height < 1:
+        raise ValueError("Policy entry has an invalid fit partition or dimensions")
+    if len(entry.image_id) != 64:
+        raise ValueError("Policy entry needs a SHA-256 image identity")
+    return entry
 
 
 def _rank(seed: str, key: str) -> str:
@@ -205,6 +336,7 @@ def write_policy_manifests(
         if any(not any(row["label"] == label for row in reserved) for label in labels):
             raise ValueError(f"insufficient reserve family support for pool {name}")
         artifacts[f"{name}/reserve.json"] = {
+            "pool": name,
             "seed": seed,
             "fraction": reserve_fraction,
             "config_digest": config_digest,
