@@ -120,7 +120,11 @@ from jute_disease.data.masks_audit import (
     run_masks_fixture,
     write_thresholds,
 )
-from jute_disease.data.policies import load_policy_manifest, write_policy_manifests
+from jute_disease.data.policies import (
+    POLICIES,
+    load_policy_manifest,
+    write_policy_manifests,
+)
 from jute_disease.data.readers import (
     ManifestContentVerifier,
     ManifestDataset,
@@ -224,6 +228,7 @@ __all__ = [
     "make_synthetic_data",
     "observed_counts",
     "open_partition",
+    "POLICIES",
     "phash_distance",
     "probe_cache",
     "provenance",

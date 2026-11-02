@@ -180,6 +180,7 @@ def _compute_report(runs_dir: Path) -> dict[str, Any]:
         raise ValueError(f"training receipts directory does not exist: {runs_dir}")
     store = RunStore(runs_dir)
     stages: dict[str, dict[str, float | int]] = {}
+    phases: dict[str, dict[str, float | int]] = {}
     receipt_records: list[dict[str, str]] = []
     for receipt_path in sorted(runs_dir.rglob("receipt.json")):
         fit_id = receipt_path.parent.relative_to(runs_dir).as_posix()
@@ -193,11 +194,16 @@ def _compute_report(runs_dir: Path) -> dict[str, Any]:
         stage = _fit_stage(fit, fit_id)
         if stage is None:
             continue
+        phase_name = "search" if fit.get("phase") == "tune" else "training"
         receipt_records.append({"fit_id": fit_id, "sha256": _sha256_file(receipt_path)})
         summary = stages.setdefault(
             stage, {"fit_count": 0, "attempt_count": 0, "seconds": 0.0}
         )
+        phase_summary = phases.setdefault(
+            phase_name, {"fit_count": 0, "attempt_count": 0, "seconds": 0.0}
+        )
         summary["fit_count"] += 1
+        phase_summary["fit_count"] += 1
         for attempt in receipt["attempts"]:
             attempt_metadata = attempt.get("metadata", {})
             runtime = (
@@ -225,6 +231,8 @@ def _compute_report(runs_dir: Path) -> dict[str, Any]:
                 raise ValueError(f"training receipt {fit_id} has negative elapsed time")
             summary["seconds"] += elapsed
             summary["attempt_count"] += 1
+            phase_summary["seconds"] += elapsed
+            phase_summary["attempt_count"] += 1
     if not receipt_records:
         raise ValueError("no verified A100 training receipts were found")
     stage_rows = [
@@ -236,12 +244,71 @@ def _compute_report(runs_dir: Path) -> dict[str, Any]:
         }
         for stage, values in sorted(stages.items())
     ]
+    phase_rows = [
+        {
+            "phase": phase,
+            "fit_count": int(values["fit_count"]),
+            "attempt_count": int(values["attempt_count"]),
+            "a100_gpu_hours": round(float(values["seconds"]) / 3600, 6),
+        }
+        for phase, values in sorted(phases.items())
+    ]
     return {
         "status": "measured",
         "runs_root": str(runs_dir),
         "receipts": receipt_records,
         "stages": stage_rows,
+        "phases": phase_rows,
     }
+
+
+def compute_training_costs(runs_dir: Path | str) -> dict[str, Any]:
+    """Report receipt-bound GPU time, search attempts and classical search costs."""
+    from jute_disease.training import RunStore
+
+    root = Path(runs_dir).resolve()
+    report = _compute_report(root)
+    store = RunStore(root)
+    classical_fits = 0
+    classical_attempts = 0
+    classical_seconds = 0.0
+    classical_receipts: list[dict[str, str]] = []
+    for receipt_path in sorted(root.rglob("receipt.json")):
+        fit_id = receipt_path.parent.relative_to(root).as_posix()
+        receipt = store.receipt(fit_id, missing_ok=True)
+        if receipt is None:
+            raise ValueError(f"training receipt is incomplete or invalid: {fit_id}")
+        result = receipt.get("results", {})
+        fit = result.get("fit", {}) if isinstance(result, dict) else {}
+        if (
+            not isinstance(fit, dict)
+            or fit.get("kind") != "classical"
+            or fit.get("phase") != "tune"
+        ):
+            continue
+        classical_fits += 1
+        classical_receipts.append(
+            {"fit_id": fit_id, "sha256": _sha256_file(receipt_path)}
+        )
+        for attempt in receipt["attempts"]:
+            started = _parse_timestamp(attempt.get("started_at"), fit_id, "started_at")
+            finished = _parse_timestamp(
+                attempt.get("finished_at"), fit_id, "finished_at"
+            )
+            elapsed = (finished - started).total_seconds()
+            if elapsed < 0:
+                raise ValueError(f"training receipt {fit_id} has negative elapsed time")
+            classical_seconds += elapsed
+            classical_attempts += 1
+    report["classical_search"] = {
+        "fit_count": classical_fits,
+        "attempt_count": classical_attempts,
+        "attempt_seconds": round(classical_seconds, 3),
+        "configurations_per_fit": _classical_tuning_budget(),
+        "receipts": classical_receipts,
+        "source": "verified completed training receipts",
+    }
+    return report
 
 
 def _pending_compute_report() -> dict[str, Any]:

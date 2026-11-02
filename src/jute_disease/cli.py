@@ -65,6 +65,7 @@ from jute_disease.evaluation import (
     TestReadRefusedError,
     authorize_test_read,
     default_reads_log_path,
+    evaluate_image_diagnostics,
     evaluate_test,
     leaf_sample_ids,
     log_test_read,
@@ -648,6 +649,49 @@ def _evaluate_test(args: argparse.Namespace) -> None:
     _print_json({"output": str(args.output), "record_hash": report["record_hash"]})
 
 
+def _evaluate_diagnostics(args: argparse.Namespace) -> None:
+    try:
+        auth = authorize_test_read(
+            args.freeze_record, args.run_record, args.root, args.fit_id
+        )
+        fit_ids = [run.fit_id for run in auth.runs]
+        additional_logs = [args.reads_log] if args.reads_log else []
+        log_test_read(
+            default_reads_log_path(args.root),
+            auth.record_hash,
+            fit_ids,
+            operation="image_diagnostics",
+            additional_logs=additional_logs,
+        )
+        context = _read_json_file(args.context)
+        if not isinstance(context, dict):
+            raise ValueError("diagnostics context must be a JSON object")
+        result = evaluate_image_diagnostics(
+            args.target_dir,
+            auth,
+            args.run_record.parent,
+            args.image_root,
+            args.output,
+            frozen_backbone_checkpoint=args.frozen_backbone_checkpoint,
+            assignment_table_path=args.assignment_table,
+            model_name=args.model_name,
+            scenes=context.get("scenes"),
+            policy_predictions=context.get("policy_predictions"),
+            sanity_checks=context.get("sanity_checks"),
+            generating_command=["jute-disease", *sys.argv[1:]],
+            source_artifacts=[
+                args.context,
+                args.freeze_record,
+                args.run_record,
+                args.root / "pyproject.toml",
+                args.root / "uv.lock",
+            ],
+        )
+    except (TestReadRefusedError, FreezeRecordError, OSError, ValueError) as error:
+        raise SystemExit(f"test read refused: {error}") from error
+    _print_json({"export": result["export"], "record_hash": auth.record_hash})
+
+
 def _bounds(text: str) -> tuple[int, int]:
     try:
         train, val = (int(part) for part in text.split(","))
@@ -991,6 +1035,31 @@ def _add_gated_evaluator(actions: argparse._SubParsersAction) -> None:
     test.add_argument("--resamples", type=int, default=10_000)
     test.add_argument("--permutations", type=int, default=1000)
     test.set_defaults(run=_evaluate_test)
+
+    diagnostics = actions.add_parser(
+        "diagnostics",
+        help="Export gated test-image embeddings and Grad-CAM diagnostics.",
+    )
+    diagnostics.add_argument("--freeze-record", type=Path, required=True)
+    diagnostics.add_argument("--run-record", type=Path, required=True)
+    diagnostics.add_argument("--target-dir", type=Path, required=True)
+    diagnostics.add_argument("--image-root", type=Path, required=True)
+    diagnostics.add_argument("--assignment-table", type=Path, required=True)
+    diagnostics.add_argument("--frozen-backbone-checkpoint", type=Path, required=True)
+    diagnostics.add_argument(
+        "--context",
+        type=Path,
+        required=True,
+        help=(
+            "JSON with frozen scene tags, policy predictions and sanity-check records."
+        ),
+    )
+    diagnostics.add_argument("--output", type=Path, required=True)
+    diagnostics.add_argument("--fit-id", action="append", required=True)
+    diagnostics.add_argument("--model-name", default="mobilenetv2_100.ra_in1k")
+    diagnostics.add_argument("--root", type=Path, default=ROOT_DIR)
+    diagnostics.add_argument("--reads-log", type=Path)
+    diagnostics.set_defaults(run=_evaluate_diagnostics)
 
     sample = actions.add_parser(
         "leaf-sample", help="Print the stratified leaf-only test sample."
