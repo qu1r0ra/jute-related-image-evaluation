@@ -30,7 +30,6 @@ CLAIM_AUDIT_DECISION_URL = (
 )
 ALLOWED_FIGURE_LICENSES = {"CC0", "CC BY", "CC BY-SA"}
 _EXPORT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
-_CLASSICAL_TUNING_BUDGET = {"gnb": 9, "knn": 9, "lr": 9, "rf": 9, "svm": 9}
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -75,10 +74,19 @@ def _macro_tex(export_id: str, values: dict[str, int | float]) -> str:
     return "\n".join(rows) + "\n"
 
 
+def _classical_tuning_budget() -> dict[str, int]:
+    from jute_disease.models.ml import classical_configurations
+
+    return {
+        family: len(classical_configurations(family))
+        for family in ("gnb", "knn", "lr", "rf", "svm")
+    }
+
+
 def _classical_tuning_values() -> dict[str, int | float]:
     return {
         f"classical_tuning_{family}_configurations": count
-        for family, count in _CLASSICAL_TUNING_BUDGET.items()
+        for family, count in _classical_tuning_budget().items()
     }
 
 
@@ -100,7 +108,7 @@ def _fit_stage(fit: dict[str, Any], fit_id: str) -> str | None:
     return None
 
 
-def _timestamp_seconds(value: object, fit_id: str, field: str) -> datetime:
+def _parse_timestamp(value: object, fit_id: str, field: str) -> datetime:
     if not isinstance(value, str):
         raise ValueError(f"training receipt {fit_id} is missing {field}")
     try:
@@ -159,10 +167,8 @@ def _compute_report(runs_dir: Path) -> dict[str, Any]:
                     f"training receipt {fit_id} attempt {attempt.get('attempt')} "
                     "does not record an A100 GPU"
                 )
-            started = _timestamp_seconds(
-                attempt.get("started_at"), fit_id, "started_at"
-            )
-            finished = _timestamp_seconds(
+            started = _parse_timestamp(attempt.get("started_at"), fit_id, "started_at")
+            finished = _parse_timestamp(
                 attempt.get("finished_at"), fit_id, "finished_at"
             )
             elapsed = (finished - started).total_seconds()
@@ -226,7 +232,7 @@ def _classical_tuning_csv() -> str:
         stream, fieldnames=("family", "configurations"), lineterminator="\n"
     )
     writer.writeheader()
-    for family, configurations in _CLASSICAL_TUNING_BUDGET.items():
+    for family, configurations in _classical_tuning_budget().items():
         writer.writerow({"family": family, "configurations": configurations})
     return stream.getvalue()
 
@@ -1177,12 +1183,12 @@ def rebuild_kit_splits(
             or entry["image_id"] != entry["sha256"]
         ):
             raise ValueError(f"rebuild kit entry {index} has an invalid image hash")
-        path = (image_root / Path(*relative.parts)).resolve()
-        if not path.is_relative_to(image_root):
-            raise ValueError(f"rebuild kit entry {index} escapes the image root")
         if entry["split"] == "test":
             skipped_test_images += 1
         else:
+            path = (image_root / Path(*relative.parts)).resolve()
+            if not path.is_relative_to(image_root):
+                raise ValueError(f"rebuild kit entry {index} escapes the image root")
             if _sha256_file(path) != entry["sha256"]:
                 raise ValueError(f"source hash mismatch for {entry['path']}")
             verified_images += 1
@@ -1426,11 +1432,14 @@ def validate_claim_audit(
         raise ValueError(
             "claim audit requires a different-provider fresh-context reviewer"
         )
-    if not re.fullmatch(r"[0-9a-f]{64}", audit.get("manuscript_sha256", "")):
+    manuscript_sha256 = audit.get("manuscript_sha256")
+    if not isinstance(manuscript_sha256, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", manuscript_sha256
+    ):
         raise ValueError("claim audit must record the reviewed manuscript SHA-256")
     if manuscript_path is None:
         raise ValueError("claim audit check requires the current manuscript path")
-    if _sha256_file(Path(manuscript_path)) != audit["manuscript_sha256"]:
+    if _sha256_file(Path(manuscript_path)) != manuscript_sha256:
         raise ValueError("claim audit manuscript SHA-256 does not match the manuscript")
     review_scope = audit.get("review_scope")
     if (

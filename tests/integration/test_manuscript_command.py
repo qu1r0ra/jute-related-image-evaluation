@@ -6,6 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from jute_disease.models.ml import classical_configurations
 from jute_disease.reporting import export_manuscript, validate_figure_sources
 
 
@@ -196,6 +197,10 @@ def test_fixture_freezes_exports_rebuilds_and_checks_macros(tmp_path: Path) -> N
     assert (
         len(macros[report["export"]["export_id"]]) == report["check"]["checked_macros"]
     )
+    for family in ("gnb", "knn", "lr", "rf", "svm"):
+        assert macros[report["export"]["export_id"]][
+            f"classical_tuning_{family}_configurations"
+        ] == len(classical_configurations(family))
     assert audit["status"] == "pending"
     assert audit["owner_spot_check"]["status"] == "pending"
     assert audit["owner_signoff"]["status"] == "pending"
@@ -229,6 +234,18 @@ def test_fixture_freezes_exports_rebuilds_and_checks_macros(tmp_path: Path) -> N
     )
     assert stale_audit_check.returncode != 0
     assert "SHA-256 does not match" in stale_audit_check.stderr
+    audit["manuscript_sha256"] = []
+    (export_dir / "claim-audit.json").write_text(json.dumps(audit), encoding="utf-8")
+    malformed_audit_check = _run(
+        "manuscript",
+        "audit-check",
+        str(export_dir),
+        "--manuscript",
+        str(manuscript),
+    )
+    assert malformed_audit_check.returncode != 0
+    assert "must record the reviewed manuscript SHA-256" in malformed_audit_check.stderr
+    assert "Traceback" not in malformed_audit_check.stderr
 
     runs_root = tmp_path / "synthetic-runs"
     fit_id = "cnn/mobilenet_v2_direct/seed-42"
@@ -414,9 +431,8 @@ def test_fixture_freezes_exports_rebuilds_and_checks_macros(tmp_path: Path) -> N
     synthetic_test_entry = next(
         entry for entry in kit_entries if entry["split"] == "test"
     )
-    (output / "images" / synthetic_test_entry["path"]).write_bytes(
-        b"changed synthetic test partition image"
-    )
+    test_image_path = output / "images" / synthetic_test_entry["path"]
+    test_image_path.unlink()
     rebuilt = subprocess.run(
         [
             sys.executable,
@@ -433,6 +449,7 @@ def test_fixture_freezes_exports_rebuilds_and_checks_macros(tmp_path: Path) -> N
         check=False,
     )
     assert rebuilt.returncode == 0, rebuilt.stderr
+    assert not test_image_path.exists()
     rebuilt_report = json.loads(rebuilt.stdout)
     assert rebuilt_report["split_digest"] == report["rebuild"]["split_digest"]
     assert rebuilt_report["skipped_test_images"] == sum(

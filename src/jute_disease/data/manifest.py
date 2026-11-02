@@ -396,8 +396,7 @@ def build_manifest(
             "grouping_version": grouping_version,
         }
     fractions = dict(SPLITS if fractions is None else fractions)
-    if set(fractions) != set(PARTITIONS) or abs(sum(fractions.values()) - 1) > 1e-9:
-        raise ValueError(f"fractions must cover {PARTITIONS} and sum to 1: {fractions}")
+    validate_partition_fractions(fractions)
     try:
         curation = curate(records, rules)
     except ValueError as error:

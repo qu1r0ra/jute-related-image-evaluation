@@ -231,6 +231,12 @@ def test_bad_fractions_and_unknown_partitions_raise(
         build_manifest(
             inventory, rules, fractions={"train": 0.5, "val": 0.2, "test": 0.2}
         )
+    with pytest.raises(ValueError, match="positive finite numbers"):
+        build_manifest(
+            inventory,
+            rules,
+            fractions={"train": 1.2, "val": -0.1, "test": -0.1},
+        )
     with pytest.raises(ValueError, match="Unknown partition"):
         frozen.partition("holdout")
     assert len(frozen.partition("train")) == sum(frozen.support()["train"].values())
