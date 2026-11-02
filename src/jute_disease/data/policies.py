@@ -8,7 +8,11 @@ from pathlib import Path
 
 from jute_disease.config import IMAGE_SIZE
 from jute_disease.data.inventory import inventory_digest, read_inventory
-from jute_disease.data.manifest import Manifest, ManifestEntry, load_manifest
+from jute_disease.data.manifest import (
+    Manifest,
+    ManifestEntry,
+    load_complete_manifest,
+)
 from jute_disease.data.transforms import letterbox_pad_fraction
 
 POLICIES = ("image-random", "exact-copy", "near-duplicate")
@@ -90,11 +94,9 @@ def load_policy_manifest(
             for row in rows
         ]
     else:
-        entries = [
-            _manifest_entry(row, row["partition"], image_size)
-            for row in rows
-            if row.get("partition") in ("train", "val")
-        ]
+        if any(row.get("partition") not in ("train", "val") for row in rows):
+            raise ValueError("Fit policy manifest contains a non-fit partition")
+        entries = [_manifest_entry(row, row["partition"], image_size) for row in rows]
     if (
         not entries
         or not any(entry.partition == "train" for entry in entries)
@@ -154,7 +156,7 @@ def _select(keys: set[str], fraction: float, seed: str) -> set[str]:
 
 def _pool(root: Path) -> tuple[list[dict], dict[str, str]]:
     target = root / "target"
-    manifest = load_manifest(target)
+    manifest = load_complete_manifest(target)
     dependencies = dict(manifest.dependencies)
     if "grouping" not in dependencies:
         raise ValueError("A frozen grouping receipt is required")
@@ -409,7 +411,7 @@ def write_policy_manifests(
                             f"insufficient per-class family support for pool {name}, "
                             f"view {view}, {policy}, draw {draw}: {support}"
                         )
-                    artifacts[f"{name}/view{view}/{policy}/draw-{draw}.json"] = {
+                    common = {
                         "pool": name,
                         "view": view,
                         "policy": policy,
@@ -421,19 +423,47 @@ def write_policy_manifests(
                         "val_fraction": val_fraction,
                         "test_fraction": test_fraction,
                         "healthy_cap_seed": seed,
-                        "family_support": support,
-                        "entries": entries,
+                        "healthy_cap_excluded": excluded,
+                    }
+                    fit_entries = [
+                        row for row in entries if row["partition"] in ("train", "val")
+                    ]
+                    protected_entries = [
+                        row for row in entries if row["partition"] == "test"
+                    ]
+                    fit_support = _support(fit_entries, labels)
+                    protected_support = _support(protected_entries, labels)
+                    artifacts[f"{name}/view{view}/{policy}/draw-{draw}.json"] = {
+                        **common,
+                        "family_support": {
+                            part: fit_support[part] for part in ("train", "val")
+                        },
+                        "entries": fit_entries,
                         "image_support": {
                             part: {
                                 label: sum(
                                     row["partition"] == part and row["label"] == label
-                                    for row in entries
+                                    for row in fit_entries
                                 )
                                 for label in labels
                             }
-                            for part in PARTITIONS
+                            for part in ("train", "val")
                         },
-                        "healthy_cap_excluded": excluded,
+                    }
+                    artifacts[
+                        f"{name}/view{view}/{policy}/draw-{draw}.protected-test.json"
+                    ] = {
+                        **common,
+                        "family_support": {"test": protected_support["test"]},
+                        "entries": protected_entries,
+                        "image_support": {
+                            "test": {
+                                label: sum(
+                                    row["label"] == label for row in protected_entries
+                                )
+                                for label in labels
+                            }
+                        },
                     }
     output.mkdir(parents=True, exist_ok=False)
     digests = {}

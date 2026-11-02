@@ -13,7 +13,7 @@ from jute_disease.data import (
     ManifestEntry,
     inventory_digest,
     write_inventory,
-    write_manifest,
+    write_isolated_manifests,
 )
 
 
@@ -74,7 +74,7 @@ def frozen_pool(
             ("inventory", inventory_digest(records)),
         ),
     )
-    write_manifest(manifest, root / "target")
+    write_isolated_manifests(manifest, root / "target")
     (root / "target" / "grouping.json").write_text(
         json.dumps(grouping), encoding="utf-8"
     )
@@ -173,21 +173,28 @@ def test_command_writes_complete_paired_manifests(tmp_path: Path) -> None:
         protected = []
         for policy in ("image-random", "exact-copy", "near-duplicate"):
             for view in (1, 2):
-                manifest = json.loads(
-                    (
-                        out / "C" / f"view{view}" / policy / f"draw-{draw}.json"
-                    ).read_text()
+                base = out / "C" / f"view{view}" / policy / f"draw-{draw}"
+                fit_manifest = json.loads(base.with_suffix(".json").read_text())
+                test_manifest = json.loads(
+                    base.with_suffix(".protected-test.json").read_text()
                 )
-                entries = manifest["entries"]
+                fit_entries = fit_manifest["entries"]
+                test_entries = test_manifest["entries"]
+                entries = fit_entries + test_entries
+                assert {row["partition"] for row in fit_entries} <= {"train", "val"}
+                assert {row["partition"] for row in test_entries} == {"test"}
                 assert not reserve_families.intersection(
                     row["family"] for row in entries
                 )
-                assert manifest["draw_seed"] == 42 + draw
+                assert (
+                    fit_manifest["draw_seed"] == test_manifest["draw_seed"] == 42 + draw
+                )
                 for label in ("Healthy", "Mosaic"):
                     assert all(
-                        manifest["family_support"][part][label] > 0
-                        for part in ("train", "val", "test")
+                        fit_manifest["family_support"][part][label] > 0
+                        for part in ("train", "val")
                     )
+                    assert test_manifest["family_support"]["test"][label] > 0
                 if policy != "image-random":
                     key = "sha256" if policy == "exact-copy" else "family"
                     assert all(
@@ -198,11 +205,9 @@ def test_command_writes_complete_paired_manifests(tmp_path: Path) -> None:
                     if policy == "exact-copy":
                         assert len({row["sha256"] for row in entries}) < len(entries)
                 if view == 2:
-                    protected.append(
-                        {row["path"] for row in entries if row["partition"] == "test"}
-                    )
+                    protected.append({row["path"] for row in test_entries})
         assert protected[0] == protected[1] == protected[2]
-        for family in {row["family"] for row in entries if row["partition"] == "test"}:
+        for family in {row["family"] for row in test_entries}:
             assert all(
                 row["partition"] == "test" for row in entries if row["family"] == family
             )

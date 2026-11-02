@@ -61,10 +61,12 @@ from jute_disease.data.manifest import (
     ManifestEntry,
     build_groups,
     build_manifest,
+    load_complete_manifest,
     load_manifest,
     receipt_for,
     summarize_pad_fractions,
     validate_manifest,
+    write_isolated_manifests,
     write_manifest,
 )
 from jute_disease.data.sources import (
@@ -299,7 +301,7 @@ def freeze_target(
     )
     target = output_dir / TARGET_DIR
     try:
-        existing = load_manifest(target)
+        existing = load_complete_manifest(target)
     except FileNotFoundError:
         existing = None
     if (
@@ -325,7 +327,7 @@ def freeze_target(
     if grouping is not None:
         target.mkdir(parents=True, exist_ok=True)
         _write_json(target / "grouping.json", grouping)
-    write_manifest(manifest, target)
+    write_isolated_manifests(manifest, target)
     report = {
         "image_root": str(image_root),
         "receipt": receipt_for(manifest),
@@ -386,7 +388,7 @@ def load_source_manifest(
     """
     manifest_dir = Path(manifest_dir)
     manifest = load_manifest(manifest_dir)
-    target = load_manifest(Path(target_manifest_dir))
+    target = load_complete_manifest(Path(target_manifest_dir))
     dependencies = dict(manifest.dependencies)
     if not dependencies.get("source_inventory") or not dependencies.get(
         "source_provenance"
@@ -508,7 +510,7 @@ def intake_source(
     expected_digest = _check_package_identity(spec, package_version, package_digest)
     leaf_map = _read_leaf_map(leaf_map_path)
     output_dir = Path(output_dir)
-    manifest = load_manifest(output_dir / TARGET_DIR)
+    manifest = load_complete_manifest(output_dir / TARGET_DIR)
     held_out = {
         e.image_id for name_ in ("val", "test") for e in manifest.partition(name_)
     }

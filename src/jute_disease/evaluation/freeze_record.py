@@ -17,7 +17,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-RECORD_SCHEMA = 2
+from jute_disease.data.manifest import (
+    load_complete_manifest,
+    load_manifest,
+    load_protected_test_manifest,
+)
+
+RECORD_SCHEMA = 3
 RUN_RECORD_SCHEMA = 1
 READS_LOG_RELATIVE_PATH = Path("artifacts/evaluation/test-reads.jsonl")
 PIPELINE_DIRS = ("src", "configs")
@@ -199,6 +205,7 @@ def write_freeze_record(
     output: Path | str,
     root: Path | str,
     *,
+    target_dir: Path | str,
     required_fit_ids: Iterable[str] = (),
     reads_log: Path | str | None = None,
 ) -> dict[str, Any]:
@@ -224,6 +231,7 @@ def write_freeze_record(
         raise FreezeRecordError("mask_audit needs a boolean 'passed' outcome")
     _check_border(spec["border_probe"])
     _check_outcomes(spec, validation_outcomes)
+    manifests = _manifest_binding(target_dir)
     default_log = default_reads_log_path(root)
     prior_reads = read_reads_log(default_log)
     if reads_log is not None and Path(reads_log).resolve() != default_log.resolve():
@@ -238,6 +246,7 @@ def write_freeze_record(
         "fit_ids": sorted(fit_ids),
         "analysis_ids": sorted(analysis_ids),
         "invalidated_reads": prior_reads,
+        "manifest_binding": manifests,
         "validation_outcomes_hash": canonical_hash(validation_outcomes),
         "pipeline_tree_hash": pipeline_tree_hash(root),
         "environment_lock_hash": environment_lock_hash(root),
@@ -264,6 +273,48 @@ def load_freeze_record(path: Path | str) -> dict[str, Any]:
     ):
         raise TestReadRefusedError("freeze record hash does not match its content")
     return record
+
+
+def _manifest_binding(target_dir: Path | str) -> dict[str, Any]:
+    """Validate and bind fit and protected-test manifest files to a record."""
+    directory = Path(target_dir).resolve()
+    fit_path = directory / "manifest.json"
+    test_path = directory / "protected-test" / "manifest.json"
+    try:
+        fit = load_manifest(directory)
+        test = load_protected_test_manifest(directory)
+        load_complete_manifest(directory)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        if isinstance(error, FreezeRecordError):
+            raise
+        raise FreezeRecordError(
+            f"cannot bind invalid target manifests: {error}"
+        ) from error
+    if any(entry.partition == "test" for entry in fit.entries):
+        raise FreezeRecordError("fit manifest contains protected test rows")
+    fit_dependencies = dict(fit.dependencies)
+    test_dependencies = dict(test.dependencies)
+    if fit_dependencies.pop("manifest_scope", None) != "fit":
+        raise FreezeRecordError("target manifest does not have fit scope")
+    if test_dependencies.pop("manifest_scope", None) != "protected_test":
+        raise FreezeRecordError("protected-test manifest does not have test scope")
+    if fit_dependencies != test_dependencies:
+        raise FreezeRecordError(
+            "fit and protected-test manifests have mismatched lineage"
+        )
+    return {
+        "schema": 1,
+        "fit": {
+            "schema": fit.version,
+            "path": str(fit_path),
+            "sha256": _file_hash(fit_path),
+        },
+        "protected_test": {
+            "schema": test.version,
+            "path": str(test_path),
+            "sha256": _file_hash(test_path),
+        },
+    }
 
 
 @dataclass(frozen=True)
@@ -423,7 +474,9 @@ class Authorization:
 
 
 def verify_freeze_record(
-    freeze_record: Path | str | None, root: Path | str
+    freeze_record: Path | str | None,
+    root: Path | str,
+    target_dir: Path | str | None = None,
 ) -> dict[str, Any]:
     """Load the record and check that the code and environment are unchanged."""
     if freeze_record is None or not Path(freeze_record).is_file():
@@ -436,6 +489,58 @@ def verify_freeze_record(
         )
     if body["environment_lock_hash"] != environment_lock_hash(root):
         raise TestReadRefusedError("environment lock changed since the freeze record")
+    binding = body.get("manifest_binding")
+    if not isinstance(binding, dict) or binding.get("schema") != 1:
+        raise TestReadRefusedError("freeze record has no supported manifest binding")
+    fit = binding.get("fit")
+    protected = binding.get("protected_test")
+    if not isinstance(fit, dict) or not isinstance(protected, dict):
+        raise TestReadRefusedError("freeze record manifest binding is incomplete")
+    try:
+        fit_path = Path(fit["path"])
+        protected_path = Path(protected["path"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise TestReadRefusedError(
+            "freeze record has invalid manifest paths"
+        ) from error
+    directory = (
+        Path(target_dir).resolve()
+        if target_dir is not None
+        else fit_path.parent.resolve()
+    )
+    for item, path, expected in (
+        (fit, fit_path, directory / "manifest.json"),
+        (protected, protected_path, directory / "protected-test" / "manifest.json"),
+    ):
+        if path.resolve() != expected.resolve() or not path.is_file():
+            raise TestReadRefusedError(
+                "bound manifest is missing or has a changed path"
+            )
+        if not isinstance(item.get("sha256"), str) or item["sha256"] != _file_hash(
+            path
+        ):
+            raise TestReadRefusedError(
+                "bound manifest bytes changed since the freeze record"
+            )
+    try:
+        fit_manifest = load_manifest(directory)
+        test_manifest = load_protected_test_manifest(directory)
+        load_complete_manifest(directory)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise TestReadRefusedError("bound manifest or receipt is invalid") from error
+    if (
+        fit.get("schema") != fit_manifest.version
+        or protected.get("schema") != test_manifest.version
+    ):
+        raise TestReadRefusedError(
+            "bound manifest schema changed since the freeze record"
+        )
+    if any(entry.partition == "test" for entry in fit_manifest.entries):
+        raise TestReadRefusedError("fit manifest contains protected test rows")
+    if any(entry.partition != "test" for entry in test_manifest.entries):
+        raise TestReadRefusedError("protected-test manifest contains non-test rows")
+    if dict(fit_manifest.dependencies).get("manifest_scope") != "fit":
+        raise TestReadRefusedError("fit manifest has an invalid scope")
     return record
 
 
@@ -444,9 +549,10 @@ def authorize_test_read(
     run_record: Path | str | None,
     root: Path | str,
     fit_ids: Sequence[str] | None = None,
+    target_dir: Path | str | None = None,
 ) -> Authorization:
     """Return the authorized runs, or refuse the test read."""
-    record = verify_freeze_record(freeze_record, root)
+    record = verify_freeze_record(freeze_record, root, target_dir)
     body = record["body"]
     if run_record is None or not Path(run_record).is_file():
         raise TestReadRefusedError("test read refused: no run record")

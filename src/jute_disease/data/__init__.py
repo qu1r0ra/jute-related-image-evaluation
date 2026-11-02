@@ -84,6 +84,7 @@ from jute_disease.data.manifest import (
     receipt_for,
     validate_manifest,
     validate_partition_fractions,
+    write_isolated_manifests,
     write_manifest,
 )
 from jute_disease.data.masks import (
@@ -247,6 +248,7 @@ __all__ = [
     "write_decision",
     "write_inventory",
     "write_manifest",
+    "write_isolated_manifests",
     "write_policy_manifests",
     "load_policy_manifest",
 ]

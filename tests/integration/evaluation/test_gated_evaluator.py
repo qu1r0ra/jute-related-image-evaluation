@@ -5,9 +5,11 @@ from pathlib import Path
 
 import pytest
 
+from jute_disease import cli as cli_module
 from jute_disease.cli import main
 from jute_disease.config import BENCHMARK_CONFIG
 from jute_disease.data import load_manifest
+from jute_disease.data.manifest import load_protected_test_manifest
 from jute_disease.training import load_benchmark
 
 LABEL_COUNT = 2
@@ -75,6 +77,7 @@ def _probe_ids(capsys: pytest.CaptureFixture[str]) -> list[str]:
 
 def _freeze(
     tmp_path: Path,
+    target: Path,
     root: Path,
     capsys: pytest.CaptureFixture[str],
     extra_fits: list[str],
@@ -90,6 +93,8 @@ def _freeze(
         _outcomes(tmp_path),
         "--output",
         tmp_path / name,
+        "--target-dir",
+        target,
         "--root",
         root,
     ]
@@ -100,7 +105,9 @@ def _freeze(
 
 
 def _predictions(target: Path, path: Path, flip: int, ids: list[str] | None) -> None:
-    entries = sorted(load_manifest(target).partition("test"), key=lambda e: e.image_id)
+    entries = sorted(
+        load_protected_test_manifest(target).entries, key=lambda e: e.image_id
+    )
     labels = sorted({e.label for e in load_manifest(target).entries})
     chosen = [e for e in entries if ids is None or e.image_id in ids]
     predicted = [
@@ -113,7 +120,11 @@ def _predictions(target: Path, path: Path, flip: int, ids: list[str] | None) -> 
 
 
 def test_test_read_refused_without_records_and_permitted_after(
-    tmp_path: Path, target: Path, root: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     arguments = (
         "evaluate",
@@ -132,6 +143,20 @@ def test_test_read_refused_without_records_and_permitted_after(
     with pytest.raises(SystemExit, match="no frozen selection record"):
         _cli(*arguments, "--freeze-record", tmp_path / "missing.json")
     assert not (tmp_path / "out").exists()
+    with pytest.raises(SystemExit, match="no frozen selection record"):
+        _cli(
+            "evaluate",
+            "leaf-sample",
+            "--target-dir",
+            target,
+            "--root",
+            root,
+            "--freeze-record",
+            tmp_path / "missing.json",
+            "--sample-size",
+            12,
+        )
+    assert not (root / "artifacts/evaluation/test-reads.jsonl").exists()
 
     probes = _probe_ids(capsys)
     _cli(
@@ -152,6 +177,8 @@ def test_test_read_refused_without_records_and_permitted_after(
         _outcomes(tmp_path),
         "--output",
         tmp_path / "freeze-record.json",
+        "--target-dir",
+        target,
         "--root",
         root,
     )
@@ -193,6 +220,21 @@ def test_test_read_refused_without_records_and_permitted_after(
         "--output",
         tmp_path / "runs" / "run-record.json",
     )
+
+    authorized: dict[str, object] = {}
+
+    def _authorized_stub(
+        target_dir: Path, auth: object, run_dir: Path, **kwargs: object
+    ) -> dict[str, object]:
+        del run_dir, kwargs
+        authorized["target_dir"] = target_dir
+        authorized["auth"] = auth
+        return {
+            "post_hoc": False,
+            "record_hash": auth.record_hash,
+        }
+
+    monkeypatch.setattr(cli_module, "evaluate_test", _authorized_stub)
     _cli(
         *arguments,
         "--freeze-record",
@@ -202,4 +244,14 @@ def test_test_read_refused_without_records_and_permitted_after(
     )
     report = json.loads((tmp_path / "out" / "test.json").read_text(encoding="utf-8"))
     assert report["post_hoc"] is False
-    assert report["systems"]["mobilenet_v2_direct"]["evaluation"]["summary"]
+    assert authorized["target_dir"] == target
+    assert authorized["auth"].record_hash == report["record_hash"]
+    assert authorized["auth"].runs
+    read_log = root / "artifacts/evaluation/test-reads.jsonl"
+    rows = [json.loads(line) for line in read_log.read_text().splitlines()]
+    assert any(
+        row["operation"] == "evaluate_test"
+        and row["record_hash"]
+        == json.loads((tmp_path / "freeze-record.json").read_text())["hash"]
+        for row in rows
+    )
