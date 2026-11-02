@@ -56,6 +56,10 @@ queue-status *args:
 queue-run *args:
     uv run jute-disease queue run {{args}}
 
+# Launch a detached lab queue invocation with notifications and transfer inventory
+queue-unattended:
+    bash scripts/queue_unattended.sh
+
 # Aggregation
 
 aggregate exps:
