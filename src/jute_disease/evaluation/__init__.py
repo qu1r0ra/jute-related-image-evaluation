@@ -1,4 +1,30 @@
+from jute_disease.evaluation.breakdowns import (
+    class_scene_cells,
+    scene_summaries,
+    stratified_sample,
+)
+from jute_disease.evaluation.evaluator import evaluate_test, leaf_sample_ids
+from jute_disease.evaluation.freeze_record import (
+    FreezeRecordError,
+    TestReadRefusedError,
+    authorize_test_read,
+    default_reads_log_path,
+    log_test_read,
+    verify_freeze_record,
+    write_freeze_record,
+    write_run_record,
+)
 from jute_disease.evaluation.metrics import EVAL_METRICS, TRAIN_METRICS, format_metrics
+from jute_disease.evaluation.probes import (
+    background_only_image,
+    border_probe,
+    frame_leaf_share,
+    frame_mask,
+    frame_only_image,
+    pad_cue_fits,
+    planned_probe_fit_ids,
+    probe_fits,
+)
 from jute_disease.evaluation.resampling import (
     CONFIDENCE_LEVEL,
     EVAL_SEED,
@@ -48,4 +74,25 @@ __all__ = [
     "score_run",
     "summarize_seeds",
     "wilson_interval",
+    "FreezeRecordError",
+    "TestReadRefusedError",
+    "authorize_test_read",
+    "background_only_image",
+    "border_probe",
+    "class_scene_cells",
+    "default_reads_log_path",
+    "evaluate_test",
+    "frame_leaf_share",
+    "frame_mask",
+    "frame_only_image",
+    "leaf_sample_ids",
+    "log_test_read",
+    "pad_cue_fits",
+    "planned_probe_fit_ids",
+    "probe_fits",
+    "scene_summaries",
+    "stratified_sample",
+    "verify_freeze_record",
+    "write_freeze_record",
+    "write_run_record",
 ]

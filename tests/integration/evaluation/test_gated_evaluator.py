@@ -60,7 +60,8 @@ def _outcomes(tmp_path: Path) -> Path:
         {
             "partition": "val",
             "letterbox_comparison": {"letterbox": 0.9, "resize": 0.8},
-            "selections": {"cnn/tune/pool-A": {"val_macro_f1": 0.9}},
+            "selections": {"cnn/tune/pool-A": {"selected": 1.0, "val_macro_f1": 0.9}},
+            "mask_audit": {"passed": True},
         },
     )
 

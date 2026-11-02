@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from jute_disease.evaluation.resampling import Interval
-from jute_disease.evaluation.scores import PredictionSet, metric_values
+from jute_disease.evaluation.scores import PredictionSet
 from jute_disease.evaluation.statistics import wilson_interval
 
 SCENE_MIN_PER_CLASS = 30
@@ -73,11 +73,12 @@ def scene_summaries(
     for scene in sorted(set(tags)):
         rows = tags == scene
         counts = np.bincount(truth[rows], minlength=k)
+        present_indices = np.flatnonzero(counts)
         present = {system.classes[i]: int(c) for i, c in enumerate(counts) if c}
         short = sorted(
-            label
-            for label, c in zip(system.classes, counts, strict=True)
-            if c < SCENE_MIN_PER_CLASS
+            system.classes[i]
+            for i in present_indices
+            if counts[i] < SCENE_MIN_PER_CLASS
         )
         if short:
             out.append(
@@ -91,13 +92,9 @@ def scene_summaries(
             )
             continue
         scores = [
-            float(
-                metric_values(
-                    np.bincount(truth[rows] * k + p[rows], minlength=k * k).reshape(
-                        k, k
-                    ),
-                    "macro_f1",
-                )
+            _macro_f1_for_present_classes(
+                np.bincount(truth[rows] * k + p[rows], minlength=k * k).reshape(k, k),
+                present_indices,
             )
             for p in predicted
         ]
@@ -105,6 +102,22 @@ def scene_summaries(
             SceneSummary(scene, int(rows.sum()), present, float(np.mean(scores)), None)
         )
     return tuple(out)
+
+
+def _macro_f1_for_present_classes(
+    confusion: np.ndarray, class_indices: np.ndarray
+) -> float:
+    true_positive = np.diag(confusion)[class_indices]
+    support = confusion.sum(axis=1)[class_indices]
+    predicted = confusion.sum(axis=0)[class_indices]
+    denominator = support + predicted
+    f1 = np.divide(
+        2 * true_positive,
+        denominator,
+        out=np.zeros_like(true_positive, dtype=float),
+        where=denominator > 0,
+    )
+    return float(np.mean(f1))
 
 
 def stratified_sample(

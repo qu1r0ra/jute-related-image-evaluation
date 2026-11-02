@@ -17,8 +17,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-RECORD_SCHEMA = 1
+RECORD_SCHEMA = 2
 RUN_RECORD_SCHEMA = 1
+READS_LOG_RELATIVE_PATH = Path("artifacts/evaluation/test-reads.jsonl")
 PIPELINE_DIRS = ("src", "configs")
 LOCKFILE = "uv.lock"
 REQUIRED_ANALYSES = (
@@ -47,6 +48,11 @@ class TestReadRefusedError(PermissionError):
     """The evaluator refuses a test read."""
 
     __test__ = False
+
+
+def default_reads_log_path(root: Path | str) -> Path:
+    """Return the project-wide log path used to detect prior test reads."""
+    return Path(root) / READS_LOG_RELATIVE_PATH
 
 
 def canonical_hash(payload: object) -> str:
@@ -137,16 +143,39 @@ def _check_outcomes(
         )
     if not all(isinstance(v, int | float) for v in comparison.values()):
         raise FreezeRecordError("letterbox comparison values must be numbers")
-    choice = spec["letterbox_decision"].get("choice")
+    decision = spec.get("letterbox_decision")
+    choice = decision.get("choice") if isinstance(decision, dict) else None
     if choice not in comparison:
         raise FreezeRecordError("letterbox decision is not one of the compared fits")
+    audit = outcomes.get("mask_audit")
+    freeze_audit = spec.get("mask_audit")
+    if (
+        not isinstance(audit, dict)
+        or not isinstance(audit.get("passed"), bool)
+        or not isinstance(freeze_audit, dict)
+        or audit["passed"] != freeze_audit.get("passed")
+    ):
+        raise FreezeRecordError(
+            "freeze mask-audit outcome must match the recorded validation outcome"
+        )
     recorded = outcomes.get("selections")
-    if not isinstance(recorded, dict):
+    selections = spec.get("selections")
+    if not isinstance(recorded, dict) or not isinstance(selections, dict):
         raise FreezeRecordError("validation outcomes need the selection outcomes")
-    missing = sorted(set(spec["selections"]) - set(recorded))
+    missing = sorted(set(selections) - set(recorded))
     if missing:
         raise FreezeRecordError(
             f"selections without a recorded validation outcome: {missing}"
+        )
+    mismatched = sorted(
+        key
+        for key, selected in selections.items()
+        if not isinstance(recorded[key], dict)
+        or recorded[key].get("selected") != selected
+    )
+    if mismatched:
+        raise FreezeRecordError(
+            f"freeze selections must match recorded validation choices: {mismatched}"
         )
 
 
@@ -188,15 +217,26 @@ def write_freeze_record(
         )
     if not isinstance(spec["selections"], dict) or not spec["selections"]:
         raise FreezeRecordError("selections must list the validation-selected choices")
-    if not isinstance(spec["mask_audit"].get("passed"), bool):
+    if not isinstance(spec["mask_audit"], dict) or not isinstance(
+        spec["mask_audit"].get("passed"), bool
+    ):
         raise FreezeRecordError("mask_audit needs a boolean 'passed' outcome")
     _check_border(spec["border_probe"])
     _check_outcomes(spec, validation_outcomes)
-    prior_reads = read_reads_log(None if reads_log is None else Path(reads_log))
+    default_log = default_reads_log_path(root)
+    prior_reads = read_reads_log(default_log)
+    if reads_log is not None and Path(reads_log).resolve() != default_log.resolve():
+        known_reads = {canonical_hash(entry) for entry in prior_reads}
+        for entry in read_reads_log(Path(reads_log)):
+            entry_hash = canonical_hash(entry)
+            if entry_hash not in known_reads:
+                prior_reads.append(entry)
+                known_reads.add(entry_hash)
     body = {
         **{key: spec[key] for key in REQUIRED_KEYS},
         "fit_ids": sorted(fit_ids),
         "analysis_ids": sorted(analysis_ids),
+        "invalidated_reads": prior_reads,
         "validation_outcomes_hash": canonical_hash(validation_outcomes),
         "pipeline_tree_hash": pipeline_tree_hash(root),
         "environment_lock_hash": environment_lock_hash(root),
@@ -344,18 +384,31 @@ def authorize_test_read(
 
 
 def log_test_read(
-    reads_log: Path | str, record_hash: str, fit_ids: Sequence[str]
+    reads_log: Path | str,
+    record_hash: str,
+    fit_ids: Sequence[str],
+    *,
+    operation: str = "evaluate_test",
+    additional_logs: Sequence[Path | str] = (),
 ) -> None:
     """Append a test read so a later record can be flagged post-hoc."""
-    path = Path(reads_log)
-    path.parent.mkdir(parents=True, exist_ok=True)
     line = {
         "time": datetime.now(UTC).isoformat(),
         "record_hash": record_hash,
         "fit_ids": list(fit_ids),
+        "operation": operation,
     }
-    with path.open("a", encoding="utf-8", newline="\n") as handle:
-        handle.write(json.dumps(line, sort_keys=True) + "\n")
+    encoded = json.dumps(line, sort_keys=True) + "\n"
+    paths = [Path(reads_log), *(Path(path) for path in additional_logs)]
+    seen: set[Path] = set()
+    for path in paths:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(encoded)
 
 
 def invalidated_reads(

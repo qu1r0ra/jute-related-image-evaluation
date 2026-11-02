@@ -60,17 +60,19 @@ from jute_disease.data import (
     write_policy_manifests,
     write_thresholds,
 )
-from jute_disease.evaluation.evaluator import evaluate_test, leaf_sample_ids
-from jute_disease.evaluation.freeze_record import (
+from jute_disease.evaluation import (
     FreezeRecordError,
     TestReadRefusedError,
     authorize_test_read,
+    default_reads_log_path,
+    evaluate_test,
+    leaf_sample_ids,
     log_test_read,
+    planned_probe_fit_ids,
     verify_freeze_record,
     write_freeze_record,
     write_run_record,
 )
-from jute_disease.evaluation.probes import planned_probe_fit_ids
 from jute_disease.reporting.tables import aggregate_metrics
 from jute_disease.training import (
     WORKSPACE_FILE,
@@ -555,6 +557,12 @@ def _evaluate_run_record(args: argparse.Namespace) -> None:
 def _evaluate_leaf_sample(args: argparse.Namespace) -> None:
     try:
         record = verify_freeze_record(args.freeze_record, args.root)
+        log_test_read(
+            default_reads_log_path(args.root),
+            record["hash"],
+            [],
+            operation="leaf_sample",
+        )
         _print_json(list(leaf_sample_ids(args.target_dir, record, args.sample_size)))
     except (TestReadRefusedError, FreezeRecordError, OSError) as error:
         raise SystemExit(f"test read refused: {error}") from error
@@ -565,10 +573,12 @@ def _evaluate_test(args: argparse.Namespace) -> None:
         auth = authorize_test_read(
             args.freeze_record, args.run_record, args.root, args.fit_id or None
         )
-        if args.reads_log is not None:
-            log_test_read(
-                args.reads_log, auth.record_hash, [r.fit_id for r in auth.runs]
-            )
+        default_log = default_reads_log_path(args.root)
+        fit_ids = [r.fit_id for r in auth.runs]
+        additional_logs = [args.reads_log] if args.reads_log else []
+        log_test_read(
+            default_log, auth.record_hash, fit_ids, additional_logs=additional_logs
+        )
         features = _read_json_file(args.features) if args.features else {}
         report = evaluate_test(
             args.target_dir,

@@ -148,7 +148,7 @@ def evaluate_test(
     leaf_required = {run.fit_id for run in authorization.runs if run.variant == "full"}
     leaf_covered = {run.of for run in authorization.runs if run.variant == "leaf_only"}
     uncovered = sorted(leaf_required - leaf_covered)
-    if leaf_covered and uncovered:
+    if uncovered:
         raise FreezeRecordError(
             f"leaf-only evaluation misses final checkpoints: {uncovered}"
         )

@@ -43,9 +43,7 @@ def _probe_base(fit: FitSpec, benchmark: Benchmark, seeds: int | None) -> bool:
         pass
     else:
         return False
-    if fit.phase == "tune":
-        return True
-    if fit.split != benchmark.primary_split:
+    if fit.phase != "final" or fit.split != benchmark.primary_split:
         return False
     return seeds is None or fit.seed_index < seeds
 
