@@ -62,6 +62,7 @@ from jute_disease.data.manifest import (
     build_groups,
     build_manifest,
     load_manifest,
+    public_target_manifest,
     receipt_for,
     summarize_pad_fractions,
     validate_manifest,
@@ -303,9 +304,10 @@ def freeze_target(
         existing = load_manifest(target)
     except FileNotFoundError:
         existing = None
+    public_manifest = public_target_manifest(manifest)
     if (
         existing is not None
-        and existing.digest() != manifest.digest()
+        and existing.digest() != public_manifest.digest()
         and (
             not force
             or grouping is not None
@@ -326,15 +328,17 @@ def freeze_target(
     if grouping is not None:
         target.mkdir(parents=True, exist_ok=True)
         _write_json(target / "grouping.json", grouping)
-    write_manifest(manifest, target)
-    write_evaluator_test_manifest(manifest, target)
+    write_manifest(public_manifest, target)
+    write_evaluator_test_manifest(manifest, target, public_manifest)
     report = {
         "image_root": str(image_root),
-        "receipt": receipt_for(manifest),
+        "receipt": receipt_for(public_manifest),
         "curation": curation.summary(),
         "identity": resolution.summary(),
-        "pad_fraction_by_source_and_class": manifest.pad_fraction_summary(),
-        "unchanged": existing is not None and existing.digest() == manifest.digest(),
+        "pad_fraction_by_source_and_class": public_manifest.pad_fraction_summary(),
+        "unchanged": (
+            existing is not None and existing.digest() == public_manifest.digest()
+        ),
     }
     _write_json(output_dir / REPORT_FILE, report)
     return report
@@ -511,17 +515,12 @@ def intake_source(
     leaf_map = _read_leaf_map(leaf_map_path)
     output_dir = Path(output_dir)
     manifest = load_manifest(output_dir / TARGET_DIR)
-    held_out = {
-        e.image_id for name_ in ("val", "test") for e in manifest.partition(name_)
-    }
     target_inventory = read_inventory(output_dir / INVENTORY_FILE)
     if inventory_digest(target_inventory) != dict(manifest.dependencies).get(
         "inventory"
     ):
         raise FreezeBlockedError("Target inventory does not match its manifest")
-    target = [r for r in target_inventory if r.image_id in held_out]
-    if {r.image_id for r in target} != held_out:
-        raise FreezeBlockedError("Target inventory is missing held-out images")
+    target = target_inventory
 
     records = scan_source(source_root, spec, workers=workers)
     digest = inventory_digest(records)

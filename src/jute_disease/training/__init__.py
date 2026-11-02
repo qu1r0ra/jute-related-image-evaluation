@@ -6,6 +6,8 @@ from jute_disease.training.benchmark import (
     QueueLimits,
     Recipe,
     fit_identity,
+    fit_identity_digest,
+    fit_identity_payload,
     load_benchmark,
 )
 from jute_disease.training.inputs import DataInputs
@@ -118,6 +120,8 @@ __all__ = [
     "tune_cnn",
     "prepare_features",
     "fit_identity",
+    "fit_identity_digest",
+    "fit_identity_payload",
     "training_callbacks",
     "ProgressRecord",
     "ResumePlan",

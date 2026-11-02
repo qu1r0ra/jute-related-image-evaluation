@@ -10,7 +10,7 @@ import tempfile
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,7 +20,12 @@ from uuid import uuid4
 import numpy as np
 from PIL import Image
 
-from jute_disease.training import RunState, RunStore, load_benchmark
+from jute_disease.training import (
+    RunState,
+    RunStore,
+    fit_identity_digest,
+    load_benchmark,
+)
 
 SELECTION_FORMAT = "jute-evaluation-selection-v1"
 RUN_FORMAT = "jute-evaluation-run-v1"
@@ -39,6 +44,32 @@ def _canonical(payload: Any) -> bytes:
 
 def _digest(payload: Any) -> str:
     return hashlib.sha256(_canonical(payload)).hexdigest()
+
+
+def _is_sha256(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(char in "0123456789abcdef" for char in value)
+    )
+
+
+def _valid_assignment_rows(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(
+            isinstance(row, dict)
+            and all(
+                type(row.get(key)) is int for key in ("split", "seed", "checkpoint")
+            )
+            and row["split"] >= 0
+            and row["seed"] >= 0
+            and row["checkpoint"] == (row["seed"] + row["split"]) % 3
+            for row in value
+        )
+        and len({(row["split"], row["seed"]) for row in value}) == len(value)
+    )
 
 
 def _read_envelope(
@@ -82,6 +113,11 @@ def _read_selection(path: Path) -> dict[str, Any]:
         border_seeds = border["seeds"]
         null_permutations = border["null_permutations"]
         training_recipe = selection["training_recipe"]
+        selected_hyperparameters = selection["validation_selected_hyperparameters"]
+        selected_hyperparameters_sha256 = selection[
+            "validation_selected_hyperparameters_sha256"
+        ]
+        assignment_table = selection["assignment_table"]
     except (KeyError, TypeError) as error:
         raise GatedEvaluationError(
             "selection record has an invalid matrix schema"
@@ -120,6 +156,10 @@ def _read_selection(path: Path) -> dict[str, Any]:
         or not isinstance(model_specs, dict)
         or set(model_specs) != set(planned_fit_ids)
         or any(not isinstance(spec, dict) for spec in model_specs.values())
+        or not isinstance(selected_hyperparameters, dict)
+        or not selected_hyperparameters
+        or selected_hyperparameters_sha256 != _digest(selected_hyperparameters)
+        or not _valid_assignment_rows(assignment_table)
         or type(leaf_sample_size) is not int
         or leaf_sample_size < 1
         or not valid_seeds(border_seeds)
@@ -146,7 +186,7 @@ def _read_selection(path: Path) -> dict[str, Any]:
         or frame_width < 1
         or not isinstance(leaf_share_cutoff, (int, float))
         or isinstance(leaf_share_cutoff, bool)
-        or not 0 <= leaf_share_cutoff <= 1
+        or not 0 <= leaf_share_cutoff <= 0.05
         or not isinstance(mask_audit_outcome, str)
         or mask_audit_outcome not in {"passed", "failed"}
         or not isinstance(created_after_test_reads, bool)
@@ -166,6 +206,10 @@ def _read_selection(path: Path) -> dict[str, Any]:
                 )
             )
             or spec.get("preprocessing") != preprocessing
+            or spec.get("validation_selected_hyperparameters")
+            != selected_hyperparameters
+            or spec.get("validation_hyperparameters_sha256")
+            != selected_hyperparameters_sha256
             for spec in model_specs.values()
         )
     ):
@@ -428,7 +472,7 @@ def write_matrix_freeze(
     output_path: Path | str,
 ) -> tuple[Path, str]:
     """Write a hash-bound selection only after recorded #114 outcomes."""
-    from jute_disease.data import load_manifest
+    from jute_disease.data import EVALUATOR_TEST_SOURCE_DIGEST, load_manifest
 
     outcomes_path = Path(validation_outcomes)
     try:
@@ -457,8 +501,12 @@ def write_matrix_freeze(
         raise GatedEvaluationError("#114 scene thresholds must be recorded")
     if not isinstance(frame, int) or isinstance(frame, bool) or frame < 1:
         raise GatedEvaluationError("border frame width must be recorded")
-    if not isinstance(leaf_cutoff, (int, float)) or not 0 <= leaf_cutoff <= 1:
-        raise GatedEvaluationError("border leaf-share cutoff must be recorded")
+    if (
+        not isinstance(leaf_cutoff, (int, float))
+        or isinstance(leaf_cutoff, bool)
+        or not 0 <= leaf_cutoff <= 0.05
+    ):
+        raise GatedEvaluationError("border leaf-share cutoff must be at most 5%")
     if not isinstance(hyperparameters, dict) or not hyperparameters:
         raise GatedEvaluationError(
             "validation-selected hyperparameters must be recorded"
@@ -472,6 +520,9 @@ def write_matrix_freeze(
         manifest = load_manifest(target)
     except (OSError, ValueError) as error:
         raise GatedEvaluationError("a completed target freeze is required") from error
+    full_manifest_digest = dict(manifest.dependencies).get(EVALUATOR_TEST_SOURCE_DIGEST)
+    if not _is_sha256(full_manifest_digest):
+        raise GatedEvaluationError("public target manifest has no held-out commitment")
     benchmark_bytes = Path(benchmark_path).read_bytes()
     root = Path(__file__).resolve().parents[3]
     tree_hash = hashlib.sha256()
@@ -485,22 +536,27 @@ def write_matrix_freeze(
                 tree_hash.update(hashlib.sha256(file.read_bytes()).digest())
     lock_hash = hashlib.sha256((root / "uv.lock").read_bytes()).hexdigest()
     plan = probe_plan(benchmark_path)
-    image_size = load_benchmark(benchmark_path).recipe.image_size
+    benchmark = load_benchmark(benchmark_path)
+    image_size = benchmark.recipe.image_size
     preprocessing = {"resize": letterbox, "size": image_size}
     validation_hyperparameters_sha256 = _digest(hyperparameters)
     for fit_id, model_spec in plan["model_specs"].items():
         model_spec["preprocessing"] = preprocessing
-        if model_spec["kind"] != "cue":
-            model_spec["validation_hyperparameters_sha256"] = (
-                validation_hyperparameters_sha256
-            )
+        model_spec["validation_hyperparameters_sha256"] = (
+            validation_hyperparameters_sha256
+        )
+        model_spec["validation_selected_hyperparameters"] = hyperparameters
         if fit_id in plan["final_fit_ids"]:
             model_spec["training_view"] = "raw-training"
     payload = {
         "issue": 139,
-        "manifest_digest": manifest.digest(),
+        "manifest_digest": full_manifest_digest,
         "classes": list(manifest.labels),
         "manifest_file_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "assignment_table": [
+            {"split": split, "seed": seed, "checkpoint": checkpoint}
+            for split, seed, checkpoint in benchmark.assignments
+        ],
         "benchmark_sha256": hashlib.sha256(benchmark_bytes).hexdigest(),
         "validation_outcomes_sha256": hashlib.sha256(
             outcomes_path.read_bytes()
@@ -511,6 +567,9 @@ def write_matrix_freeze(
         "analysis_ids": plan["analysis_ids"],
         "training_recipe": plan["training_recipe"],
         "validation_selected_hyperparameters": hyperparameters,
+        "validation_selected_hyperparameters_sha256": (
+            validation_hyperparameters_sha256
+        ),
         "letterbox_decision": letterbox,
         "preprocessing": preprocessing,
         "mask_audit_outcome": audit["status"],
@@ -561,6 +620,43 @@ def write_fixture_run_record(
     return output, _write_immutable(output, RUN_FORMAT, record)
 
 
+def _runtime_observations_valid(runtime: Any, precision: str) -> bool:
+    if not isinstance(runtime, dict):
+        return False
+    device = runtime.get("device")
+    libraries = runtime.get("libraries")
+    return (
+        all(
+            isinstance(runtime.get(key), str) and runtime[key]
+            for key in ("python", "torch", "torch_cuda", "cuda_driver")
+        )
+        and runtime.get("cuda_available") is True
+        and runtime.get("precision") == precision
+        and runtime.get("compile_enabled") is False
+        and isinstance(libraries, dict)
+        and {"timm", "lightning", "scikit-learn", "torchvision"}.issubset(libraries)
+        and all(isinstance(version, str) and version for version in libraries.values())
+        and runtime.get("backend")
+        == {
+            "tf32_matmul": True,
+            "cudnn_tf32": True,
+            "cudnn_benchmark": False,
+        }
+        and isinstance(runtime.get("deterministic_algorithms"), bool)
+        and isinstance(runtime.get("cudnn_deterministic"), bool)
+        and isinstance(runtime.get("float32_matmul_precision"), str)
+        and bool(runtime["float32_matmul_precision"])
+        and isinstance(device, dict)
+        and isinstance(device.get("name"), str)
+        and bool(device["name"])
+        and isinstance(device.get("capability"), list)
+        and len(device["capability"]) == 2
+        and all(type(value) is int for value in device["capability"])
+        and type(device.get("memory_bytes")) is int
+        and device["memory_bytes"] > 0
+    )
+
+
 def _verified_training_receipt(
     fit_id: str,
     model_spec: dict[str, Any],
@@ -583,6 +679,39 @@ def _verified_training_receipt(
     ancestry = metadata.get("source_checkpoint_ancestry")
     runtime_contract = metadata.get("runtime_contract")
     run_options = metadata.get("run_options")
+    identity_inputs = metadata.get("identity_inputs")
+    fit_inputs = (
+        identity_inputs.get("fit") if isinstance(identity_inputs, dict) else None
+    )
+    input_manifests = (
+        identity_inputs.get("manifests") if isinstance(identity_inputs, dict) else None
+    )
+    input_environment = (
+        identity_inputs.get("environment")
+        if isinstance(identity_inputs, dict)
+        else None
+    )
+    input_ancestry = (
+        identity_inputs.get("source_checkpoint_ancestry")
+        if isinstance(identity_inputs, dict)
+        else None
+    )
+    identity = receipt.get("identity")
+    assignment_rows = (
+        assignment_table.get("assignments")
+        if isinstance(assignment_table, dict)
+        else None
+    )
+    preprocessing_spec = (
+        preprocessing.get("spec") if isinstance(preprocessing, dict) else None
+    )
+    preprocessing_digest = (
+        hashlib.sha256(
+            json.dumps(preprocessing_spec, sort_keys=True).encode()
+        ).hexdigest()
+        if isinstance(preprocessing_spec, dict)
+        else None
+    )
     recipe = selection["training_recipe"]
     expected_runtime_contract = {
         "precision": recipe["precision"],
@@ -592,35 +721,118 @@ def _verified_training_receipt(
         "torch_compile": False,
         "num_workers": recipe["num_workers"],
     }
+    try:
+        identity_digest = fit_identity_digest(identity_inputs)
+    except TypeError, ValueError:
+        identity_digest = None
+    assignment_content_sha256 = (
+        hashlib.sha256(
+            json.dumps(assignment_rows, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        if isinstance(assignment_rows, list)
+        else None
+    )
+    code_commit = provenance.get("commit") if isinstance(provenance, dict) else None
+    upstream_sha256 = (
+        identity_inputs.get("upstream_sha256")
+        if isinstance(identity_inputs, dict)
+        else None
+    )
+    ancestry_valid = isinstance(ancestry, list) and all(
+        isinstance(row, dict)
+        and isinstance(row.get("fit_id"), str)
+        and bool(row["fit_id"])
+        and _is_sha256(row.get("identity"))
+        and _is_sha256(row.get("checkpoint_sha256"))
+        for row in ancestry
+    )
+    fit_matches_spec = isinstance(fit_inputs, dict) and all(
+        fit_inputs.get(key) == model_spec.get(key)
+        for key in ("seed", "pool", "policy", "split", "estimator", "features")
+        if key in model_spec
+    )
     if (
         metadata.get("official") is not True
-        or not isinstance(receipt.get("identity"), str)
-        or not receipt["identity"]
-        or not isinstance(attempts, list)
-        or not attempts
-        or attempts[-1].get("metadata") != metadata
-        or not isinstance(preprocessing, dict)
-        or not isinstance(preprocessing.get("spec"), dict)
-        or preprocessing["spec"].get("size") != selection["preprocessing"]["size"]
-        or not isinstance(preprocessing.get("sha256"), str)
+        or not _is_sha256(identity)
+        or identity_digest != identity
+        or not isinstance(identity_inputs, dict)
+        or identity_inputs.get("evaluation_fit_spec") != model_spec
+        or not isinstance(fit_inputs, dict)
+        or fit_inputs.get("fit_id") != fit_id
+        or not fit_matches_spec
+        or not isinstance(identity_inputs.get("recipe"), dict)
+        or identity_inputs.get("recipe") != recipe
+        or not isinstance(input_manifests, dict)
+        or input_manifests.get("target") != selection.get("manifest_digest")
+        or not input_manifests
+        or any(not _is_sha256(value) for value in input_manifests.values())
+        or identity_inputs.get("config_sha256") != selection["benchmark_sha256"]
+        or identity_inputs.get("environment_lock_sha256")
+        != selection["environment_lock_sha256"]
+        or identity_inputs.get("preprocessing_sha256")
+        != (preprocessing.get("sha256") if isinstance(preprocessing, dict) else None)
+        or not _is_sha256(preprocessing_digest)
+        or preprocessing_digest != preprocessing.get("sha256")
+        or not isinstance(preprocessing_spec, dict)
+        or preprocessing_spec.get("size") != selection["preprocessing"]["size"]
+        or preprocessing_spec.get("resize") != selection["preprocessing"]["resize"]
         or not isinstance(provenance, dict)
+        or provenance.get("official") is not True
         or provenance.get("working_tree_clean") is not True
-        or not isinstance(provenance.get("commit"), str)
-        or not provenance["commit"]
+        or not isinstance(code_commit, str)
+        or len(code_commit) not in {40, 64}
+        or any(char not in "0123456789abcdef" for char in code_commit)
+        or identity_inputs.get("code_commit") != code_commit
         or not isinstance(configuration, dict)
         or configuration.get("sha256") != selection["benchmark_sha256"]
         or not isinstance(environment_lock, dict)
         or environment_lock.get("sha256") != selection["environment_lock_sha256"]
         or metadata.get("seed") != model_spec.get("seed")
         or not isinstance(assignment_table, dict)
+        or assignment_table.get("present") is not True
         or assignment_table.get("validated") is not True
-        or not isinstance(assignment_table.get("sha256"), str)
-        or not assignment_table["sha256"]
-        or not isinstance(ancestry, list)
+        or not _is_sha256(assignment_table.get("sha256"))
+        or not _valid_assignment_rows(assignment_rows)
+        or assignment_rows != selection.get("assignment_table")
+        or assignment_table.get("content_sha256") != assignment_content_sha256
+        or identity_inputs.get("assignment_table_sha256")
+        != assignment_table.get("sha256")
+        or not ancestry_valid
+        or input_ancestry != ancestry
+        or (upstream_sha256 is not None and not _is_sha256(upstream_sha256))
+        or (upstream_sha256 is None and ancestry)
+        or (
+            upstream_sha256 is not None
+            and (not ancestry or ancestry[-1]["checkpoint_sha256"] != upstream_sha256)
+        )
         or runtime_contract != expected_runtime_contract
         or not isinstance(run_options, dict)
+        or run_options.get("pretrained") is not True
         or run_options.get("require_cuda") is not True
         or run_options.get("accelerator") != "cuda"
+        or not isinstance(input_environment, dict)
+        or any(
+            input_environment.get(key) != run_options.get(key) for key in run_options
+        )
+        or not isinstance(attempts, list)
+        or not attempts
+        or not all(isinstance(attempt, dict) for attempt in attempts)
+        or attempts[-1].get("metadata") != metadata
+        or any(
+            not isinstance(attempt.get("metadata"), dict)
+            or attempt["metadata"].get("identity_inputs") != identity_inputs
+            or attempt["metadata"].get("official") is not True
+            or attempt["metadata"].get("provenance") != provenance
+            or not _runtime_observations_valid(
+                attempt["metadata"].get("runtime"), recipe["precision"]
+            )
+            or (
+                attempt.get("state") != RunState.COMPLETED.value
+                and not isinstance(attempt.get("reason"), str)
+            )
+            for attempt in attempts
+        )
+        or not _runtime_observations_valid(metadata.get("runtime"), recipe["precision"])
     ):
         raise GatedEvaluationError(f"run receipt does not satisfy #107 for {fit_id}")
     return receipt
@@ -916,6 +1128,84 @@ def _test_access_records(
                     f"analysis receipt is invalid for {analysis_id}"
                 )
     return selection, run_record
+
+
+def _restore_gated_test_manifest(
+    directory: Path,
+    public_manifest: Any,
+    selection_path: Path,
+    run_path: Path,
+    *,
+    fixture: bool,
+) -> Any:
+    """Restore held-out assignments only after rechecking both access records."""
+    from jute_disease.data import (
+        EVALUATOR_TEST_MANIFEST,
+        EVALUATOR_TEST_MANIFEST_FORMAT,
+        EVALUATOR_TEST_SOURCE_DIGEST,
+        Manifest,
+        ManifestEntry,
+        validate_manifest,
+    )
+
+    selection, run_record = _test_access_records(
+        selection_path, run_path, fixture=fixture
+    )
+    try:
+        envelope = json.loads(
+            (Path(directory) / EVALUATOR_TEST_MANIFEST).read_text(encoding="utf-8")
+        )
+        if not isinstance(envelope, dict) or not isinstance(
+            envelope.get("record"), dict
+        ):
+            raise ValueError("invalid envelope")
+        record = envelope["record"]
+        entries = tuple(ManifestEntry(**row) for row in record["entries"])
+        constraints = tuple(tuple(pair) for pair in record["constraints"])
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise GatedEvaluationError(
+            "separate evaluator test manifest is invalid"
+        ) from error
+    actual_record_digest = hashlib.sha256(_canonical(record)).hexdigest()
+    dependencies = dict(public_manifest.dependencies)
+    source_digest = dependencies.pop(EVALUATOR_TEST_SOURCE_DIGEST, None)
+    visible_ids = {entry.image_id for entry in public_manifest.entries}
+    if (
+        not isinstance(public_manifest, Manifest)
+        or _digest(selection) != run_record.get("selection_sha256")
+        or run_record.get("status") != "completed"
+        or envelope.get("format") != EVALUATOR_TEST_MANIFEST_FORMAT
+        or envelope.get("sha256") != actual_record_digest
+        or record.get("partition") != "test"
+        or record.get("version") != public_manifest.version
+        or record.get("public_manifest_digest") != public_manifest.digest()
+        or record.get("source_manifest_digest") != source_digest
+        or source_digest != selection.get("manifest_digest")
+        or any(entry.partition != "test" for entry in entries)
+        or len({entry.image_id for entry in entries}) != len(entries)
+        or {entry.image_id for entry in entries} & visible_ids
+        or any(
+            len(pair) != 2 or not all(isinstance(item, str) for item in pair)
+            for pair in constraints
+        )
+    ):
+        raise GatedEvaluationError("separate evaluator test manifest is stale")
+    full_manifest = replace(
+        public_manifest,
+        entries=tuple(
+            sorted(
+                (*public_manifest.entries, *entries), key=lambda entry: entry.image_id
+            )
+        ),
+        constraints=tuple(sorted((*public_manifest.constraints, *constraints))),
+        dependencies=tuple(sorted(dependencies.items())),
+    )
+    if full_manifest.digest() != selection.get("manifest_digest"):
+        raise GatedEvaluationError(
+            "separate evaluator test manifest does not match the frozen selection"
+        )
+    validate_manifest(full_manifest, 1)
+    return full_manifest
 
 
 def _fixture_prediction(fit_id: str, image_id: str, classes: tuple[str, ...]) -> str:
@@ -1362,7 +1652,7 @@ def evaluate_gated_test(
 ) -> Path:
     """Score frozen model artifacts; this is the only test-image reader."""
     from jute_disease.data import (
-        EVALUATOR_TEST_MANIFEST,
+        EVALUATOR_TEST_SOURCE_DIGEST,
         ColorThresholdBackend,
         ManifestEntry,
         Sam2Refiner,
@@ -1414,46 +1704,26 @@ def evaluate_gated_test(
     )
     # No manifest partition or image bytes are read until both immutable records pass.
     manifest = load_manifest(Path(target_dir))
-    if manifest.digest() != selection.get("manifest_digest"):
+    if dict(manifest.dependencies).get(EVALUATOR_TEST_SOURCE_DIGEST) != selection.get(
+        "manifest_digest"
+    ):
         raise GatedEvaluationError("selection does not match the target freeze")
     if list(manifest.labels) != selection.get("classes"):
         raise GatedEvaluationError(
             "selection class order differs from the target freeze"
         )
-    test_manifest_path = Path(target_dir) / EVALUATOR_TEST_MANIFEST
-    try:
-        envelope = json.loads(test_manifest_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
+    full_manifest = _restore_gated_test_manifest(
+        Path(target_dir),
+        manifest,
+        selection_file,
+        run_file,
+        fixture=fixture,
+    )
+    if full_manifest.digest() != selection.get("manifest_digest"):
         raise GatedEvaluationError(
-            "separate evaluator test manifest is required"
-        ) from error
-    record = envelope.get("record") if isinstance(envelope, dict) else None
-    if (
-        not isinstance(record, dict)
-        or envelope.get("format") != "jute-evaluator-test-manifest-v1"
-        or envelope.get("sha256") != _digest(record)
-        or record.get("partition") != "test"
-        or record.get("source_manifest_digest") != manifest.digest()
-        or record.get("version") != manifest.version
-    ):
-        raise GatedEvaluationError(
-            "separate evaluator test manifest is invalid or stale"
+            "selection does not match the complete target freeze"
         )
-    try:
-        entries = [ManifestEntry(**row) for row in record["entries"]]
-    except (KeyError, TypeError, ValueError) as error:
-        raise GatedEvaluationError(
-            "separate evaluator test manifest has invalid entries"
-        ) from error
-    expected_entries = [
-        entry.to_json(manifest.version) for entry in manifest.partition("test")
-    ]
-    if [
-        entry.to_json(manifest.version) for entry in entries
-    ] != expected_entries or any(entry.partition != "test" for entry in entries):
-        raise GatedEvaluationError(
-            "separate evaluator test manifest differs from the freeze"
-        )
+    entries = list(full_manifest.partition("test"))
     entries.sort(key=lambda entry: entry.image_id)
     if not entries:
         raise GatedEvaluationError("frozen test partition is empty")
@@ -1893,7 +2163,7 @@ def evaluate_gated_test(
         "run_record_sha256": _digest(run_record),
         "border_leaf_share_cutoff": selection["border_leaf_share_cutoff"]["final"],
         "completed_analysis_ids": run_record["completed_analysis_ids"],
-        "manifest_digest": manifest.digest(),
+        "manifest_digest": selection["manifest_digest"],
         "post_hoc": selection["created_after_test_reads"],
         "test_images": len(entries),
         "evaluated_view_sha256": {

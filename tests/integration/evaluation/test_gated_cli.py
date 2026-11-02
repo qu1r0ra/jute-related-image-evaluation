@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,14 +15,19 @@ from sklearn.dummy import DummyClassifier
 
 from jute_disease.cli import main
 from jute_disease.config import CURATION_RULES_PATH
-from jute_disease.data import SyntheticPlan, freeze_target
+from jute_disease.data import (
+    PreprocessingSpec,
+    SyntheticPlan,
+    freeze_target,
+    load_manifest,
+)
 from jute_disease.evaluation import (
     GatedEvaluationError,
     evaluate_gated_test,
     write_matrix_freeze,
     write_run_record,
 )
-from jute_disease.training import RunStore
+from jute_disease.training import RunStore, fit_identity_digest
 
 
 @dataclass(frozen=True)
@@ -47,6 +52,14 @@ def inputs(synthetic: SyntheticPlan, tmp_path: Path) -> Inputs:
     )
     target_dir = freeze_dir / "target"
     assert (target_dir / "evaluator" / "test-manifest.json").is_file()
+    public_manifest = load_manifest(target_dir)
+    assert not public_manifest.partition("test")
+    assert all(
+        entry["partition"] != "test"
+        for entry in json.loads(
+            (target_dir / "manifest.json").read_text(encoding="utf-8")
+        )["entries"]
+    )
     return Inputs(synthetic.root, target_dir)
 
 
@@ -87,6 +100,7 @@ def _outcomes(
     *,
     mask_audit: str = "passed",
     letterbox: str = "letterbox",
+    border_leaf_share_cutoff: float = 0.05,
 ) -> None:
     path.write_text(
         json.dumps(
@@ -100,7 +114,7 @@ def _outcomes(
                     "color_uniformity_min": 0.9,
                 },
                 "border_frame_width_px": 32,
-                "border_leaf_share_cutoff": 0.05,
+                "border_leaf_share_cutoff": border_leaf_share_cutoff,
                 "selected_hyperparameters": {"fixture": {"value": 1}},
             }
         ),
@@ -117,18 +131,69 @@ def _complete_fit_receipt(
 ) -> None:
     training_recipe = selection_record["training_recipe"]
     assert isinstance(training_recipe, dict)
+    assignment_rows = selection_record["assignment_table"]
+    assignment_raw_sha256 = hashlib.sha256(b"fixture assignments").hexdigest()
+    assignment_content_sha256 = hashlib.sha256(
+        json.dumps(assignment_rows, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    preprocessing = PreprocessingSpec(
+        size=selection_record["preprocessing"]["size"],
+        resize=selection_record["preprocessing"]["resize"],
+    )
+    commit = "a" * 40
+    run_options = {
+        "pretrained": True,
+        "accelerator": "cuda",
+        "require_cuda": True,
+    }
+    fit_inputs = {
+        "fit_id": fit_id,
+        "kind": model_spec["kind"],
+        "seed": model_spec["seed"],
+        **{
+            key: model_spec[key]
+            for key in ("pool", "policy", "split", "estimator", "features")
+            if key in model_spec
+        },
+    }
+    identity_inputs = {
+        "fit": fit_inputs,
+        "recipe": training_recipe,
+        "manifests": {
+            "target": selection_record["manifest_digest"],
+            "target_content": "b" * 64,
+        },
+        "upstream_sha256": None,
+        "environment": {**run_options, "tuning": None},
+        "config_sha256": selection_record["benchmark_sha256"],
+        "code_commit": commit,
+        "environment_lock_sha256": selection_record["environment_lock_sha256"],
+        "preprocessing_sha256": preprocessing.digest(),
+        "assignment_table_sha256": assignment_raw_sha256,
+        "source_checkpoint_ancestry": [],
+        "evaluation_fit_spec": model_spec,
+    }
     metadata = {
+        "identity_inputs": identity_inputs,
         "official": True,
-        "provenance": {"commit": "fixture-commit", "working_tree_clean": True},
+        "provenance": {
+            "commit": commit,
+            "working_tree_clean": True,
+            "official": True,
+        },
         "configuration": {"sha256": selection_record["benchmark_sha256"]},
         "environment_lock": {"sha256": selection_record["environment_lock_sha256"]},
         "preprocessing": {
-            "spec": selection_record["preprocessing"],
-            "sha256": "fixture",
+            "spec": asdict(preprocessing),
+            "sha256": preprocessing.digest(),
         },
         "assignment_table": {
+            "present": True,
+            "path": "assignments.json",
             "validated": True,
-            "sha256": hashlib.sha256(b"fixture assignments").hexdigest(),
+            "sha256": assignment_raw_sha256,
+            "content_sha256": assignment_content_sha256,
+            "assignments": assignment_rows,
         },
         "source_checkpoint_ancestry": [],
         "seed": model_spec["seed"],
@@ -140,13 +205,37 @@ def _complete_fit_receipt(
             "torch_compile": False,
             "num_workers": training_recipe["num_workers"],
         },
-        "run_options": {
-            "pretrained": True,
-            "accelerator": "cuda",
-            "require_cuda": True,
+        "run_options": run_options,
+        "runtime": {
+            "python": "3.12.0",
+            "torch": "2.5.1",
+            "torch_cuda": "12.4",
+            "cuda_driver": "555.1",
+            "cuda_available": True,
+            "precision": training_recipe["precision"],
+            "compile_enabled": False,
+            "backend": {
+                "tf32_matmul": True,
+                "cudnn_tf32": True,
+                "cudnn_benchmark": False,
+            },
+            "deterministic_algorithms": False,
+            "cudnn_deterministic": False,
+            "float32_matmul_precision": "highest",
+            "libraries": {
+                "timm": "1.0.0",
+                "lightning": "2.5.0",
+                "scikit-learn": "1.6.0",
+                "torchvision": "0.20.0",
+            },
+            "device": {
+                "name": "fixture GPU",
+                "capability": [8, 0],
+                "memory_bytes": 16_000_000_000,
+            },
         },
     }
-    identity = hashlib.sha256(f"receipt:{fit_id}".encode()).hexdigest()
+    identity = fit_identity_digest(identity_inputs)
     run = store.start(fit_id, identity, metadata=metadata)
     run.complete(
         results={"fit": {"fit_id": fit_id}},
@@ -498,6 +587,20 @@ def test_gated_api_runs_hash_bound_artifacts_on_masked_views(
     finally:
         first_receipt_path.write_bytes(original_receipt)
 
+    invalid_receipt = json.loads(original_receipt)
+    invalid_receipt["metadata"]["identity_inputs"]["evaluation_fit_spec"][
+        "validation_selected_hyperparameters"
+    ] = {"tampered": True}
+    invalid_receipt["attempts"][-1]["metadata"] = invalid_receipt["metadata"]
+    first_receipt_path.write_text(json.dumps(invalid_receipt), encoding="utf-8")
+    try:
+        with pytest.raises(GatedEvaluationError, match="does not satisfy #107"):
+            write_run_record(
+                selection, index_path, tmp_path / "unbound-hyperparameters.json"
+            )
+    finally:
+        first_receipt_path.write_bytes(original_receipt)
+
     missing_analysis = json.loads(index_path.read_text(encoding="utf-8"))
     missing_analysis["analyses"] = {}
     missing_analysis_path = tmp_path / "missing-analysis-index.json"
@@ -636,6 +739,30 @@ def test_matrix_freeze_requires_recorded_issue_114_outcomes(
             ]
         )
     assert not (tmp_path / "selection.json").exists()
+
+
+def test_matrix_freeze_rejects_border_leaf_share_cutoff_above_five_percent(
+    inputs: Inputs, tmp_path: Path
+) -> None:
+    outcomes = tmp_path / "validation-114.json"
+    _outcomes(outcomes, border_leaf_share_cutoff=0.06)
+    selection = tmp_path / "selection.json"
+    with pytest.raises(SystemExit, match="at most 5%"):
+        main(
+            [
+                "evaluate",
+                "freeze-matrix",
+                "--validation-outcomes",
+                str(outcomes),
+                "--benchmark",
+                str(_mini_benchmark(tmp_path)),
+                "--target-dir",
+                str(inputs.target_dir),
+                "--output",
+                str(selection),
+            ]
+        )
+    assert not selection.exists()
 
 
 def test_failed_mask_audit_blocks_mask_dependent_report_scores(

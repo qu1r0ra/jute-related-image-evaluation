@@ -283,7 +283,13 @@ class RunStore:
                 self, fit_id, str(payload.get("identity")), int(payload["attempt"])
             )
             runtime = read_json(run.attempt_dir / "runtime.json")
-            metadata = {"runtime": runtime} if isinstance(runtime, dict) else None
+            attempt = read_json(run.attempt_dir / ATTEMPT_FILE) or {}
+            original_metadata = attempt.get("metadata")
+            metadata = (
+                dict(original_metadata) if isinstance(original_metadata, dict) else {}
+            )
+            if isinstance(runtime, dict):
+                metadata["runtime"] = runtime
             run.fail(
                 RunState.INTERRUPTED,
                 "process ended without a result",

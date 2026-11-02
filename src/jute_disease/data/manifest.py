@@ -10,7 +10,7 @@ import hashlib
 import json
 import os
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from jute_disease.config import DEFAULT_SEED, SPLITS
@@ -28,8 +28,9 @@ MANIFEST_VERSION = 2
 MANIFEST_FILE = "manifest.json"
 RECEIPT_FILE = "receipt.json"
 PARTITIONS = ("train", "val", "test")
-EVALUATOR_TEST_MANIFEST_FORMAT = "jute-evaluator-test-manifest-v1"
+EVALUATOR_TEST_MANIFEST_FORMAT = "jute-evaluator-test-manifest-v2"
 EVALUATOR_TEST_MANIFEST = "evaluator/test-manifest.json"
+EVALUATOR_TEST_SOURCE_DIGEST = "evaluator_test_source_digest"
 
 
 class FreezeBlockedError(ValueError):
@@ -288,9 +289,13 @@ def validate_manifest(manifest: Manifest, min_support: int) -> None:
         elif partition[left] != partition[right]:
             problems.append(f"constraint {left[:12]}/{right[:12]} is violated")
     support = manifest.support()
-    required_partitions = (
-        ("train",) if "source_inventory" in dict(manifest.dependencies) else PARTITIONS
-    )
+    dependencies = dict(manifest.dependencies)
+    if "source_inventory" in dependencies:
+        required_partitions = ("train",)
+    elif EVALUATOR_TEST_SOURCE_DIGEST in dependencies:
+        required_partitions = ("train", "val")
+    else:
+        required_partitions = PARTITIONS
     for label in manifest.labels:
         for name in required_partitions:
             have = support[name].get(label, 0)
@@ -440,16 +445,50 @@ def write_manifest(manifest: Manifest, directory: Path) -> Path:
     return receipt
 
 
-def write_evaluator_test_manifest(manifest: Manifest, directory: Path) -> Path:
-    """Write the held-out entries to a separate, source-bound evaluator file."""
+def public_target_manifest(manifest: Manifest) -> Manifest:
+    """Return the target manifest projection that contains no test assignments."""
+    if EVALUATOR_TEST_SOURCE_DIGEST in dict(manifest.dependencies):
+        raise FreezeBlockedError("Manifest is already a public target projection")
+    if not manifest.partition("test"):
+        raise FreezeBlockedError("Target manifest has no held-out test entries")
+    visible_entries = tuple(
+        entry for entry in manifest.entries if entry.partition != "test"
+    )
+    visible_ids = {entry.image_id for entry in visible_entries}
+    dependencies = dict(manifest.dependencies)
+    dependencies[EVALUATOR_TEST_SOURCE_DIGEST] = manifest.digest()
+    return replace(
+        manifest,
+        entries=visible_entries,
+        constraints=tuple(
+            pair for pair in manifest.constraints if set(pair) <= visible_ids
+        ),
+        dependencies=tuple(sorted(dependencies.items())),
+    )
+
+
+def write_evaluator_test_manifest(
+    manifest: Manifest,
+    directory: Path,
+    public_manifest: Manifest | None = None,
+) -> Path:
+    """Write held-out assignments apart from the public target manifest."""
+    public = public_manifest or public_target_manifest(manifest)
+    if public.digest() != public_target_manifest(manifest).digest():
+        raise FreezeBlockedError("Public target manifest does not match its source")
     path = Path(directory) / EVALUATOR_TEST_MANIFEST
     path.parent.mkdir(parents=True, exist_ok=True)
+    visible_ids = {entry.image_id for entry in public.entries}
     record = {
         "source_manifest_digest": manifest.digest(),
+        "public_manifest_digest": public.digest(),
         "partition": "test",
         "version": manifest.version,
         "entries": [
             entry.to_json(manifest.version) for entry in manifest.partition("test")
+        ],
+        "constraints": [
+            list(pair) for pair in manifest.constraints if not set(pair) <= visible_ids
         ],
     }
     digest = hashlib.sha256(

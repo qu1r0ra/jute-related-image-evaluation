@@ -22,7 +22,8 @@ from jute_disease.training.benchmark import (
     Benchmark,
     FitKind,
     FitSpec,
-    fit_identity,
+    fit_identity_digest,
+    fit_identity_payload,
     load_benchmark,
 )
 from jute_disease.training.inputs import DataInputs, target_manifest_for_fit
@@ -417,7 +418,11 @@ def _tuning_marker(workspace: Workspace, store: RunStore, fit: FitSpec) -> Any:
 def _manifest_digests(
     workspace: Workspace, fit: FitSpec, verifier: Any
 ) -> dict[str, str]:
-    from jute_disease.data import load_manifest, load_source_manifest
+    from jute_disease.data import (
+        EVALUATOR_TEST_SOURCE_DIGEST,
+        load_manifest,
+        load_source_manifest,
+    )
 
     target = (
         target_manifest_for_fit(fit, workspace.benchmark.recipe, workspace.data)
@@ -425,7 +430,9 @@ def _manifest_digests(
         else load_manifest(workspace.data.target_dir)
     )
     digests = {
-        "target": target.digest(),
+        "target": dict(target.dependencies).get(
+            EVALUATOR_TEST_SOURCE_DIGEST, target.digest()
+        ),
         "target_content": verifier.verify(
             target,
             workspace.data.target_root(fit.pool)
@@ -535,6 +542,9 @@ def load_assignment_table(workspace: Workspace) -> dict[str, Any]:
             "present": True,
             "path": "assignments.json",
             "sha256": hashlib.sha256(raw_bytes).hexdigest(),
+            "content_sha256": hashlib.sha256(
+                json.dumps(rows, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
             "assignments": rows,
             "validated": True,
         }
@@ -542,6 +552,7 @@ def load_assignment_table(workspace: Workspace) -> dict[str, Any]:
         "present": False,
         "path": None,
         "sha256": None,
+        "content_sha256": None,
         "assignments": [],
         "validated": False,
     }
@@ -627,6 +638,38 @@ def _receipt_context(
     return context
 
 
+def _identity_inputs(
+    workspace: Workspace,
+    store: RunStore,
+    fit: FitSpec,
+    context: dict[str, Any],
+    verifier: Any,
+) -> dict[str, Any]:
+    """Build the exact identity payload stored with the attempt provenance."""
+    manifests = _manifest_digests(workspace, fit, verifier)
+    try:
+        upstream = _upstream_checkpoint(store, fit)
+        upstream_sha256 = None if upstream is None else upstream[1]
+    except UpstreamError:
+        upstream_sha256 = "unavailable"
+    return fit_identity_payload(
+        fit,
+        workspace.benchmark.recipe,
+        manifests,
+        upstream_sha256,
+        {
+            **context["run_options"],
+            "tuning": _tuning_marker(workspace, store, fit),
+        },
+        config_sha256=context["configuration"]["sha256"],
+        code_commit=context["provenance"]["commit"],
+        environment_lock_sha256=context["environment_lock"]["sha256"],
+        preprocessing_sha256=context["preprocessing"]["sha256"],
+        assignment_table_sha256=context["assignment_table"]["sha256"],
+        source_checkpoint_ancestry=context["source_checkpoint_ancestry"],
+    )
+
+
 def _classify_child_failure(returncode: int, tail: str) -> FailureKind:
     lowered = tail.lower()
     if any(
@@ -670,29 +713,10 @@ def make_identity(workspace: Workspace, store: RunStore) -> IdentityFor:
     verifier = ManifestContentVerifier()
 
     def identity(fit: FitSpec) -> str:
-        manifests = _manifest_digests(workspace, fit, verifier)
-        try:
-            upstream = _upstream_checkpoint(store, fit)
-            sha = None if upstream is None else upstream[1]
-        except UpstreamError:
-            sha = "unavailable"
         context = _receipt_context(workspace, store, fit)
-        return fit_identity(
-            fit,
-            workspace.benchmark.recipe,
-            manifests,
-            sha,
-            {
-                **context["run_options"],
-                "tuning": _tuning_marker(workspace, store, fit),
-            },
-            config_sha256=context["configuration"]["sha256"],
-            code_commit=context["provenance"]["commit"],
-            environment_lock_sha256=context["environment_lock"]["sha256"],
-            preprocessing_sha256=context["preprocessing"]["sha256"],
-            assignment_table_sha256=context["assignment_table"]["sha256"],
-            source_checkpoint_ancestry=context["source_checkpoint_ancestry"],
-        )
+        inputs = _identity_inputs(workspace, store, fit, context, verifier)
+        context["identity_inputs"] = inputs
+        return fit_identity_digest(inputs)
 
     return identity
 
@@ -703,6 +727,8 @@ def make_executor(
     """Run one fit as a child, bounded by ``timeout``, and receipt the result."""
 
     def execute(fit: FitSpec, timeout: float) -> Outcome:
+        from jute_disease.data import ManifestContentVerifier
+
         if fit.kind is FitKind.CLASSICAL:
             prepare = find_fit(workspace, "classical/prepare")
             if store.resolve(prepare.fit_id, identity(prepare)) is not Resume.SKIP:
@@ -715,14 +741,24 @@ def make_executor(
             upstream = _upstream_checkpoint(store, fit)
         except UpstreamError as error:
             return Outcome(RunState.FAILED, 0.0, str(error))
-        fit_identity_value = identity(fit)
         context = _receipt_context(workspace, store, fit)
+        identity_inputs = _identity_inputs(
+            workspace, store, fit, context, ManifestContentVerifier()
+        )
+        fit_identity_value = fit_identity_digest(identity_inputs)
+        if fit_identity_value != identity(fit):
+            return Outcome(
+                RunState.FAILED,
+                0.0,
+                "fit identity inputs changed while preparing the run receipt",
+            )
+        context["identity_inputs"] = identity_inputs
         run = store.start(fit.fit_id, fit_identity_value, metadata=context)
 
         def finish_failure(
             state: RunState, reason: str, failure_kind: FailureKind | None = None
         ) -> None:
-            metadata: dict[str, Any] = {}
+            metadata: dict[str, Any] = dict(context)
             runtime = read_json(run.attempt_dir / "runtime.json")
             if runtime is not None:
                 metadata["runtime"] = runtime

@@ -418,6 +418,7 @@ def fit_identity(
     preprocessing_sha256: str | None = None,
     assignment_table_sha256: str | None = None,
     source_checkpoint_ancestry: list[dict[str, str]] | None = None,
+    evaluation_fit_spec: dict[str, Any] | None = None,
 ) -> str:
     """Digest of everything that makes two runs of ``fit`` interchangeable.
 
@@ -425,6 +426,43 @@ def fit_identity(
     preprocessing, assignment table, config, code commit and locked environment.
     Dynamic backend and package-version observations belong in receipts, not in
     this compatibility identity.
+    """
+    payload = fit_identity_payload(
+        fit,
+        recipe,
+        manifests,
+        upstream_sha256,
+        environment,
+        config_sha256=config_sha256,
+        code_commit=code_commit,
+        environment_lock_sha256=environment_lock_sha256,
+        preprocessing_sha256=preprocessing_sha256,
+        assignment_table_sha256=assignment_table_sha256,
+        source_checkpoint_ancestry=source_checkpoint_ancestry,
+        evaluation_fit_spec=evaluation_fit_spec,
+    )
+    return fit_identity_digest(payload)
+
+
+def fit_identity_payload(
+    fit: FitSpec,
+    recipe: Recipe,
+    manifests: dict[str, str],
+    upstream_sha256: str | None,
+    environment: dict[str, Any] | None = None,
+    *,
+    config_sha256: str | None = None,
+    code_commit: str | None = None,
+    environment_lock_sha256: str | None = None,
+    preprocessing_sha256: str | None = None,
+    assignment_table_sha256: str | None = None,
+    source_checkpoint_ancestry: list[dict[str, str]] | None = None,
+    evaluation_fit_spec: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return the complete identity inputs for one fit receipt.
+
+    ``evaluation_fit_spec`` binds a fit to an externally frozen evaluator route,
+    including its validation-selected hyperparameters and input view.
     """
     payload = {
         "fit": asdict(fit),
@@ -439,5 +477,12 @@ def fit_identity(
         "assignment_table_sha256": assignment_table_sha256,
         "source_checkpoint_ancestry": source_checkpoint_ancestry or [],
     }
-    text = json.dumps(payload, sort_keys=True, default=str)
+    if evaluation_fit_spec is not None:
+        payload["evaluation_fit_spec"] = evaluation_fit_spec
+    return payload
+
+
+def fit_identity_digest(identity_inputs: dict[str, Any]) -> str:
+    """Hash the exact structured inputs recorded by a training receipt."""
+    text = json.dumps(identity_inputs, sort_keys=True, default=str)
     return hashlib.sha256(text.encode()).hexdigest()
