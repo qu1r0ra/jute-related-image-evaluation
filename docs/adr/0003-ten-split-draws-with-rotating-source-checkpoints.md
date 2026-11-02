@@ -4,7 +4,7 @@ Status: accepted, 2026-11-01. Canonical protocol: [issue 106](https://github.com
 
 ## Context
 
-The earlier matrix used one primary split plus three redraws per policy, and trained each plant-pretraining source stage once. Four splits give the top level of the hierarchical bootstrap too few draws for stable intervals, and split-to-split variation usually exceeds seed variation. A single source checkpoint per stage makes every route finding depend on one source run, so a route effect cannot be separated from a lucky or unlucky source fit. Lab A100 access is persistent, so compute is not the binding constraint.
+The earlier matrix used one primary split plus three redraws per policy, and trained each plant-pretraining source stage once. Four splits give the top level of the hierarchical bootstrap too few draws for stable intervals, and split-to-split variation usually exceeds seed variation. A single source checkpoint per stage makes every route finding depend on one source run, so a route effect cannot be separated from a lucky or unlucky source fit. Lab A100 access is long-lived, so compute is not the binding constraint. Lab storage persistence and backup are unverified ([issue 104](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/104)).
 
 ## Decision
 
