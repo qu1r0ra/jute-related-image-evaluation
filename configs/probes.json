@@ -6,6 +6,7 @@
   },
   "leaf_only": {
     "sample_size": 2000,
+    "sampling_seed": 139,
     "sampling": "deterministic stratified by class and scene"
   },
   "border": {

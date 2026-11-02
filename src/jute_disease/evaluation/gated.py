@@ -202,6 +202,7 @@ def _read_selection(path: Path) -> dict[str, Any]:
         mask_audit_outcome = selection["mask_audit_outcome"]
         created_after_test_reads = selection["created_after_test_reads"]
         leaf_sample_size = leaf_only["sample_size"]
+        leaf_sampling_seed = leaf_only["sampling_seed"]
         border_seeds = border["seeds"]
         null_permutations = border["null_permutations"]
         training_recipe = selection["training_recipe"]
@@ -266,6 +267,7 @@ def _read_selection(path: Path) -> dict[str, Any]:
         or not _is_sha256(environment_lock_sha256)
         or type(leaf_sample_size) is not int
         or leaf_sample_size < 1
+        or type(leaf_sampling_seed) is not int
         or not valid_seeds(border_seeds)
         or type(null_permutations) is not int
         or null_permutations < 1
@@ -572,6 +574,7 @@ def probe_plan(benchmark_path: Path | str) -> dict[str, Any]:
         "leaf_only": {
             "fit_ids": final_ids,
             "sample_size": leaf_config["sample_size"],
+            "sampling_seed": leaf_config["sampling_seed"],
             "sampling": leaf_config["sampling"],
         },
         "border": {
@@ -736,7 +739,11 @@ def write_matrix_freeze(
         )
 
     target = Path(target_dir)
-    read_history = target / TEST_READ_HISTORY_FILE
+    project_root = Path(__file__).resolve().parents[3]
+    read_histories = {
+        "evaluator": target / TEST_READ_HISTORY_FILE,
+        "project": project_root / "artifacts" / "evaluation" / "test-reads.jsonl",
+    }
     manifest_path = target / "manifest.json"
     try:
         manifest_bytes = manifest_path.read_bytes()
@@ -823,11 +830,15 @@ def write_matrix_freeze(
         "environment_lock_sha256": lock_hash,
         "created_after_test_reads": False,
     }
-    if read_history.is_file():
+    existing_read_histories = {
+        name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for name, path in read_histories.items()
+        if path.is_file()
+    }
+    if existing_read_histories:
         payload["created_after_test_reads"] = True
-        payload["test_read_history_sha256"] = hashlib.sha256(
-            read_history.read_bytes()
-        ).hexdigest()
+        payload["test_read_histories"] = existing_read_histories
+        payload["test_read_history_sha256"] = _digest(existing_read_histories)
     output = Path(output_path)
     digest = _write_immutable(output, SELECTION_FORMAT, payload)
     _write_json_atomic(
@@ -1670,22 +1681,34 @@ def _fixture_prediction(fit_id: str, image_id: str, classes: tuple[str, ...]) ->
 
 
 def _sample_indices(
-    entries: list[Any], scene_tags: list[str], sample_size: int
+    entries: list[Any], scene_tags: list[str], sample_size: int, seed: int
 ) -> list[int]:
     if len(entries) <= sample_size:
         return list(range(len(entries)))
     strata: dict[tuple[str, str], list[int]] = defaultdict(list)
     for index, (entry, scene) in enumerate(zip(entries, scene_tags, strict=True)):
         strata[(entry.label, scene)].append(index)
-    quotas = {
-        key: sample_size * len(indices) // len(entries)
+    exact_quotas = {
+        key: sample_size * len(indices) / len(entries)
         for key, indices in strata.items()
     }
-    for key in sorted(strata)[: sample_size - sum(quotas.values())]:
+    quotas = {key: int(quota) for key, quota in exact_quotas.items()}
+    remaining = sample_size - sum(quotas.values())
+    remainder_order = sorted(
+        strata,
+        key=lambda key: (-(exact_quotas[key] - quotas[key]), key),
+    )
+    for key in remainder_order[:remaining]:
         quotas[key] += 1
     selected: list[int] = []
     for key, indices in sorted(strata.items()):
-        ordered = sorted(indices, key=lambda i: entries[i].image_id)
+        ordered = sorted(
+            indices,
+            key=lambda i: (
+                hashlib.sha256(f"{seed}\0{entries[i].image_id}".encode()).digest(),
+                entries[i].image_id,
+            ),
+        )
         selected.extend(ordered[: quotas[key]])
     return sorted(selected)
 
@@ -1779,6 +1802,12 @@ def _hierarchical_bootstrap_plan(
                 selected, minlength=family_count
             )
     return seed_draws, family_weights
+
+
+def _support_seed(family_ids: list[str], purpose: str) -> int:
+    """Give identical family supports the same deterministic resampling seed."""
+    digest = hashlib.sha256(_canonical({"purpose": purpose, "families": family_ids}))
+    return int.from_bytes(digest.digest()[:8], "big")
 
 
 def _hierarchical_intervals(
@@ -1944,7 +1973,8 @@ def _scene_report(
             "class_counts": by_class,
             "class_cells": class_cells,
         }
-        if all(value >= 30 for value in by_class.values()):
+        represented_counts = [value for value in by_class.values() if value > 0]
+        if represented_counts and all(value >= 30 for value in represented_counts):
             row["macro_f1"] = metrics["macro_f1"]
         rows[scene] = row
     return rows
@@ -1966,32 +1996,6 @@ def _decode_model_labels(values: np.ndarray, classes: tuple[str, ...]) -> list[s
             raise GatedEvaluationError("model emitted an unknown class index")
         labels.append(classes[index])
     return labels
-
-
-def _resize_center_crop(
-    image: Image.Image, mask: np.ndarray, size: int
-) -> tuple[np.ndarray, np.ndarray]:
-    """Apply the frozen shortest-side resize and center crop to RGB and mask."""
-    width, height = image.size
-    scale = size / min(width, height)
-    resized_width = max(size, round(width * scale))
-    resized_height = max(size, round(height * scale))
-    left = (resized_width - size) // 2
-    top = (resized_height - size) // 2
-    rgb = np.asarray(
-        image.resize((resized_width, resized_height), Image.Resampling.BILINEAR).crop(
-            (left, top, left + size, top + size)
-        )
-    )
-    resized_mask = (
-        np.asarray(
-            Image.fromarray(np.asarray(mask, dtype=np.uint8) * 255)
-            .resize((resized_width, resized_height), Image.Resampling.NEAREST)
-            .crop((left, top, left + size, top + size))
-        )
-        > 0
-    )
-    return rgb, resized_mask
 
 
 def _predict_model_artifact(
@@ -2248,7 +2252,9 @@ def evaluate_gated_test(
     ):
         raise GatedEvaluationError("frozen preprocessing specification is invalid")
     image_size = preprocessing["size"]
-    transform = classical_pipeline(size=image_size, include_mask=True)
+    transform = classical_pipeline(
+        size=image_size, include_mask=True, resize=resize_decision
+    )
     scene_thresholds = SimpleNamespace(
         **selection["validation_outcomes"]["scene_thresholds"]
     )
@@ -2309,31 +2315,17 @@ def evaluate_gated_test(
             scene = classify_scene(
                 extract_scene_features(original, mask), scene_thresholds
             )
-            if resize_decision == "letterbox":
-                boxed = transform(original)
-                pixels, valid = boxed.pixels, boxed.valid_mask
-                y, x = np.where(valid)
-                top, bottom, left, right = (
-                    int(y.min()),
-                    int(y.max()) + 1,
-                    int(x.min()),
-                    int(x.max()) + 1,
-                )
-                resized = (
-                    np.asarray(
-                        Image.fromarray(mask.astype(np.uint8) * 255).resize(
-                            (right - left, bottom - top), Image.Resampling.NEAREST
-                        )
-                    )
-                    > 0
-                )
-                pad_fraction = 1 - float(valid.mean())
-            else:
-                pixels, resized = _resize_center_crop(original, mask, image_size)
-                top, bottom, left, right = 0, image_size, 0, image_size
-                pad_fraction = 0.0
-            resized_mask = np.zeros((image_size, image_size), dtype=bool)
-            resized_mask[top:bottom, left:right] = resized
+            boxed = transform(original)
+            pixels, valid = boxed.pixels, boxed.valid_mask
+            y, x = np.where(valid)
+            top, bottom, left, right = (
+                int(y.min()),
+                int(y.max()) + 1,
+                int(x.min()),
+                int(x.max()) + 1,
+            )
+            resized_mask = transform.resize_mask(mask)
+            pad_fraction = 1 - float(valid.mean())
             frame = np.zeros((image_size, image_size), dtype=bool)
             frame[top : min(bottom, top + frame_width), left:right] = True
             frame[max(top, bottom - frame_width) : bottom, left:right] = True
@@ -2411,6 +2403,7 @@ def evaluate_gated_test(
         raise GatedEvaluationError("selection and run record analysis IDs differ")
     mask_audit_passed = selection["mask_audit_outcome"] == "passed"
     sample_target = selection["selection"]["leaf_only"]["sample_size"]
+    sample_seed = selection["selection"]["leaf_only"]["sampling_seed"]
 
     def support_context(
         fit_id: str,
@@ -2431,18 +2424,28 @@ def evaluate_gated_test(
         ).hexdigest()
 
     sample_sizes: dict[str, int] = {}
+    sample_image_ids: dict[str, list[str]] = {}
     full_sample_scores: dict[str, Any] | None = {} if mask_audit_passed else None
     leaf_scores: dict[str, Any] | None = {} if mask_audit_passed else None
     background_scores = {} if mask_audit_passed else None
     scene_tables: dict[str, Any] = {}
+    for fit_id in final_ids:
+        fit_entries, fit_scenes, _, _ = support_context(fit_id)
+        scene_tables[fit_id] = _scene_report(
+            fit_entries, fit_scenes, predictions_for(fit_id, fit_entries), classes
+        )
     if mask_audit_passed:
         for fit_id in final_ids:
             fit_entries, fit_scenes, _, _ = support_context(fit_id)
             indices = _sample_indices(
-                fit_entries, fit_scenes, min(sample_target, len(fit_entries))
+                fit_entries,
+                fit_scenes,
+                min(sample_target, len(fit_entries)),
+                sample_seed,
             )
             sampled = [fit_entries[index] for index in indices]
             sample_sizes[fit_id] = len(sampled)
+            sample_image_ids[fit_id] = [entry.image_id for entry in sampled]
             full_sample_scores[fit_id] = _metrics(
                 sampled, predictions_for(fit_id, sampled), classes
             )
@@ -2450,9 +2453,6 @@ def evaluate_gated_test(
                 sampled,
                 predictions_for(fit_id, sampled, leaf=True),
                 classes,
-            )
-            scene_tables[fit_id] = _scene_report(
-                fit_entries, fit_scenes, predictions_for(fit_id, fit_entries), classes
             )
         for fit_id in background_ids:
             fit_entries = entries_by_fit[fit_id]
@@ -2473,9 +2473,7 @@ def evaluate_gated_test(
     cutoff = selection["border_leaf_share_cutoff"]["final"]
     border_results: dict[str, Any] = {}
     cue_baselines: dict[str, Any] = {}
-    for group_index, (group_id, unsorted_fit_ids) in enumerate(
-        sorted(border_groups.items())
-    ):
+    for group_id, unsorted_fit_ids in sorted(border_groups.items()):
         fit_ids = sorted(
             unsorted_fit_ids,
             key=lambda fit_id: border_seeds.index(
@@ -2517,7 +2515,10 @@ def evaluate_gated_test(
         family_label_vector = np.asarray(
             [family_labels[family] for family in family_ids], dtype=np.int64
         )
-        null_rng = np.random.default_rng(42 + group_index)
+        full_support_seed = _support_seed(family_ids, "border-full-support")
+        null_rng = np.random.default_rng(
+            _support_seed(family_ids, "border-full-label-permutation")
+        )
         permuted_family_labels = np.vstack(
             [null_rng.permutation(family_label_vector) for _ in range(null_count)]
         )
@@ -2525,7 +2526,7 @@ def evaluate_gated_test(
             len(border_seeds),
             len(family_ids),
             resamples=null_count,
-            seed=42 + group_index,
+            seed=full_support_seed,
         )
         retained = [index for index, share in enumerate(leaf_shares) if share <= cutoff]
         retained_entries = [group_entries[index] for index in retained]
@@ -2624,7 +2625,7 @@ def evaluate_gated_test(
                 len(border_seeds),
                 len(retained_family_ids),
                 resamples=null_count,
-                seed=43 + group_index,
+                seed=_support_seed(retained_family_ids, "border-retained-support"),
             )
             survival_intervals = _hierarchical_intervals(
                 np.stack(retained_stats_by_seed),
@@ -2645,7 +2646,9 @@ def evaluate_gated_test(
                 ],
                 dtype=np.int64,
             )
-            retained_rng = np.random.default_rng(1043 + group_index)
+            retained_rng = np.random.default_rng(
+                _support_seed(retained_family_ids, "border-retained-label-permutation")
+            )
             retained_permuted_labels = np.vstack(
                 [
                     retained_rng.permutation(retained_family_labels)
@@ -2774,6 +2777,8 @@ def evaluate_gated_test(
             "status": "completed" if mask_audit_passed else "blocked by mask audit",
             "sample_size": max(sample_sizes.values(), default=0),
             "sample_sizes": sample_sizes,
+            "sampling_seed": sample_seed,
+            "sample_image_ids": sample_image_ids,
             "fit_scores": leaf_scores,
             "full_image_sample_scores": full_sample_scores,
         },
@@ -2798,9 +2803,7 @@ def evaluate_gated_test(
             for pool, image_id in support_keys
         ],
         "class_by_scene": scene_tables,
-        "class_by_scene_status": (
-            "completed" if mask_audit_passed else "blocked by mask audit"
-        ),
+        "class_by_scene_status": "completed",
     }
     output = Path(output_dir) / "evaluation.json"
     output.parent.mkdir(parents=True, exist_ok=True)

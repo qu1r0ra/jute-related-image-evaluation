@@ -152,7 +152,7 @@ class ImagePipeline:
             mask = self._mask_cache.get(key)
             if mask is None:
                 if self._mask_backend is None:
-                    from jute_disease.data.masks import (
+                    from jute_disease.data import (
                         ColorThresholdBackend,
                         Sam2Refiner,
                     )
@@ -172,30 +172,11 @@ class ImagePipeline:
                 [round(value * 255) for value in IMAGENET_MEAN], dtype=np.uint8
             )
             image = PILImage.fromarray(np.where(mask[..., None], mean, pixels))
-        width, height = image.size
-        if self.resize == "letterbox":
-            width, height = letterbox_dimensions(width, height, self.size)
-            image = F.resize(
-                image, [height, width], interpolation=InterpolationMode.BILINEAR
-            )
-            horizontal, vertical = self.size - width, self.size - height
-            image = F.pad(
-                image,
-                [
-                    horizontal // 2,
-                    vertical // 2,
-                    horizontal - horizontal // 2,
-                    vertical - vertical // 2,
-                ],
-                fill=tuple(round(value * 255) for value in IMAGENET_MEAN),
-            )
-            left, top = horizontal // 2, vertical // 2
-            valid_mask = np.zeros((self.size, self.size), dtype=bool)
-            valid_mask[top : top + height, left : left + width] = True
-        else:
-            image = F.resize(image, self.size, interpolation=InterpolationMode.BILINEAR)
-            image = F.center_crop(image, [self.size, self.size])
-            valid_mask = np.ones((self.size, self.size), dtype=bool)
+        image, valid_mask = self._resize(
+            image,
+            InterpolationMode.BILINEAR,
+            fill=tuple(round(value * 255) for value in IMAGENET_MEAN),
+        )
         if self.is_train and self.training_view != "border-frame":
             worker = torch.utils.data.get_worker_info()
             worker_seed = worker.seed if worker else self.seed
@@ -226,6 +207,46 @@ class ImagePipeline:
             pixels = np.asarray(image)
             return ImageWithMask(pixels, valid_mask) if self.include_mask else pixels
         return F.normalize(F.to_tensor(image), IMAGENET_MEAN, IMAGENET_STD)
+
+    def resize_mask(self, mask: np.ndarray) -> np.ndarray:
+        """Resize a pixel mask with this pipeline's frozen image geometry."""
+        binary = (np.asarray(mask) > 0).astype(np.uint8) * 255
+        image, _ = self._resize(
+            PILImage.fromarray(binary), InterpolationMode.NEAREST, fill=0
+        )
+        return np.asarray(image) > 0
+
+    def _resize(
+        self,
+        image: Image,
+        interpolation: InterpolationMode,
+        *,
+        fill: int | tuple[int, int, int],
+    ) -> tuple[Image, np.ndarray]:
+        """Apply the one resize and crop implementation used for images and masks."""
+        if self.resize == "letterbox":
+            width, height = image.size
+            resized_width, resized_height = letterbox_dimensions(
+                width, height, self.size
+            )
+            image = F.resize(
+                image,
+                [resized_height, resized_width],
+                interpolation=interpolation,
+            )
+            horizontal, vertical = self.size - resized_width, self.size - resized_height
+            left, top = horizontal // 2, vertical // 2
+            image = F.pad(
+                image,
+                [left, top, horizontal - left, vertical - top],
+                fill=fill,
+            )
+            valid_mask = np.zeros((self.size, self.size), dtype=bool)
+            valid_mask[top : top + resized_height, left : left + resized_width] = True
+            return image, valid_mask
+        image = F.resize(image, self.size, interpolation=interpolation)
+        image = F.center_crop(image, [self.size, self.size])
+        return image, np.ones((self.size, self.size), dtype=bool)
 
     @property
     def augmentation(self) -> Compose:

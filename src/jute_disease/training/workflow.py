@@ -505,6 +505,7 @@ def run_job(workspace: Workspace, job: Job) -> None:
                     if evaluation_fit_spec is not None
                     else 0
                 ),
+                mask_checkpoint=data.mask_checkpoint,
                 fixture_masks=data.fixture_masks,
             )
     else:

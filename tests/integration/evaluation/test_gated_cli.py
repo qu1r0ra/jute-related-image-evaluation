@@ -402,6 +402,8 @@ def test_cli_refuses_test_read_without_both_records_then_evaluates_fixture(
     report = json.loads((output / "evaluation.json").read_text(encoding="utf-8"))
     assert report["border_leaf_share_cutoff"] == 0.05
     assert report["leaf_only"]["sample_size"] <= 2_000
+    assert report["leaf_only"]["sampling_seed"] == 139
+    assert report["leaf_only"]["sample_image_ids"]
     assert report["leaf_only"]["fit_scores"]
     assert len(report["background_only"]["fit_scores"]) == 10
     assert report["border"]
@@ -410,7 +412,10 @@ def test_cli_refuses_test_read_without_both_records_then_evaluates_fixture(
     assert all("accuracy_wilson_95" in row for row in cell["class_cells"].values())
     for model_scenes in report["class_by_scene"].values():
         for scene_row in model_scenes.values():
-            eligible = all(count >= 30 for count in scene_row["class_counts"].values())
+            represented = [
+                count for count in scene_row["class_counts"].values() if count > 0
+            ]
+            eligible = bool(represented) and all(count >= 30 for count in represented)
             assert ("macro_f1" in scene_row) is eligible
 
     history_path = inputs.target_dir / "evaluator" / "test-read-history.jsonl"
@@ -852,6 +857,7 @@ def test_default_matrix_freeze_records_all_probe_routes(
     assert selection["primary_split"] == 0
     leaf = selection["leaf_only"]
     assert leaf["sample_size"] == 2_000
+    assert leaf["sampling_seed"] == 139
     assert leaf["fit_ids"] == selection["final_fit_ids"]
     assert selection["border"]["frame_width_px_start"] == 32
     assert selection["border"]["leaf_share_cutoff_start"] == 0.05
@@ -1063,7 +1069,14 @@ def test_failed_mask_audit_blocks_mask_dependent_report_scores(
     }
     assert report["leaf_only"]["sample_size"] == 0
     assert report["leaf_only"]["fit_scores"] is None
-    assert not report["class_by_scene"]
+    assert report["class_by_scene"]
+    assert report["class_by_scene_status"] == "completed"
+    for model_scenes in report["class_by_scene"].values():
+        for scene_row in model_scenes.values():
+            assert "class_cells" in scene_row
+            assert all(
+                "accuracy_wilson_95" in row for row in scene_row["class_cells"].values()
+            )
     for row in report["border"].values():
         assert row["headline"] is None
         assert row["symptom_survival"] is None
