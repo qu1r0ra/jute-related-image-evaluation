@@ -117,4 +117,3 @@ signs off. The fixture deliberately leaves this gate pending.
 External figure images are admitted only with CC0, CC BY or CC BY-SA licenses
 and nonempty source, URL and attribution fields in `figure-sources.json`.
 Generated plots from project artifacts need no external image attribution.
-
