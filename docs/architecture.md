@@ -66,11 +66,12 @@ held-out metrics, are rejected.
 Already-produced evaluation JSON can be imported with
 `--evaluation-artifacts BUNDLE_DIR`. The bundle contains `receipt.json`,
 `metrics.json`, `predictions.json` and the run receipts named by the evaluation
-receipt. The receipt binds each file to the export configuration SHA-256 and
-frozen manifest digest; run receipts must agree on their identities and
-partition. Every finite numeric leaf beneath the metrics object's `metrics`
-field becomes an export-ID macro. This import checks hashes and receipt lineage
-without scoring or opening partition images. Existing bootstrap summaries can
+receipt. It must describe validation (`val`) artifacts. The receipt binds each
+file to the export configuration SHA-256 and frozen manifest digest; run
+receipts must agree on their identities and partition. Every finite numeric
+leaf beneath the metrics object's `metrics` field becomes an export-ID macro.
+This import checks hashes and receipt lineage without scoring or opening
+partition images. Existing bootstrap summaries can
 be imported with `--statistics-artifacts BUNDLE_DIR`; its receipt and report
 must match the same configuration, manifest and evaluation-receipt hash. Every
 numeric leaf beneath the `statistics` field becomes a macro. Both bundle

@@ -246,6 +246,35 @@ def test_fixture_freezes_exports_rebuilds_and_checks_macros(tmp_path: Path) -> N
         config_sha256,
         metadata["artifacts"]["manifest"]["manifest_digest"],
     )
+    evaluation_receipt_path = evaluation_artifacts / "receipt.json"
+    run_receipt_path = evaluation_artifacts / "run-receipts" / "seed-42.json"
+    original_evaluation_receipt = evaluation_receipt_path.read_bytes()
+    original_run_receipt = run_receipt_path.read_bytes()
+    evaluation_receipt = json.loads(original_evaluation_receipt)
+    run_receipt = json.loads(original_run_receipt)
+    evaluation_receipt["partition"] = "test"
+    run_receipt["results"]["partition"] = "test"
+    run_receipt_path.write_text(json.dumps(run_receipt), encoding="utf-8")
+    evaluation_receipt["run_receipts"][0]["sha256"] = hashlib.sha256(
+        run_receipt_path.read_bytes()
+    ).hexdigest()
+    evaluation_receipt_path.write_text(json.dumps(evaluation_receipt), encoding="utf-8")
+    try:
+        export_manuscript(
+            output / "freeze" / "target",
+            output / "fixture-export-config.json",
+            tmp_path / "test-partition-export",
+            source_metadata=json.loads(
+                (export_dir / "source-metadata.json").read_text(encoding="utf-8")
+            ),
+            evaluation_artifacts_path=evaluation_artifacts,
+        )
+    except ValueError as error:
+        assert "does not match the export configuration" in str(error)
+    else:
+        raise AssertionError("test-partition evaluation reports should be rejected")
+    evaluation_receipt_path.write_bytes(original_evaluation_receipt)
+    run_receipt_path.write_bytes(original_run_receipt)
     evaluation_metrics = tmp_path / "synthetic-evaluation-summary.csv"
     evaluation_metrics.write_text(
         "Experiment,epoch,step,val_loss,val_acc,train_loss\n"

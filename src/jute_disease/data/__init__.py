@@ -83,6 +83,7 @@ from jute_disease.data.manifest import (
     rebuild_partition_assignments,
     receipt_for,
     validate_manifest,
+    validate_partition_fractions,
     write_manifest,
 )
 from jute_disease.data.masks import (
@@ -235,6 +236,7 @@ __all__ = [
     "seed_worker",
     "stage_source",
     "validate_manifest",
+    "validate_partition_fractions",
     "verify_manifest_content",
     "verify_counts",
     "write_decision",

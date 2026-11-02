@@ -246,16 +246,8 @@ def _assign_label(
     return placement
 
 
-def rebuild_partition_assignments(
-    entries: list[dict[str, str]],
-    seed: int,
-    fractions: dict[str, float],
-) -> dict[str, str]:
-    """Rebuild deterministic group-preserving partitions from a rebuild kit.
-
-    ``entries`` must provide stable ``image_id``, ``family_id`` and ``label``
-    strings. The output maps each image ID to its newly derived partition.
-    """
+def validate_partition_fractions(fractions: dict[str, float]) -> None:
+    """Require one finite, positive fraction per partition, summing to one."""
     if (
         set(fractions) != set(PARTITIONS)
         or any(
@@ -272,6 +264,19 @@ def rebuild_partition_assignments(
             f"fractions must cover {PARTITIONS}, be positive finite numbers, "
             "and sum to 1"
         )
+
+
+def rebuild_partition_assignments(
+    entries: list[dict[str, str]],
+    seed: int,
+    fractions: dict[str, float],
+) -> dict[str, str]:
+    """Rebuild deterministic group-preserving partitions from a rebuild kit.
+
+    ``entries`` must provide stable ``image_id``, ``family_id`` and ``label``
+    strings. The output maps each image ID to its newly derived partition.
+    """
+    validate_partition_fractions(fractions)
     ids = [entry["image_id"] for entry in entries]
     if len(ids) != len(set(ids)):
         raise ValueError("rebuild kit contains duplicate image IDs")

@@ -13,7 +13,12 @@ from io import StringIO
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from jute_disease.data import PARTITIONS, load_manifest, rebuild_partition_assignments
+from jute_disease.data import (
+    PARTITIONS,
+    load_manifest,
+    rebuild_partition_assignments,
+    validate_partition_fractions,
+)
 
 CLAIM_LIST_URL = (
     "https://github.com/qu1r0ra/jute-related-image-evaluation/issues/108"
@@ -562,8 +567,7 @@ def _evaluation_artifacts(
         or receipt.get("kind") != "evaluation"
         or receipt.get("configuration_sha256") != configuration_sha256
         or receipt.get("manifest_digest") != manifest_digest
-        or not isinstance(receipt.get("partition"), str)
-        or receipt.get("partition") not in {"val", "test"}
+        or receipt.get("partition") != "val"
     ):
         raise ValueError("evaluation receipt does not match the export configuration")
     artifacts = receipt.get("artifacts")
@@ -1137,18 +1141,7 @@ def rebuild_kit_splits(
     ):
         raise ValueError("unsupported or malformed rebuild kit")
     fractions = kit["fractions"]
-    if (
-        set(fractions) != set(PARTITIONS)
-        or any(
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or (isinstance(value, float) and not math.isfinite(value))
-            or value <= 0
-            for value in fractions.values()
-        )
-        or abs(sum(fractions.values()) - 1) > 1e-9
-    ):
-        raise ValueError("rebuild kit fractions must be finite and sum to one")
+    validate_partition_fractions(fractions)
     required_fields = (
         "source",
         "url",

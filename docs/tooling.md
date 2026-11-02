@@ -63,7 +63,9 @@ run receipt files referenced by `receipt.json`. Its version 1 receipt records
 the configuration SHA-256, frozen manifest digest, partition, and hashes for
 each artifact and run receipt. The metrics and predictions JSON repeat the
 configuration and manifest digests, and predictions list the same run
-identities as the receipts. The statistics bundle has `receipt.json` and a
+identities as the receipts. Only `val` evaluation receipts are accepted; test
+reports and predictions are outside this export path. The statistics bundle
+has `receipt.json` and a
 report JSON containing `config_digest`, `manifest_digest`,
 `evaluation_receipt_sha256` and a `statistics` object. Its receipt records the
 report hash and must bind to the evaluation receipt hash. Every finite numeric
