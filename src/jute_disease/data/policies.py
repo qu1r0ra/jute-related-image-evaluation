@@ -333,7 +333,10 @@ def write_policy_manifests(
             )
         reserved = [row for row in rows if row["family"] in reserve]
         available = [row for row in rows if row["family"] not in reserve]
-        if any(not any(row["label"] == label for row in reserved) for label in labels):
+        if any(
+            len({row["family"] for row in reserved if row["label"] == label}) < 2
+            for label in labels
+        ):
             raise ValueError(f"insufficient reserve family support for pool {name}")
         artifacts[f"{name}/reserve.json"] = {
             "pool": name,

@@ -414,7 +414,7 @@ def tune_cnn(
         if not math.isfinite(val_loss):
             raise RuntimeError(
                 f"{fit.fit_id}: candidate learning rate {learning_rate} "
-                "had non-finite val_loss"
+                "had a training divergence: non-finite loss"
             )
         candidates.append(
             {

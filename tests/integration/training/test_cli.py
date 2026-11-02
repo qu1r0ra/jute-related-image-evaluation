@@ -2,13 +2,16 @@
 
 import hashlib
 import json
-import subprocess
-import sys
+from collections.abc import Callable
 from pathlib import Path
 
+import pytest
+
+import jute_disease.cli as cli
+from jute_disease.cli import main
 from jute_disease.config import BENCHMARK_CONFIG
 from jute_disease.data import ManifestEntry, load_manifest
-from jute_disease.training import RunStore
+from jute_disease.training import ChildResult, Job, RunStore, Workspace, run_job
 
 from .conftest import Inputs
 
@@ -96,8 +99,22 @@ def _policy_entry(
 
 
 def test_cli_trains_one_assigned_chain_and_classical_fit(
-    inputs: Inputs, tmp_path: Path
+    inputs: Inputs, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The fixture registers its synthetic sources in this process only, so the
+    # queue's children run here instead of in a fresh interpreter.
+    def in_process(
+        workspace_file: Path,
+    ) -> Callable[[Job, float | None, Path], ChildResult]:
+        workspace = Workspace.load(workspace_file)
+
+        def launch(job: Job, timeout: float | None, log: Path) -> ChildResult:
+            run_job(workspace, job)
+            return ChildResult(0, False, 1.0, "")
+
+        return launch
+
+    monkeypatch.setattr(cli, "subprocess_launcher", in_process)
     raw = json.loads(BENCHMARK_CONFIG.read_text(encoding="utf-8"))
     raw["recipe"].update(
         image_size=64,
@@ -128,9 +145,6 @@ def test_cli_trains_one_assigned_chain_and_classical_fit(
     _write_policy_fixture(inputs, policy_dir)
     runs_dir = tmp_path / "runs"
     argv = [
-        sys.executable,
-        "-m",
-        "jute_disease.cli",
         "queue",
         "run",
         "--benchmark",
@@ -156,8 +170,7 @@ def test_cli_trains_one_assigned_chain_and_classical_fit(
         "--allow-cpu",
         "--no-pretrained",
     ]
-    completed = subprocess.run(argv, capture_output=True, text=True, check=False)
-    assert completed.returncode == 0, completed.stdout + completed.stderr
+    main(argv)
 
     store = RunStore(runs_dir)
     source_tune = store.receipt("source/tune/plantvillage")

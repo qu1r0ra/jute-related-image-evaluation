@@ -14,6 +14,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
 from jute_disease.config import ML_MODELS_DIR
+from jute_disease.models.ml.features import CraftedFeatureExtractor
 from jute_disease.training.logger import get_logger
 
 logger = get_logger(__name__)
@@ -112,7 +113,7 @@ def build_classical_classifier(
     values = dict(parameters or classical_configurations(estimator)[0])
     fixed = {
         "knn": {"metric": "euclidean"},
-        "lr": {"penalty": "l2"},
+        "lr": {},
         "rf": {"n_estimators": 500},
         "svm": {},
         "gnb": {},
@@ -132,12 +133,17 @@ def build_classical_classifier(
             random_state=seed, **fixed[estimator], **values
         )
     if features == "crafted":
-        if dimensions is not None and dimensions != sum((512, 28, 8)):
+        if dimensions is not None and dimensions != sum(
+            CraftedFeatureExtractor.block_sizes
+        ):
             raise ValueError("Handcrafted descriptor dimensions are not 548")
         classifier.model = Pipeline(
             [
                 *classifier.model.steps[:1],
-                ("block_weights", FeatureBlockWeights((512, 28, 8))),
+                (
+                    "block_weights",
+                    FeatureBlockWeights(CraftedFeatureExtractor.block_sizes),
+                ),
                 *classifier.model.steps[1:],
             ]
         )

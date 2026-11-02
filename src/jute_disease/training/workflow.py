@@ -87,6 +87,12 @@ class Workspace:
                 raise ValueError(
                     f"assignment table is missing split/seed rows: {sorted(missing)}"
                 )
+            sources = len(benchmark.recipe.source_seeds)
+            if any(row["checkpoint"] >= sources for row in assignments["assignments"]):
+                raise ValueError(
+                    f"assignment table names a checkpoint beyond the {sources} "
+                    "source seeds"
+                )
             benchmark = replace(
                 benchmark,
                 assignments=tuple(
