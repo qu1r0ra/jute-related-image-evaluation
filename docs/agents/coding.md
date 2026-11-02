@@ -11,5 +11,6 @@
 - Follow the owning native spec/ticket when available; missing plans use the tracker gate in `docs/agents/issue-tracker.md`.
 - Use one scoped branch and PR per implementation ticket. Require all PR checks before merge. CI runs focused tests on PRs and the full suite on Linux pushes to `main`; run relevant tests and public API checks locally for the change. Never force-push; report checks that failed or were not run.
 - Merge PRs with a normal merge commit (`gh pr merge --merge`) to preserve branch commits.
+- After a PR merges, remove its clean worktree with `git worktree remove` (never `--force`), then delete its local branch with `git branch -d` once no worktree holds it. A worktree with ignored or untracked content needs the owner's direction first. Report the removed path and merged PR.
 - Write commits, PRs, comments, and public docs as direct professional prose credited to the owner alone, without AI attribution or emojis.
 - Track guidance and ADRs. Keep private context, correspondence, editable manuscripts, local data, secrets, and runtime artifacts ignored.
