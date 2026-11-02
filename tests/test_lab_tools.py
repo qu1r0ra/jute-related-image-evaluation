@@ -16,6 +16,7 @@ import pytest
 REPOSITORY = Path(__file__).resolve().parents[1]
 TRANSFER_COMMAND = REPOSITORY / "scripts" / "verify_transfer.py"
 NOTIFIER_COMMAND = REPOSITORY / "scripts" / "notify_run.py"
+QUEUE_BATCH_COMMAND = REPOSITORY / "scripts" / "queue_batch.py"
 RUN_COMMAND = REPOSITORY / "scripts" / "lab_run.sh"
 BASH = shutil.which("bash")
 
@@ -166,6 +167,48 @@ def test_transfer_command_records_and_verifies_file_contents(tmp_path: Path) -> 
 
     (root / "result.json").write_text('{"score": 0.8}', encoding="utf-8")
     assert _transfer("verify", root, manifest).returncode != 0
+
+
+@pytest.mark.parametrize(("queue_status", "expected"), [(0, 0), (17, 17)])
+def test_queue_batch_snapshots_run_store_and_preserves_queue_status(
+    tmp_path: Path, queue_status: int, expected: int
+) -> None:
+    run_store = tmp_path / "artifacts" / "runs"
+    manifest_dir = tmp_path / "artifacts" / "transfer-manifests"
+    writer = (
+        "import pathlib, sys; "
+        "path = pathlib.Path(sys.argv[1]) / 'fit' / 'receipt.json'; "
+        "path.parent.mkdir(parents=True, exist_ok=True); "
+        "path.write_text('{\"state\": \"completed\"}', encoding='utf-8'); "
+        "raise SystemExit(int(sys.argv[2]))"
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(QUEUE_BATCH_COMMAND),
+            "--transfer-root",
+            str(run_store),
+            "--manifest-dir",
+            str(manifest_dir),
+            "--",
+            sys.executable,
+            "-c",
+            writer,
+            str(run_store),
+            str(queue_status),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == expected, result.stderr
+    manifests = list(manifest_dir.glob("queue-*.json"))
+    assert len(manifests) == 1
+    pc_copy = tmp_path / "pc-copy" / "runs"
+    shutil.copytree(run_store, pc_copy)
+    assert _transfer("verify", pc_copy, manifests[0]).returncode == 0
 
 
 def test_transfer_verify_rejects_missing_and_unexpected_files(tmp_path: Path) -> None:

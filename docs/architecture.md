@@ -17,10 +17,15 @@ An explicit target freeze inventories image bytes and decoded pixels, applies th
 - CNN training resumes from `last.ckpt` only when `owner.json` identifies the same run and receipt format, training is unfinished, and the checkpoint matches the bytes recorded in `last.json`. The checkpoint and progress hash are saved after the early-stopping callback updates. Otherwise, old checkpoints move under `superseded/` and training starts fresh.
 - Training code never names the test partition. `tests/training/test_held_out_guard.py` checks this boundary statically and at the command line.
 
+## Artifact recovery
+
+Runtime artifacts stay under the gitignored `artifacts/` directory inside the checkout on both machines. Never run `git clean -x` on the lab. `just queue-unattended` detaches the queue behind the lab lock and timeout wrapper, checks ntfy before launch, and sends start, hourly heartbeat, success or failure notifications using `NTFY_TOPIC` and `NTFY_TOKEN` from the environment. Each invocation writes a SHA-256 inventory of the full `artifacts/runs/` store to `artifacts/transfer-manifests/`, including when the queue exits with an error. A batch is all work since the last accepted copy-back; the full-store manifest includes earlier receipts and checkpoints needed for recovery.
+
+Closing the browser terminal does not stop a detached process. The 72-hour JupyterLab cull or a host restart can stop it without a final failure notification; a missed heartbeat signals interruption. After relaunch, run `just queue-unattended` again to resume from compatible receipts. After every completed invocation, copy `artifacts/runs/` and its new transfer manifest to the PC, then run `uv run --locked python scripts/verify_transfer.py verify artifacts/runs artifacts/transfer-manifests/queue-<batch-id>.json` there. Accept the batch only when every hash matches. Delete nothing on the lab until the PC copy is verified.
+
 ## Decided, not yet implemented
 
 These items are decided but are not current behavior. Each bullet states the target. When its issue lands, move the rule into the section above it belongs to and delete the bullet.
 
 - Benchmark config shape ([ADR 0003](adr/0003-ten-split-draws-with-rotating-source-checkpoints.md); [issue 137](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/137)): ten split draws, five seeds, and three rotating source checkpoints per stage. Target fit (seed s, split k) uses checkpoint (s + k) mod 3.
 - Test separation ([issue 139](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/139)): the freeze writes the test manifest where only the evaluator reads it, and the trainer never receives it. The evaluator runs only with an immutable selection record committed with its hash. The static test-name guard stays as a second check.
-- Artifact transfer ([issue 107](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/107), owner-confirmed 2026-11-02): keep artifacts under `artifacts/` inside the checkout on both machines, gitignored. Never run `git clean -x` on the lab. A batch is everything finished since the last accepted copy-back. Copy it back after every completed queue invocation, and accept it only after `scripts/verify_transfer.py` matches every hash. Delete nothing on the lab until its PC copy is verified.
