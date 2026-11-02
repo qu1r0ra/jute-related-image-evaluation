@@ -337,6 +337,7 @@ class _Queue:
         self.report_path = report_path
         self.plan: tuple[Stage, ...] = build_plan(benchmark)
         self.report = QueueReport()
+        self.unavailable_stages: set[str] = set()
         self.report.planned_fits = [
             fit.fit_id for stage in self.plan for fit in stage.fits
         ]
@@ -394,7 +395,7 @@ class _Queue:
             raise error
 
     def attempt(self, fit: FitSpec, identity: str) -> Outcome:
-        timeout = self.benchmark.limits.timeout(fit.kind)
+        timeout = self.benchmark.timeout(fit)
         try:
             outcome = self.execute(fit, timeout)
         except Exception as error:
@@ -430,6 +431,13 @@ class _Queue:
         ):
             self.omit(fit, f"upstream {upstream} did not complete")
             return
+        tuning = self.benchmark.tuning_dependency(fit)
+        if (
+            tuning is not None
+            and self.report.outcomes.get(tuning) is not RunState.COMPLETED
+        ):
+            self.omit(fit, f"tuning {tuning} did not complete")
+            return
         try:
             identity = self.identity_for(fit)
         except FileNotFoundError as error:
@@ -438,6 +446,14 @@ class _Queue:
             # error, such as changed frozen content, propagates and stops the queue.
             reason = f"inputs unavailable: {error}"
             self.store.omit(fit.fit_id, "", reason)
+            if fit.kind is FitKind.SOURCE and fit.stage in self.unavailable_stages:
+                # Sibling seeds of a stage whose inputs are already known to be
+                # absent are one problem, not a further streak towards the abort.
+                self.record(fit, RunState.OMITTED, reason)
+                self.save()
+                return
+            if fit.kind is FitKind.SOURCE:
+                self.unavailable_stages.add(fit.stage)
             self.fail_persistently(fit, RunState.OMITTED, reason)
             return
         if self.store.resolve(fit.fit_id, identity) is Resume.SKIP:
@@ -467,7 +483,11 @@ class _Queue:
             if any(fit.kind is FitKind.SOURCE for fit in stage.fits):
                 # An arm is judged by its targets; a completed source alone is
                 # not a partial result.
-                targets = [fit for fit in stage.fits if fit.kind is FitKind.TARGET]
+                targets = [
+                    fit
+                    for fit in stage.fits
+                    if fit.kind is FitKind.TARGET and fit.phase != "tune"
+                ]
                 states = [self.report.outcomes[fit.fit_id] for fit in targets]
                 self.report.arms[stage.name] = _arm_status(states)
         self.report.confirmatory_blockers = confirmatory_blockers(

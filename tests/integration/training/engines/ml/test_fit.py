@@ -145,7 +145,8 @@ def test_svm_has_no_probability_calibration(
         _fit("svm", "raw"), recipe, data, tmp_path / "fit", tmp_path / "cache"
     )
     assert (
-        joblib.load(result.artifacts["model"]).named_steps["clf"].probability is False
+        joblib.load(result.artifacts["model"]).named_steps["clf"].estimator_.probability
+        is False
     )
 
 

@@ -15,6 +15,7 @@ import pytest
 
 from jute_disease.config import BENCHMARK_CONFIG
 from jute_disease.training import (
+    LEARNING_RATE_MULTIPLIERS,
     Benchmark,
     ConfirmatoryAnalysisBlockedError,
     FailureKind,
@@ -34,15 +35,39 @@ from jute_disease.training.queue import (
     run_queue,
 )
 
-CORE = [f"cnn/mobilenet_v2_direct/seed-{s}" for s in (42, 1337, 7)] + [
-    f"cnn/efficientnet_b5_direct/seed-{s}" for s in (42, 1337, 7)
+SEEDS = (42, 1337, 7)
+CORE_TUNING = [
+    "cnn/tune/mobilenet_v2_direct/pool-A",
+    "cnn/tune/efficientnet_b5_imagenet/pool-A",
 ]
-PLANTVILLAGE_TARGETS = [
-    f"cnn/mobilenet_v2_plantvillage/seed-{s}" for s in (42, 1337, 7)
+CORE = [f"cnn/mobilenet_v2_direct/seed-{s}" for s in SEEDS] + [
+    f"cnn/efficientnet_b5_imagenet/seed-{s}" for s in SEEDS
 ]
-PLANTDOC_TARGETS = [
-    f"cnn/mobilenet_v2_plantvillage_plantdoc/seed-{s}" for s in (42, 1337, 7)
+CORE_PLAN = [CORE_TUNING[0], *CORE[:3], CORE_TUNING[1], *CORE[3:]]
+CLASSICAL_COMBOS = [
+    f"{e}-{x}" for e in ("gnb", "knn", "lr", "svm") for x in ("raw", "crafted")
 ]
+PLANTVILLAGE_TARGETS = [f"cnn/mobilenet_v2_plantvillage/seed-{s}" for s in SEEDS]
+PLANTDOC_TARGETS = [f"cnn/mobilenet_v2_plantvillage_plantdoc/seed-{s}" for s in SEEDS]
+
+
+def small_benchmark() -> Benchmark:
+    """The declared benchmark cut to one pool, view, policy and split."""
+    full = load_benchmark(BENCHMARK_CONFIG)
+    return replace(
+        full,
+        recipe=replace(full.recipe, seeds=SEEDS),
+        estimators=("gnb", "knn", "lr", "svm"),
+        pools=full.pools[:1],
+        policies=full.policies[:1],
+        views=full.views[:1],
+        splits=(0,),
+        primary_split=0,
+        assignments=((0, 0, 0), (0, 1, 1), (0, 2, 2)),
+    )
+
+
+TOTAL = len(small_benchmark().fits())
 
 
 class FixedClock:
@@ -199,7 +224,7 @@ class Harness:
         self, adjust: Callable[[Benchmark], Benchmark] = lambda b: b
     ) -> QueueReport:
         return run_queue(
-            adjust(load_benchmark(BENCHMARK_CONFIG)),
+            adjust(small_benchmark()),
             self.store,
             clock=FixedClock(),
             execute=self.execute,
@@ -248,17 +273,18 @@ def test_runs_core_then_classical_then_plantvillage_then_plantdoc(
 ) -> None:
     report = harness.run()
     ids = harness.calls
-    assert ids[:6] == CORE
-    assert ids[6] == "classical/prepare"
-    assert ids[7:17] == [
-        f"classical/{e}-{x}"
-        for e in ("gnb", "knn", "lr", "rf", "svm")
-        for x in ("raw", "crafted")
-    ]
-    assert ids[17] == "source/plantvillage"
-    assert ids[18:21] == PLANTVILLAGE_TARGETS
-    assert ids[21] == "source/plantdoc"
-    assert ids[22:] == PLANTDOC_TARGETS
+    assert len(ids) == TOTAL
+    assert ids[:8] == CORE_PLAN
+    assert ids[8] == "classical/prepare"
+    assert ids[9:17] == [f"classical/tune/A/{combo}" for combo in CLASSICAL_COMBOS]
+    assert ids[17:25] == [f"classical/{combo}" for combo in CLASSICAL_COMBOS]
+    assert ids[25] == "source/tune/plantvillage"
+    assert ids[26:29] == [f"source/plantvillage/seed-{s}" for s in SEEDS]
+    assert ids[29] == "cnn/tune/mobilenet_v2_plantvillage/pool-A"
+    assert ids[30:33] == PLANTVILLAGE_TARGETS
+    assert ids[33:36] == [f"source/plantdoc/seed-{s}" for s in SEEDS]
+    assert ids[36] == "cnn/tune/mobilenet_v2_plantvillage_plantdoc/pool-A"
+    assert ids[37:] == PLANTDOC_TARGETS
     assert report.arms == {"plantvillage": "complete", "plantdoc": "complete"}
     assert report.escalations == []
     assert harness.overlapped is False
@@ -278,7 +304,7 @@ def test_any_incomplete_planned_fit_blocks_confirmatory_analysis(
     assert report.confirmatory_ready is False
     with pytest.raises(ConfirmatoryAnalysisBlockedError, match=CORE[0]):
         require_confirmatory_completion(
-            load_benchmark(BENCHMARK_CONFIG), harness.store, harness.identity
+            small_benchmark(), harness.store, harness.identity
         )
 
 
@@ -297,7 +323,7 @@ def test_dirty_or_unbound_runs_block_confirmatory_analysis(
     assert report.confirmatory_ready is False
     with pytest.raises(ConfirmatoryAnalysisBlockedError):
         require_confirmatory_completion(
-            load_benchmark(BENCHMARK_CONFIG), harness.store, harness.identity
+            small_benchmark(), harness.store, harness.identity
         )
 
 
@@ -348,7 +374,7 @@ def test_confirmatory_gate_checks_every_attempt_binding(
 
     with pytest.raises(ConfirmatoryAnalysisBlockedError):
         require_confirmatory_completion(
-            load_benchmark(BENCHMARK_CONFIG), harness.store, harness.identity
+            small_benchmark(), harness.store, harness.identity
         )
 
 
@@ -357,8 +383,14 @@ def test_every_step_runs_under_its_configured_timeout(harness: Harness) -> None:
     harness.run()
     assert harness.timeouts["classical/prepare"] == limits.prepare_seconds
     assert harness.timeouts["classical/lr-raw"] == limits.classical_seconds
-    assert harness.timeouts["source/plantvillage"] == limits.source_seconds
+    assert harness.timeouts["source/plantvillage/seed-42"] == limits.source_seconds
     assert harness.timeouts[CORE[0]] == limits.target_seconds
+    candidates = len(LEARNING_RATE_MULTIPLIERS)
+    assert harness.timeouts[CORE_TUNING[0]] == limits.target_seconds * candidates
+    assert harness.timeouts["source/tune/plantvillage"] == (
+        limits.source_seconds * candidates
+    )
+    assert harness.timeouts["classical/tune/A/lr-raw"] == limits.classical_seconds
 
 
 def test_second_run_skips_everything_completed(harness: Harness) -> None:
@@ -366,7 +398,7 @@ def test_second_run_skips_everything_completed(harness: Harness) -> None:
     harness.calls.clear()
     report = harness.run()
     assert harness.calls == []
-    assert len(report.skipped) == 25
+    assert len(report.skipped) == TOTAL
 
 
 def test_incompatible_identity_is_rerun_not_reused(harness: Harness) -> None:
@@ -374,11 +406,9 @@ def test_incompatible_identity_is_rerun_not_reused(harness: Harness) -> None:
     harness.calls.clear()
     harness.identity_tag = "v2"
     report = harness.run()
-    assert len(harness.calls) == 25
+    assert len(harness.calls) == TOTAL
     assert report.confirmatory_ready is True
-    require_confirmatory_completion(
-        load_benchmark(BENCHMARK_CONFIG), harness.store, harness.identity
-    )
+    require_confirmatory_completion(small_benchmark(), harness.store, harness.identity)
 
 
 def test_a_failed_fit_is_retried_once_with_the_same_seed(harness: Harness) -> None:
@@ -439,12 +469,17 @@ def test_completion_without_a_valid_receipt_is_a_failure(harness: Harness) -> No
 def test_a_persistent_failure_is_reported_and_its_dependants_omitted(
     harness: Harness,
 ) -> None:
-    harness.failing["source/plantvillage"] = 2
+    harness.failing["source/tune/plantvillage"] = 2
     report = harness.run()
-    assert harness.calls.count("source/plantvillage") == 1 + RETRIES
-    assert report.outcomes["source/plantvillage"] is RunState.FAILED
-    assert any("source/plantvillage" in e for e in report.escalations)
-    for fit_id in [*PLANTVILLAGE_TARGETS, "source/plantdoc", *PLANTDOC_TARGETS]:
+    assert harness.calls.count("source/tune/plantvillage") == 1 + RETRIES
+    assert report.outcomes["source/tune/plantvillage"] is RunState.FAILED
+    assert any("source/tune/plantvillage" in e for e in report.escalations)
+    for fit_id in [
+        *(f"source/plantvillage/seed-{s}" for s in SEEDS),
+        *PLANTVILLAGE_TARGETS,
+        *(f"source/plantdoc/seed-{s}" for s in SEEDS),
+        *PLANTDOC_TARGETS,
+    ]:
         assert report.outcomes[fit_id] is RunState.OMITTED
         assert fit_id not in harness.calls
     assert report.arms == {"plantvillage": "omitted", "plantdoc": "omitted"}
@@ -458,7 +493,10 @@ def test_three_consecutive_persistent_failures_abort_the_queue(
     with pytest.raises(QueueAbortedError) as raised:
         harness.run()
     assert raised.value.failures == tuple(CORE[:3])
-    assert harness.calls == [fit_id for fit_id in CORE[:3] for _ in range(2)]
+    assert harness.calls == [
+        CORE_TUNING[0],
+        *(fit_id for fit_id in CORE[:3] for _ in range(2)),
+    ]
     saved = harness.saved()
     assert saved["consecutive_failures"] == CORE[:3]
     assert any("aborted" in e for e in saved["escalations"])
@@ -469,7 +507,7 @@ def test_a_completed_fit_resets_the_failure_streak(harness: Harness) -> None:
         harness.failing[fit_id] = 2
     report = harness.run()
     assert report.outcomes[CORE[2]] is RunState.COMPLETED
-    assert len(harness.calls) == 25 + 4  # every failing fit used its retry
+    assert len(harness.calls) == TOTAL + 4  # every failing fit used its retry
     assert len(report.escalations) == 4
 
 
@@ -488,15 +526,15 @@ def test_unavailable_plantdoc_inputs_omit_only_its_chain(harness: Harness) -> No
     original_identity = harness.identity
 
     def identity(fit: FitSpec) -> str:
-        if fit.fit_id == "source/plantdoc":
+        if fit.fit_id.startswith("source/plantdoc/"):
             raise FileNotFoundError("PlantDoc manifest is missing")
         return original_identity(fit)
 
     harness.identity = identity  # type: ignore[method-assign]
     report = harness.run()
     assert report.arms == {"plantvillage": "complete", "plantdoc": "omitted"}
-    assert "source/plantdoc" not in harness.calls
-    assert report.outcomes["source/plantdoc"] is RunState.OMITTED
+    assert not any(c.startswith("source/plantdoc/") for c in harness.calls)
+    assert report.outcomes["source/plantdoc/seed-42"] is RunState.OMITTED
     assert any("inputs unavailable" in e for e in report.escalations)
 
 
@@ -511,14 +549,14 @@ def test_changed_frozen_inputs_stop_the_queue(harness: Harness) -> None:
     harness.identity = identity  # type: ignore[method-assign]
     with pytest.raises(ValueError, match="content hash"):
         harness.run()
-    assert harness.calls == CORE[:2]
+    assert harness.calls == [CORE_TUNING[0], *CORE[:2]]
 
 
 def test_an_arm_is_judged_by_its_targets_not_its_source(harness: Harness) -> None:
     target = "cnn/mobilenet_v2_plantvillage/seed-42"
     harness.failing[target] = 2
     report = harness.run(_one_seed)
-    assert report.outcomes["source/plantvillage"] is RunState.COMPLETED
+    assert report.outcomes["source/plantvillage/seed-42"] is RunState.COMPLETED
     assert report.arms["plantvillage"] == "omitted"
 
 
@@ -537,3 +575,24 @@ def test_declared_timeouts_cover_every_kind_of_step() -> None:
     limits = load_benchmark(BENCHMARK_CONFIG).limits
     for kind in FitKind:
         assert limits.timeout(kind) > 0
+
+
+def test_a_failed_tuning_fit_omits_the_finals_that_reuse_it(harness: Harness) -> None:
+    tuning = "classical/tune/A/lr-raw"
+    harness.failing[tuning] = 2
+    harness.failure_kind = FailureKind.OTHER
+    report = harness.run()
+    assert report.outcomes[tuning] is RunState.FAILED
+    assert report.outcomes["classical/lr-raw"] is RunState.OMITTED
+    assert "classical/lr-raw" not in harness.calls
+    assert report.reasons["classical/lr-raw"] == f"tuning {tuning} did not complete"
+    assert report.outcomes["classical/lr-crafted"] is RunState.COMPLETED
+
+
+def test_tuning_selection_precedes_every_final_that_reuses_it() -> None:
+    benchmark = small_benchmark()
+    order = {fit.fit_id: index for index, fit in enumerate(benchmark.fits())}
+    for fit in benchmark.fits():
+        tuning = benchmark.tuning_dependency(fit)
+        if tuning is not None:
+            assert order[tuning] < order[fit.fit_id]

@@ -8,6 +8,7 @@ sweeps. The test partition is never opened.
 """
 
 import hashlib
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -26,14 +27,15 @@ from jute_disease.data import (
 )
 from jute_disease.models.ml import (
     FEATURE_EXTRACTORS,
-    ML_CLASSIFIERS,
     BaseFeatureExtractor,
     RawPixelFeatureExtractor,
+    build_classical_classifier,
     extract_features,
     feature_cache_key,
+    select_classical_configuration,
 )
 from jute_disease.training.benchmark import FitSpec, Recipe
-from jute_disease.training.inputs import DataInputs
+from jute_disease.training.inputs import DataInputs, target_manifest_for_fit
 from jute_disease.training.results import FitResult
 
 FIT_PARTITIONS = ("train", "val")
@@ -59,12 +61,13 @@ def _matrix(
     data: DataInputs,
     cache_dir: Path,
     require_cache: bool = False,
+    pool: str = "",
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     dataset = ManifestDataset(
         manifest,
         partition,
-        data.image_root,
-        transform=classical_pipeline(recipe.image_size),
+        data.target_root(pool) if pool else data.image_root,
+        transform=classical_pipeline(recipe.image_size, include_mask=True),
     )
     extractor = _extractor(features, recipe)
     x, y = extract_features(
@@ -124,12 +127,15 @@ def fit_classical(
     cache_dir: Path | str,
     *,
     require_cache: bool = False,
+    selected_parameters: dict[str, object] | None = None,
 ) -> FitResult:
     """Fit one estimator on one feature set and describe exactly what happened.
 
     Raises:
         ValueError: the estimator or feature set is not declared.
     """
+    from jute_disease.models.ml import ML_CLASSIFIERS
+
     if fit.estimator not in ML_CLASSIFIERS:
         raise ValueError(
             f"Unknown estimator {fit.estimator!r}; use one of {sorted(ML_CLASSIFIERS)}"
@@ -138,15 +144,67 @@ def fit_classical(
     attempt = Path(attempt_dir)
     attempt.mkdir(parents=True, exist_ok=True)
     cache = Path(cache_dir)
-    manifest = load_manifest(data.target_dir)
+    manifest = target_manifest_for_fit(fit, recipe, data)
     x_train, y_train, train_info = _matrix(
-        manifest, "train", fit.features, recipe, data, cache, require_cache
+        manifest,
+        "train",
+        fit.features,
+        recipe,
+        data,
+        cache,
+        require_cache,
+        pool=fit.pool,
     )
     x_val, y_val, val_info = _matrix(
-        manifest, "val", fit.features, recipe, data, cache, require_cache
+        manifest,
+        "val",
+        fit.features,
+        recipe,
+        data,
+        cache,
+        require_cache,
+        pool=fit.pool,
     )
 
-    model = ML_CLASSIFIERS[fit.estimator](random_state=fit.seed)
+    if fit.phase == "tune":
+        selection = select_classical_configuration(
+            fit.estimator,
+            fit.features,
+            fit.seed,
+            x_train,
+            y_train,
+            x_val,
+            y_val,
+        )
+        path = attempt / "tuning.json"
+        path.write_text(
+            json.dumps(selection, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return FitResult(
+            {
+                "fit": fit.fit_id,
+                "phase": fit.phase,
+                "estimator": fit.estimator,
+                "features": fit.features,
+                "pool": fit.pool,
+                "selected_parameters": selection["selected"],
+                "selected_reserve_macro_f1": selection["selected_macro_f1"],
+                "configurations": selection["configurations"],
+                "reserve": train_info | {"validation": val_info},
+                "scaling": "train-only",
+                "test_accessed": False,
+            },
+            {"tuning": path},
+        )
+
+    model = build_classical_classifier(
+        fit.estimator,
+        fit.seed,
+        fit.features,
+        selected_parameters,
+        dimensions=x_train.shape[1],
+    )
     weights = compute_sample_weight(WEIGHTING, y_train)
     started = time.perf_counter()
     model.fit(x_train, y_train, sample_weight=weights)
@@ -161,13 +219,18 @@ def fit_classical(
             "estimator": fit.estimator,
             "features": fit.features,
             "seed": fit.seed,
+            "pool": fit.pool,
+            "view": fit.view,
+            "policy": fit.policy,
+            "split": fit.split,
             "manifest": manifest.digest(),
             "rows": {"train": train_info["rows"], "val": val_info["rows"]},
             "feature_cache": {"train": train_info, "val": val_info},
             "scaling": "train-only",
             "weighting": {"requested": WEIGHTING, "status": model.weighting},
             "calibration": False,
-            "sweep": False,
+            "sweep": selected_parameters is not None,
+            "selected_parameters": selected_parameters,
             "metrics": {
                 "val_accuracy": float(accuracy_score(y_val, predicted)),
                 "val_macro_f1": float(

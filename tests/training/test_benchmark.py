@@ -84,9 +84,7 @@ def test_twelve_target_fits_across_four_systems_and_three_seeds(benchmark) -> No
     assert len(final_targets) == 2790
     assert len(tuning) == 12
     assert {(fit.system, fit.pool) for fit in tuning} == {
-        (system, pool)
-        for system in benchmark.systems
-        for pool in benchmark.pools
+        (system, pool) for system in benchmark.systems for pool in benchmark.pools
     }
     assert {f.system for f in targets} == {
         "mobilenet_v2_direct",
@@ -113,9 +111,7 @@ def test_twelve_target_fits_across_four_systems_and_three_seeds(benchmark) -> No
 
 def test_initialization_recipes_and_batching(benchmark) -> None:
     by_id = {f.fit_id: f for f in benchmark.fits()}
-    mobile = by_id[
-        "cnn/mobilenet_v2_direct/pool-A/view-1/image-random/split-0/seed-42"
-    ]
+    mobile = by_id["cnn/mobilenet_v2_direct/pool-A/view-1/image-random/split-0/seed-42"]
     b5 = by_id[
         "cnn/efficientnet_b5_imagenet/pool-A/view-1/image-random/split-0/seed-42"
     ]

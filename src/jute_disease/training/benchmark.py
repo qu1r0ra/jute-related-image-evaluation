@@ -53,6 +53,10 @@ class QueueLimits:
         }[kind]
 
 
+# Learning-rate candidates of one tuning fit, as multiples of the base rate.
+LEARNING_RATE_MULTIPLIERS = (0.1, 1.0, 10.0)
+
+
 @dataclass(frozen=True)
 class FitSpec:
     """One executable fit. Every variant is a value here, not a separate script."""
@@ -91,6 +95,24 @@ class Benchmark:
     primary_split: int
     assignments: tuple[tuple[int, int, int], ...]
 
+    def tuning_dependency(self, fit: FitSpec) -> str | None:
+        """The tuning fit whose frozen selection a final ``fit`` reuses."""
+        if fit.phase == "tune" or fit.kind is FitKind.PREPARE:
+            return None
+        if fit.kind is FitKind.CLASSICAL:
+            return f"classical/tune/{fit.pool}/{fit.estimator}-{fit.features}"
+        if fit.kind is FitKind.SOURCE:
+            tuning = self.source_tuning_fit()
+            return None if tuning is None else tuning.fit_id
+        return f"cnn/tune/{fit.system}/pool-{fit.pool}"
+
+    def timeout(self, fit: FitSpec) -> float:
+        """The limit for one attempt; a CNN tuning fit trains every candidate."""
+        seconds = self.limits.timeout(fit.kind)
+        if fit.phase == "tune" and fit.kind in (FitKind.SOURCE, FitKind.TARGET):
+            return seconds * len(LEARNING_RATE_MULTIPLIERS)
+        return seconds
+
     def _checkpoint_for(self, split: int, seed_index: int) -> int:
         matches = [
             checkpoint
@@ -99,7 +121,8 @@ class Benchmark:
         ]
         if len(matches) != 1:
             raise ValueError(
-                f"assignment table has no unique row for split {split}, seed {seed_index}"
+                "assignment table has no unique row for split "
+                f"{split}, seed {seed_index}"
             )
         return matches[0]
 
@@ -140,7 +163,7 @@ class Benchmark:
                                         f"classical/{estimator}-{features}/pool-{pool}"
                                         f"/view-{view}/{policy}/split-{split}/seed-{seed}"
                                     )
-                                    if simple_matrix:
+                                    if simple_matrix and len(repetitions) == 1:
                                         fit_id = f"classical/{estimator}-{features}"
                                     out.append(
                                         FitSpec(
@@ -337,7 +360,8 @@ def load_benchmark(path: Path | str) -> Benchmark:
             {"model", "micro_batch", "chain", "analysis"},
         ):
             raise ValueError(
-                f"System {name} must define model, micro_batch, chain, and optional analysis"
+                f"System {name} must define model, micro_batch, chain, "
+                "and optional analysis"
             )
         if recipe.effective_batch % definition["micro_batch"]:
             raise ValueError(f"System {name}: micro_batch must divide effective_batch")
@@ -356,10 +380,9 @@ def load_benchmark(path: Path | str) -> Benchmark:
     if matrix_size > 1 and len(recipe.source_seeds) != 3:
         raise ValueError("The full benchmark must declare three source seeds per stage")
     assignments = tuple(
-        (row["split"], row["seed"], row["checkpoint"])
-        for row in raw["assignments"]
+        (row["split"], row["seed"], row["checkpoint"]) for row in raw["assignments"]
     )
-    if len(assignments) != len(set((split, seed) for split, seed, _ in assignments)):
+    if len(assignments) != len({(split, seed) for split, seed, _ in assignments}):
         raise ValueError("Benchmark assignment table has duplicate split/seed rows")
     if any(
         checkpoint != (seed + split) % 3 or checkpoint >= len(recipe.source_seeds)

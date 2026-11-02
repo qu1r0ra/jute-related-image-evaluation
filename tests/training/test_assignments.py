@@ -10,7 +10,12 @@ from jute_disease.training import DataInputs, Workspace, load_assignment_table
 def _workspace(target_dir: Path, tmp_path: Path) -> Workspace:
     return Workspace(
         benchmark_path=BENCHMARK_CONFIG,
-        data=DataInputs(image_root=tmp_path, target_dir=target_dir, sources={}),
+        data=DataInputs(
+            image_root=tmp_path,
+            target_dir=target_dir,
+            sources={},
+            policy_dir=target_dir.parent,
+        ),
         runs_dir=tmp_path / "runs",
         cache_dir=tmp_path / "cache",
         pretrained=False,

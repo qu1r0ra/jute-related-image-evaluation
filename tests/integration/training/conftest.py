@@ -74,6 +74,14 @@ def inputs(
         reviews_path=None,
         workers=2,
     )
+    assignments = [
+        {"split": split, "seed": seed, "checkpoint": (seed + split) % 3}
+        for split in range(10)
+        for seed in range(5)
+    ]
+    (freeze_dir / "assignments.json").write_text(
+        json.dumps(assignments, indent=2) + "\n", encoding="utf-8"
+    )
     saved = dict(SOURCES)
     sources: dict[str, tuple[Path, Path]] = {}
     try:
