@@ -1,4 +1,5 @@
 from jute_disease.training.benchmark import (
+    LEARNING_RATE_MULTIPLIERS,
     Benchmark,
     FitKind,
     FitSpec,
@@ -66,6 +67,7 @@ from jute_disease.training.workflow import (
 # Resolved on first use: the fit engines import models, which import this package.
 _ENGINE_EXPORTS = {
     "fit_cnn": "jute_disease.training.engines.dl.fit",
+    "tune_cnn": "jute_disease.training.engines.dl.fit",
     "training_callbacks": "jute_disease.training.engines.dl.fit",
     "ProgressRecord": "jute_disease.training.engines.dl.fit",
     "fit_classical": "jute_disease.training.engines.ml.fit",
@@ -102,6 +104,7 @@ __all__ = [
     "DataInputs",
     "FitResult",
     "StackError",
+    "LEARNING_RATE_MULTIPLIERS",
     "Benchmark",
     "FitKind",
     "FitSpec",
@@ -112,6 +115,7 @@ __all__ = [
     "run_queue",
     "fit_classical",
     "fit_cnn",
+    "tune_cnn",
     "prepare_features",
     "fit_identity",
     "training_callbacks",

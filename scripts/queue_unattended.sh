@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 # Start a detached, locked queue invocation with notifications and a transfer inventory.
+# Usage: queue_unattended.sh [TIMEOUT_SECONDS] [QUEUE_RUN_OPTIONS...]
+# Options such as --policy-dir and --pool-a-root pass through to `queue run`.
 set -euo pipefail
 
 repository=$(cd "$(dirname "$0")/.." && pwd)
 cd "$repository"
 
-timeout=${1:-259200}
+timeout=259200
+if [[ ${1:-} =~ ^[0-9]+$ ]]; then
+    timeout=$1
+    shift
+fi
 [[ $timeout =~ ^[1-9][0-9]*$ ]] || {
     echo 'Timeout must be a positive integer' >&2
     exit 2
@@ -29,4 +35,4 @@ exec bash scripts/lab_run.sh --detach "$run_dir/queue.lock" "$timeout" \
     uv run --locked python scripts/queue_batch.py \
     --transfer-root artifacts/runs \
     --manifest-dir artifacts/transfer-manifests \
-    -- just queue-run
+    -- just queue-run "$@"

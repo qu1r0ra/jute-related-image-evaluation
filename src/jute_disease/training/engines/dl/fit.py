@@ -7,8 +7,11 @@ opened. The checkpoint is the one the ``ModelCheckpoint`` callback selected on
 validation loss, and the evidence needed for a receipt is returned, not written.
 """
 
+import json
+import math
+import shutil
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -23,8 +26,13 @@ from jute_disease.models.dl import (
     read_checkpoint_state,
     state_digest,
 )
-from jute_disease.training.benchmark import FitKind, FitSpec, Recipe
-from jute_disease.training.inputs import DataInputs
+from jute_disease.training.benchmark import (
+    LEARNING_RATE_MULTIPLIERS,
+    FitKind,
+    FitSpec,
+    Recipe,
+)
+from jute_disease.training.inputs import DataInputs, target_manifest_for_fit
 from jute_disease.training.logger import (
     METRICS_DIR,
     METRICS_FILE,
@@ -118,14 +126,17 @@ def _data_module(
         manifest_dir, image_root = data.sources[fit.stage]
         image_root = find_source_root(image_root)
         target_dir: Path | None = data.target_dir
+        frozen_manifest = None
     else:
+        frozen_manifest = target_manifest_for_fit(fit, recipe, data)
         manifest_dir, image_root, target_dir = (
-            data.target_dir,
-            data.image_root,
+            None,
+            data.target_root(fit.pool) if fit.pool else data.image_root,
             None,
         )
     module = DataModule(
         manifest_dir=manifest_dir,
+        frozen_manifest=frozen_manifest,
         image_root=image_root,
         target_manifest_dir=target_dir,
         batch_size=fit.micro_batch,
@@ -364,3 +375,72 @@ def fit_cnn(
     if metrics_file.is_file():
         artifacts["metrics"] = metrics_file
     return FitResult(results, artifacts)
+
+
+def tune_cnn(
+    fit: FitSpec,
+    recipe: Recipe,
+    data: DataInputs,
+    attempt_dir: Path | str,
+    *,
+    upstream_checkpoint: Path | str | None = None,
+    pretrained: bool = True,
+    accelerator: str = "auto",
+    limit_train_batches: int | None = None,
+    limit_val_batches: int | None = None,
+) -> FitResult:
+    """Select one of three learning rates using only the fit's validation data."""
+    if fit.phase != "tune":
+        raise ValueError(f"{fit.fit_id} is not a learning-rate tuning fit")
+    attempt = Path(attempt_dir)
+    attempt.mkdir(parents=True, exist_ok=True)
+    candidates: list[dict[str, Any]] = []
+    for index, multiplier in enumerate(LEARNING_RATE_MULTIPLIERS, start=1):
+        learning_rate = recipe.learning_rate * multiplier
+        candidate_dir = attempt / f"candidate-{index}"
+        result = fit_cnn(
+            fit,
+            replace(recipe, learning_rate=learning_rate),
+            data,
+            candidate_dir,
+            upstream_checkpoint=upstream_checkpoint,
+            pretrained=pretrained,
+            accelerator=accelerator,
+            limit_train_batches=limit_train_batches,
+            limit_val_batches=limit_val_batches,
+        )
+        checkpoint = result.results["checkpoint"]
+        val_loss = float(checkpoint["val_loss"])
+        if not math.isfinite(val_loss):
+            raise RuntimeError(
+                f"{fit.fit_id}: candidate learning rate {learning_rate} "
+                "had a training divergence: non-finite loss"
+            )
+        candidates.append(
+            {
+                "learning_rate": learning_rate,
+                "val_loss": val_loss,
+                "checkpoint_sha256": checkpoint["sha256"],
+                "epochs_run": result.results["epochs_run"],
+                "early_stopped": result.results["early_stopped"],
+                "metrics": result.results["metrics"],
+                "manifests": result.results["lineage"]["manifests"],
+            }
+        )
+        shutil.rmtree(candidate_dir)
+    selected = min(
+        enumerate(candidates), key=lambda item: (item[1]["val_loss"], item[0])
+    )[1]
+    payload = {
+        "fit": asdict(fit),
+        "phase": "tune",
+        "selection_metric": "val_loss",
+        "selected_learning_rate": selected["learning_rate"],
+        "selected_val_loss": selected["val_loss"],
+        "learning_rate_multipliers": list(LEARNING_RATE_MULTIPLIERS),
+        "candidates": candidates,
+        "test_accessed": False,
+    }
+    path = attempt / "tuning.json"
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", "utf-8")
+    return FitResult(payload, {"tuning": path})

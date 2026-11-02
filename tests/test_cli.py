@@ -1,5 +1,6 @@
 """Command-shell checks: every command resolves and planned commands fail loudly."""
 
+import json
 import subprocess
 import sys
 from unittest.mock import MagicMock
@@ -203,3 +204,35 @@ def test_stack_command_reports_the_measured_stack(
     )
     main(["stack", "--allow-cpu"])
     assert '"cuda_available": true' in capsys.readouterr().out
+
+
+def _queue_arguments(tmp_path) -> list[str]:
+    return [
+        "--allow-cpu",
+        "--runs-dir",
+        str(tmp_path / "runs"),
+        "--freeze-dir",
+        str(tmp_path / "freeze"),
+        "--cache-dir",
+        str(tmp_path / "cache"),
+    ]
+
+
+def test_queue_plan_lists_the_full_matrix_without_a_policy_directory(
+    capsys: pytest.CaptureFixture[str], tmp_path
+) -> None:
+    main(["queue", "plan", *_queue_arguments(tmp_path)])
+    stages = json.loads(capsys.readouterr().out)
+    assert [stage["stage"] for stage in stages] == [
+        "core",
+        "classical",
+        "plantvillage",
+        "plantdoc",
+    ]
+
+
+def test_queue_run_refuses_the_full_matrix_without_a_policy_directory(
+    tmp_path,
+) -> None:
+    with pytest.raises(SystemExit, match="--policy-dir"):
+        main(["queue", "run", *_queue_arguments(tmp_path)])

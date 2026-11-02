@@ -25,7 +25,7 @@ from jute_disease.training.benchmark import (
     fit_identity,
     load_benchmark,
 )
-from jute_disease.training.inputs import DataInputs
+from jute_disease.training.inputs import DataInputs, target_manifest_for_fit
 from jute_disease.training.process import ChildResult, run_child
 from jute_disease.training.queue import (
     Executor,
@@ -74,6 +74,32 @@ class Workspace:
 
     def __post_init__(self) -> None:
         benchmark = load_benchmark(self.benchmark_path)
+        assignments = load_assignment_table(self)
+        if assignments["present"]:
+            found = {(row["split"], row["seed"]) for row in assignments["assignments"]}
+            expected = {
+                (split, seed_index)
+                for split in benchmark.splits
+                for seed_index in range(len(benchmark.recipe.seeds))
+            }
+            missing = expected - found
+            if missing:
+                raise ValueError(
+                    f"assignment table is missing split/seed rows: {sorted(missing)}"
+                )
+            sources = len(benchmark.recipe.source_seeds)
+            if any(row["checkpoint"] >= sources for row in assignments["assignments"]):
+                raise ValueError(
+                    f"assignment table names a checkpoint beyond the {sources} "
+                    "source seeds"
+                )
+            benchmark = replace(
+                benchmark,
+                assignments=tuple(
+                    (row["split"], row["seed"], row["checkpoint"])
+                    for row in assignments["assignments"]
+                ),
+            )
         if not self.require_cuda:
             benchmark = replace(
                 benchmark,
@@ -92,6 +118,13 @@ class Workspace:
                 "benchmark_path": str(self.benchmark_path),
                 "image_root": str(self.data.image_root),
                 "target_dir": str(self.data.target_dir),
+                "policy_dir": (
+                    None if self.data.policy_dir is None else str(self.data.policy_dir)
+                ),
+                "pool_roots": {
+                    key: str(value)
+                    for key, value in (self.data.pool_roots or {}).items()
+                },
                 "sources": sources,
                 "runs_dir": str(self.runs_dir),
                 "cache_dir": str(self.cache_dir),
@@ -112,6 +145,12 @@ class Workspace:
                 sources={
                     name: (Path(manifest), Path(root))
                     for name, (manifest, root) in raw["sources"].items()
+                },
+                policy_dir=(
+                    None if raw.get("policy_dir") is None else Path(raw["policy_dir"])
+                ),
+                pool_roots={
+                    key: Path(value) for key, value in raw.get("pool_roots", {}).items()
                 },
             ),
             runs_dir=Path(raw["runs_dir"]),
@@ -160,6 +199,13 @@ def open_workspace(
             sources={
                 name: (Path(manifest).resolve(), source_root(root))
                 for name, (manifest, root) in data.sources.items()
+            },
+            policy_dir=(
+                None if data.policy_dir is None else Path(data.policy_dir).resolve()
+            ),
+            pool_roots={
+                key: Path(root).resolve()
+                for key, root in (data.pool_roots or {}).items()
             },
         ),
         runs_dir=runs,
@@ -249,8 +295,8 @@ def run_job(workspace: Workspace, job: Job) -> None:
         StackError: CUDA is required and unavailable, or a library is missing.
         ValueError: the fit is chained but the job has no upstream checkpoint.
     """
-    from jute_disease.training.engines.dl.fit import fit_cnn
-    from jute_disease.training.engines.ml.fit import fit_classical, prepare_features
+    from jute_disease.training.engines.dl import fit_cnn, tune_cnn
+    from jute_disease.training.engines.ml import fit_classical, prepare_features
 
     fit = find_fit(workspace, job.fit_id)
     recipe = workspace.benchmark.recipe
@@ -271,8 +317,15 @@ def run_job(workspace: Workspace, job: Job) -> None:
             is not Resume.SKIP
         ):
             raise ValueError("Prepared feature cache has no valid compatible receipt")
+        selected_parameters = tuning_selection(workspace, store, fit)
         result = fit_classical(
-            fit, recipe, data, job.attempt_dir, workspace.cache_dir, require_cache=True
+            fit,
+            recipe,
+            data,
+            job.attempt_dir,
+            workspace.cache_dir,
+            require_cache=data.policy_dir is None and fit.phase != "tune",
+            selected_parameters=selected_parameters,
         )
     else:
         bounded: dict[str, Any] = {}
@@ -285,18 +338,34 @@ def run_job(workspace: Workspace, job: Job) -> None:
                 "limit_train_batches": job.bounds[0],
                 "limit_val_batches": job.bounds[1],
             }
-        result = fit_cnn(
-            fit,
-            recipe,
-            data,
-            job.attempt_dir,
-            upstream_checkpoint=job.upstream_checkpoint,
-            pretrained=workspace.pretrained,
-            accelerator=workspace.accelerator,
-            checkpoint_dir=job.checkpoint_dir,
-            resume_from=job.resume_from,
-            **bounded,
-        )
+        if fit.phase == "tune":
+            result = tune_cnn(
+                fit,
+                recipe,
+                data,
+                job.attempt_dir,
+                upstream_checkpoint=job.upstream_checkpoint,
+                pretrained=workspace.pretrained,
+                accelerator=workspace.accelerator,
+                **bounded,
+            )
+        else:
+            store = RunStore(workspace.runs_dir)
+            selection = tuning_selection(workspace, store, fit)
+            if selection is not None:
+                recipe = replace(recipe, learning_rate=selection)
+            result = fit_cnn(
+                fit,
+                recipe,
+                data,
+                job.attempt_dir,
+                upstream_checkpoint=job.upstream_checkpoint,
+                pretrained=workspace.pretrained,
+                accelerator=workspace.accelerator,
+                checkpoint_dir=job.checkpoint_dir,
+                resume_from=job.resume_from,
+                **bounded,
+            )
     write_json_atomic(
         job.result_path,
         {
@@ -306,16 +375,63 @@ def run_job(workspace: Workspace, job: Job) -> None:
     )
 
 
+def tuning_selection(workspace: Workspace, store: RunStore, fit: FitSpec) -> Any:
+    """The frozen selection for ``fit``: parameters, a learning rate, or ``None``.
+
+    Raises:
+        ValueError: the benchmark has receipted policies and the tuning receipt is
+            missing, or a receipt holds an invalid selection.
+    """
+    tune_id = workspace.benchmark.tuning_dependency(fit)
+    if tune_id is None:
+        return None
+    receipt = store.receipt(tune_id, missing_ok=True)
+    if receipt is None:
+        if workspace.data.policy_dir is not None:
+            raise ValueError(f"{fit.fit_id} has no frozen tuning receipt: {tune_id}")
+        return None
+    results = receipt.get("results", {})
+    if fit.kind is FitKind.CLASSICAL:
+        selected = results.get("selected_parameters")
+        if not isinstance(selected, dict):
+            raise ValueError(f"Classical tuning receipt is invalid: {tune_id}")
+        return selected
+    rate = results.get("selected_learning_rate")
+    if (
+        isinstance(rate, bool)
+        or not isinstance(rate, int | float)
+        or not 0 < rate < float("inf")
+    ):
+        raise ValueError(f"CNN tuning receipt is invalid: {tune_id}")
+    return float(rate)
+
+
+def _tuning_marker(workspace: Workspace, store: RunStore, fit: FitSpec) -> Any:
+    """The selection as identity input; ``unavailable`` while it is not frozen."""
+    try:
+        return tuning_selection(workspace, store, fit)
+    except ValueError:
+        return "unavailable"
+
+
 def _manifest_digests(
     workspace: Workspace, fit: FitSpec, verifier: Any
 ) -> dict[str, str]:
     from jute_disease.data import load_manifest, load_source_manifest
 
-    target = load_manifest(workspace.data.target_dir)
+    target = (
+        target_manifest_for_fit(fit, workspace.benchmark.recipe, workspace.data)
+        if fit.kind in (FitKind.TARGET, FitKind.CLASSICAL)
+        else load_manifest(workspace.data.target_dir)
+    )
     digests = {
         "target": target.digest(),
         "target_content": verifier.verify(
-            target, workspace.data.image_root, ("train", "val")
+            target,
+            workspace.data.target_root(fit.pool)
+            if fit.pool
+            else workspace.data.image_root,
+            ("train", "val"),
         ),
     }
     if fit.kind is FitKind.SOURCE:
@@ -388,10 +504,12 @@ def _git_provenance() -> dict[str, Any]:
 
 def load_assignment_table(workspace: Workspace) -> dict[str, Any]:
     """Read and validate the frozen seed/split to source-checkpoint table."""
-    for directory in (
+    directories = (
+        *((workspace.data.policy_dir.resolve(),) if workspace.data.policy_dir else ()),
         workspace.data.target_dir.resolve(),
         *workspace.data.target_dir.resolve().parents,
-    ):
+    )
+    for directory in directories:
         path = directory / "assignments.json"
         if not path.is_file():
             continue
@@ -564,7 +682,10 @@ def make_identity(workspace: Workspace, store: RunStore) -> IdentityFor:
             workspace.benchmark.recipe,
             manifests,
             sha,
-            context["run_options"],
+            {
+                **context["run_options"],
+                "tuning": _tuning_marker(workspace, store, fit),
+            },
             config_sha256=context["configuration"]["sha256"],
             code_commit=context["provenance"]["commit"],
             environment_lock_sha256=context["environment_lock"]["sha256"],

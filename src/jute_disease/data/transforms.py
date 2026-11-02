@@ -13,6 +13,7 @@ is a dependency of every cache.
 import hashlib
 import json
 from dataclasses import asdict, dataclass
+from typing import Any
 
 import numpy as np
 import torch
@@ -59,6 +60,19 @@ class PreprocessingSpec:
         return hashlib.sha256(payload.encode()).hexdigest()
 
 
+@dataclass(frozen=True)
+class ImageWithMask:
+    """A letterboxed image and the pixels supplied by its original image."""
+
+    pixels: np.ndarray
+    valid_mask: np.ndarray
+
+    def __array__(self, dtype: Any = None, copy: bool | None = None) -> np.ndarray:
+        """Keep NumPy consumers compatible while preserving the validity mask."""
+        array = np.asarray(self.pixels, dtype=dtype)
+        return array.copy() if copy else array
+
+
 def letterbox_dimensions(
     width: int, height: int, size: int = IMAGE_SIZE
 ) -> tuple[int, int]:
@@ -78,16 +92,21 @@ def letterbox_pad_fraction(width: int, height: int, size: int = IMAGE_SIZE) -> f
 class ImagePipeline:
     """Per-dataset torchvision pipeline with independent worker random state."""
 
-    def __init__(self, size: int, is_train: bool, is_dl: bool, seed: int) -> None:
+    def __init__(
+        self, size: int, is_train: bool, is_dl: bool, seed: int, include_mask: bool
+    ) -> None:
         self.size = size
         self.is_train = is_train
         self.is_dl = is_dl
+        self.include_mask = include_mask
         self.seed = seed
         self.deterministic = not is_train
         self.description = f"letterbox={size};train={is_train};dl={is_dl}"
         self._states: dict[int, torch.Tensor] = {}
 
-    def __call__(self, img: Image | np.ndarray) -> torch.Tensor | np.ndarray:
+    def __call__(
+        self, img: Image | np.ndarray
+    ) -> torch.Tensor | np.ndarray | ImageWithMask:
         image = PILImage.fromarray(np.asarray(img)).convert("RGB")
         width, height = image.size
         width, height = letterbox_dimensions(width, height, self.size)
@@ -105,6 +124,9 @@ class ImagePipeline:
             ],
             fill=tuple(round(value * 255) for value in IMAGENET_MEAN),
         )
+        left, top = horizontal // 2, vertical // 2
+        valid_mask = np.zeros((self.size, self.size), dtype=bool)
+        valid_mask[top : top + height, left : left + width] = True
         if self.is_train:
             worker = torch.utils.data.get_worker_info()
             worker_seed = worker.seed if worker else self.seed
@@ -116,7 +138,8 @@ class ImagePipeline:
                 image = self.augmentation(image)
                 self._states[worker_seed] = torch.get_rng_state()
         if not self.is_dl:
-            return np.asarray(image)
+            pixels = np.asarray(image)
+            return ImageWithMask(pixels, valid_mask) if self.include_mask else pixels
         return F.normalize(F.to_tensor(image), IMAGENET_MEAN, IMAGENET_STD)
 
     @property
@@ -136,13 +159,16 @@ def create_pipeline(
     is_train: bool = False,
     is_dl: bool = True,
     seed: int = DEFAULT_SEED,
+    include_mask: bool = False,
 ) -> ImagePipeline:
     """Build the fixed ADR 0002 preprocessing and optional training augmentation."""
     if size < 1:
         raise ValueError("Image size must be positive")
-    return ImagePipeline(size, is_train, is_dl, seed)
+    return ImagePipeline(size, is_train, is_dl, seed, include_mask)
 
 
-def classical_pipeline(size: int = IMAGE_SIZE) -> ImagePipeline:
+def classical_pipeline(
+    size: int = IMAGE_SIZE, *, include_mask: bool = False
+) -> ImagePipeline:
     """Return deterministic letterboxed RGB arrays for classical features."""
-    return create_pipeline(size, is_dl=False)
+    return create_pipeline(size, is_dl=False, include_mask=include_mask)

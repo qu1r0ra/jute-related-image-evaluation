@@ -384,6 +384,16 @@ def _workspace_from(args: argparse.Namespace) -> Workspace:
             sources={
                 name: (freeze / f"source_{name}", root) for name, root in roots.items()
             },
+            policy_dir=args.policy_dir,
+            pool_roots={
+                pool: root
+                for pool, root in (
+                    ("A", args.pool_a_root),
+                    ("B", args.pool_b_root),
+                    ("C", args.pool_c_root),
+                )
+                if root is not None
+            },
         ),
         runs_dir=args.runs_dir,
         cache_dir=args.cache_dir,
@@ -443,6 +453,17 @@ def _queue_status(args: argparse.Namespace) -> None:
 
 def _queue_run(args: argparse.Namespace) -> None:
     workspace = _workspace_from(args)
+    matrix = workspace.benchmark
+    if workspace.data.policy_dir is None and (
+        len(matrix.pools)
+        * len(matrix.policies)
+        * len(matrix.views)
+        * len(matrix.splits)
+        > 1
+    ):
+        raise SystemExit(
+            "The full benchmark needs a receipted policy directory; pass --policy-dir"
+        )
     workspace_file = workspace.runs_dir / WORKSPACE_FILE
     workspace.save(workspace_file)
     store = RunStore(workspace.runs_dir)
@@ -488,6 +509,15 @@ def _add_workspace_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--benchmark", type=Path, default=BENCHMARK_CONFIG)
     parser.add_argument("--freeze-dir", type=Path, default=FREEZE_DIR)
     parser.add_argument("--image-root", type=Path, default=SOURCE_INVENTORY_DIR)
+    parser.add_argument(
+        "--policy-dir",
+        type=Path,
+        default=None,
+        help="Receipted pool/view/policy manifests and assignment table.",
+    )
+    parser.add_argument("--pool-a-root", type=Path, default=None)
+    parser.add_argument("--pool-b-root", type=Path, default=None)
+    parser.add_argument("--pool-c-root", type=Path, default=None)
     parser.add_argument("--plantvillage-root", type=Path, default=PLANTVILLAGE_DIR)
     parser.add_argument("--plantdoc-root", type=Path, default=PLANTDOC_DIR)
     parser.add_argument("--runs-dir", type=Path, default=RUNS_DIR)

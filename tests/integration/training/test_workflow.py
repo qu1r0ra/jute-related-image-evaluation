@@ -41,6 +41,7 @@ def _benchmark_json(path: Path, epochs: int = 1) -> Path:
     raw["recipe"].update(
         image_size=64,
         seeds=[42],
+        source_seeds=[42],
         max_epochs=epochs,
         precision="bf16-mixed",
         effective_batch=16,
@@ -54,6 +55,14 @@ def _benchmark_json(path: Path, epochs: int = 1) -> Path:
         },
     }
     raw["classical"] = {"estimators": ["lr"], "features": ["raw"], "seed": 42}
+    raw["matrix"] = {
+        "pools": ["A"],
+        "policies": ["image-random"],
+        "views": [1],
+        "splits": [0],
+        "primary_split": 0,
+    }
+    raw["assignments"] = [{"split": 0, "seed": 0, "checkpoint": 0}]
     path.write_text(json.dumps(raw), encoding="utf-8")
     return path
 
@@ -437,12 +446,15 @@ def test_benchmark_declares_the_fits_the_workspace_runs(workspace: Workspace) ->
         FitKind.SOURCE,
         FitKind.TARGET,
     }
-    # Without CUDA the workspace runs with num_workers=0 in memory; the file keeps the declared value.
+    # Without CUDA the workspace runs with num_workers=0 in memory, and the frozen
+    # assignment table replaces the one declared in the configuration.
     on_disk = load_benchmark(workspace.benchmark_path)
-    workers = workspace.benchmark.recipe.num_workers
-    assert (
-        replace(on_disk, recipe=replace(on_disk.recipe, num_workers=workers))
-        == workspace.benchmark
+    assert workspace.benchmark == replace(
+        on_disk,
+        recipe=replace(
+            on_disk.recipe, num_workers=workspace.benchmark.recipe.num_workers
+        ),
+        assignments=workspace.benchmark.assignments,
     )
 
 
@@ -578,3 +590,23 @@ def test_finished_training_checkpoints_are_not_reused_by_a_rerun(
         (store.run_dir(fit.fit_id) / "checkpoints" / "owner.json").read_text("utf-8")
     )
     assert owner["finished"] is True
+
+
+def _freeze_rate(store: RunStore, fit_id: str, rate: float) -> None:
+    run = store.start(fit_id, f"rate-{rate}")
+    run.complete({"selected_learning_rate": rate}, {})
+
+
+def test_identity_covers_the_frozen_tuning_selection(workspace: Workspace) -> None:
+    store = RunStore(workspace.runs_dir)
+    identity = make_identity(workspace, store)
+    target = _fit(workspace, "cnn/tiny_chained/seed-42")
+    tuning_id = workspace.benchmark.tuning_dependency(target)
+    assert tuning_id == "cnn/tune/tiny_chained/pool-A"
+
+    unfrozen = identity(target)
+    _freeze_rate(store, tuning_id, 0.001)
+    first = identity(target)
+    _freeze_rate(store, tuning_id, 0.01)
+    second = identity(target)
+    assert len({unfrozen, first, second}) == 3
