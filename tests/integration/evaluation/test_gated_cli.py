@@ -114,7 +114,7 @@ def test_cli_refuses_test_read_without_both_records_then_evaluates_fixture(
     output = tmp_path / "evaluation"
     args = [
         "evaluate",
-        "gated",
+        "score-test",
         "--selection",
         str(selection),
         "--run-record",
@@ -137,7 +137,7 @@ def test_cli_refuses_test_read_without_both_records_then_evaluates_fixture(
     main(
         [
             "evaluate",
-            "matrix-freeze",
+            "freeze-matrix",
             "--validation-outcomes",
             str(outcomes),
             "--benchmark",
@@ -154,7 +154,7 @@ def test_cli_refuses_test_read_without_both_records_then_evaluates_fixture(
     main(
         [
             "evaluate",
-            "fixture-run-record",
+            "write-fixture-run-record",
             "--selection",
             str(selection),
             "--output",
@@ -192,7 +192,7 @@ def test_cli_refuses_test_read_without_both_records_then_evaluates_fixture(
     main(
         [
             "evaluate",
-            "matrix-freeze",
+            "freeze-matrix",
             "--validation-outcomes",
             str(outcomes),
             "--benchmark",
@@ -219,7 +219,7 @@ def test_matrix_freeze_translates_file_errors_to_cli_exit(
         main(
             [
                 "evaluate",
-                "matrix-freeze",
+                "freeze-matrix",
                 "--validation-outcomes",
                 str(outcomes),
                 "--benchmark",
@@ -230,6 +230,41 @@ def test_matrix_freeze_translates_file_errors_to_cli_exit(
                 str(tmp_path / "selection.json"),
             ]
         )
+
+
+def test_fixture_run_record_translates_malformed_hashed_selection_to_cli_exit(
+    tmp_path: Path,
+) -> None:
+    selection_path = tmp_path / "selection.json"
+    run_record_path = tmp_path / "run.json"
+    record = {"issue": 139}
+    canonical = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+    selection_path.write_text(
+        json.dumps(
+            {
+                "format": "jute-evaluation-selection-v1",
+                "record": record,
+                "sha256": hashlib.sha256(canonical.encode()).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        SystemExit,
+        match="fixture run record blocked: selection record has an invalid matrix schema",
+    ):
+        main(
+            [
+                "evaluate",
+                "write-fixture-run-record",
+                "--selection",
+                str(selection_path),
+                "--output",
+                str(run_record_path),
+            ]
+        )
+    assert not run_record_path.exists()
 
 
 def test_gated_api_runs_hash_bound_artifacts_on_masked_views(
@@ -362,7 +397,7 @@ def test_default_matrix_freeze_records_all_probe_routes(
     main(
         [
             "evaluate",
-            "matrix-freeze",
+            "freeze-matrix",
             "--validation-outcomes",
             str(outcomes_path),
             "--benchmark",
@@ -406,7 +441,7 @@ def test_matrix_freeze_requires_recorded_issue_114_outcomes(
         main(
             [
                 "evaluate",
-                "matrix-freeze",
+                "freeze-matrix",
                 "--validation-outcomes",
                 str(tmp_path / "missing.json"),
                 "--benchmark",
@@ -432,7 +467,7 @@ def test_failed_mask_audit_blocks_mask_dependent_report_scores(
     main(
         [
             "evaluate",
-            "matrix-freeze",
+            "freeze-matrix",
             "--validation-outcomes",
             str(outcomes),
             "--benchmark",
@@ -446,7 +481,7 @@ def test_failed_mask_audit_blocks_mask_dependent_report_scores(
     main(
         [
             "evaluate",
-            "fixture-run-record",
+            "write-fixture-run-record",
             "--selection",
             str(selection),
             "--output",
@@ -456,7 +491,7 @@ def test_failed_mask_audit_blocks_mask_dependent_report_scores(
     main(
         [
             "evaluate",
-            "gated",
+            "score-test",
             "--selection",
             str(selection),
             "--run-record",

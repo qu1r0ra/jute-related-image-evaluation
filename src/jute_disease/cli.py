@@ -787,7 +787,7 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_actions.add_parser("predict", help="Classify one image (forwarded).")
 
     matrix_freeze = evaluate_actions.add_parser(
-        "matrix-freeze",
+        "freeze-matrix",
         help="Freeze the confirmatory test selection after #114 outcomes.",
     )
     matrix_freeze.add_argument("--validation-outcomes", type=Path, required=True)
@@ -797,7 +797,7 @@ def build_parser() -> argparse.ArgumentParser:
     matrix_freeze.set_defaults(run=_evaluate_matrix_freeze)
 
     fixture_record = evaluate_actions.add_parser(
-        "fixture-run-record",
+        "write-fixture-run-record",
         help="Write a completed synthetic evaluator fixture record.",
     )
     fixture_record.add_argument("--selection", type=Path, required=True)
@@ -805,7 +805,7 @@ def build_parser() -> argparse.ArgumentParser:
     fixture_record.set_defaults(run=_evaluate_fixture_run_record)
 
     run_record = evaluate_actions.add_parser(
-        "run-record",
+        "write-run-record",
         help="Bind every frozen evaluation to completed model artifacts.",
     )
     run_record.add_argument("--selection", type=Path, required=True)
@@ -814,7 +814,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_record.set_defaults(run=_evaluate_run_record)
 
     gated = evaluate_actions.add_parser(
-        "gated", help="Read the held-out partition through the gated evaluator."
+        "score-test", help="Read the held-out partition through the gated evaluator."
     )
     gated.add_argument("--selection", type=Path, required=True)
     gated.add_argument("--run-record", type=Path, required=True)

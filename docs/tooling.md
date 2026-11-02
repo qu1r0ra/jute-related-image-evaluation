@@ -23,12 +23,12 @@ Preprocessing identity revision 2 covers the shared 256-pixel letterbox, bilinea
 
 ### Gated test evaluation
 
-`evaluate matrix-freeze` requires the recorded #114 validation outcomes and writes an immutable selection. Commit the exact selection file before a production test read. The model index passed to `evaluate run-record` must include every frozen fit ID with its artifact path, artifact SHA-256 and the exact `fit_spec` object from `selection.json` at `record.selection.model_specs[fit_id]`. The run record binds both the model bytes and that view, configuration and preprocessing specification.
+`evaluate freeze-matrix` requires the recorded #114 validation outcomes and writes an immutable selection. Commit the exact selection file before a production test read. The model index passed to `evaluate write-run-record` must include every frozen fit ID with its artifact path, artifact SHA-256 and the exact `fit_spec` object from `selection.json` at `record.selection.model_specs[fit_id]`. The run record binds both the model bytes and that view, configuration and preprocessing specification.
 
 ```powershell
-uv run jute-disease evaluate matrix-freeze --validation-outcomes artifacts/validation-114.json --target-dir artifacts/freeze/target --output artifacts/evaluator/selection.json
-uv run jute-disease evaluate run-record --selection artifacts/evaluator/selection.json --model-index artifacts/evaluator/model-index.json --output artifacts/evaluator/run.json
-uv run jute-disease evaluate gated --selection artifacts/evaluator/selection.json --run-record artifacts/evaluator/run.json --target-dir artifacts/freeze/target --image-root <image-root> --output-dir artifacts/evaluator/results --sam-checkpoint <local-sam2-checkpoint>
+uv run jute-disease evaluate freeze-matrix --validation-outcomes artifacts/validation-114.json --target-dir artifacts/freeze/target --output artifacts/evaluator/selection.json
+uv run jute-disease evaluate write-run-record --selection artifacts/evaluator/selection.json --model-index artifacts/evaluator/model-index.json --output artifacts/evaluator/run.json
+uv run jute-disease evaluate score-test --selection artifacts/evaluator/selection.json --run-record artifacts/evaluator/run.json --target-dir artifacts/freeze/target --image-root <image-root> --output-dir artifacts/evaluator/results --sam-checkpoint <local-sam2-checkpoint>
 ```
 
 Production requires an existing local SAM 2 checkpoint; the evaluator does not fetch model weights. It follows the selection's #114 letterbox or resize-and-center-crop decision and is the only code path that reads the frozen test images. `--fixture` uses deterministic synthetic predictions for the local fixture and does not require a checkpoint.

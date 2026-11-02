@@ -57,6 +57,103 @@ def _read_envelope(
     return payload
 
 
+def _read_selection(path: Path) -> dict[str, Any]:
+    selection = _read_envelope(path, "selection record", SELECTION_FORMAT)
+    try:
+        matrix = selection["selection"]
+        planned_fit_ids = matrix["planned_fit_ids"]
+        final_fit_ids = matrix["final_fit_ids"]
+        background_fit_ids = matrix["background_only"]["fit_ids"]
+        leaf_only = matrix["leaf_only"]
+        leaf_fit_ids = leaf_only["fit_ids"]
+        border = matrix["border"]
+        border_fit_ids = border["fit_ids"]
+        model_specs = matrix["model_specs"]
+        letterbox = selection["letterbox_decision"]
+        preprocessing = selection["preprocessing"]
+        scene_thresholds = selection["validation_outcomes"]["scene_thresholds"]
+        frame_width = selection["border_frame_width_px"]["final"]
+        leaf_share_cutoff = selection["border_leaf_share_cutoff"]["final"]
+        mask_audit_outcome = selection["mask_audit_outcome"]
+        created_after_test_reads = selection["created_after_test_reads"]
+        leaf_sample_size = leaf_only["sample_size"]
+        border_seeds = border["seeds"]
+        null_permutations = border["null_permutations"]
+    except (KeyError, TypeError) as error:
+        raise GatedEvaluationError(
+            "selection record has an invalid matrix schema"
+        ) from error
+
+    def valid_ids(value: Any) -> bool:
+        return (
+            isinstance(value, list)
+            and all(isinstance(item, str) and item for item in value)
+            and len(value) == len(set(value))
+        )
+
+    def valid_seeds(value: Any) -> bool:
+        return (
+            isinstance(value, list)
+            and all(type(item) is int for item in value)
+            and len(value) == len(set(value))
+        )
+
+    if (
+        not isinstance(matrix, dict)
+        or not valid_ids(planned_fit_ids)
+        or not valid_ids(final_fit_ids)
+        or not valid_ids(background_fit_ids)
+        or not valid_ids(leaf_fit_ids)
+        or not valid_ids(border_fit_ids)
+        or set(final_fit_ids + background_fit_ids + border_fit_ids)
+        != set(planned_fit_ids)
+        or len(final_fit_ids + background_fit_ids + border_fit_ids)
+        != len(planned_fit_ids)
+        or leaf_fit_ids != final_fit_ids
+        or not isinstance(model_specs, dict)
+        or set(model_specs) != set(planned_fit_ids)
+        or any(not isinstance(spec, dict) for spec in model_specs.values())
+        or type(leaf_sample_size) is not int
+        or leaf_sample_size < 1
+        or not valid_seeds(border_seeds)
+        or type(null_permutations) is not int
+        or null_permutations < 1
+        or not isinstance(letterbox, str)
+        or letterbox not in {"letterbox", "resize-center-crop"}
+        or not isinstance(preprocessing, dict)
+        or preprocessing.get("resize") != letterbox
+        or type(preprocessing.get("size")) is not int
+        or preprocessing["size"] < 1
+        or not isinstance(scene_thresholds, dict)
+        or any(
+            not isinstance(scene_thresholds.get(name), (int, float))
+            or isinstance(scene_thresholds.get(name), bool)
+            or not 0 <= scene_thresholds[name] <= 1
+            for name in ("background_fraction_min", "color_uniformity_min")
+        )
+        or type(frame_width) is not int
+        or frame_width < 1
+        or not isinstance(leaf_share_cutoff, (int, float))
+        or isinstance(leaf_share_cutoff, bool)
+        or not 0 <= leaf_share_cutoff <= 1
+        or not isinstance(mask_audit_outcome, str)
+        or mask_audit_outcome not in {"passed", "failed"}
+        or not isinstance(created_after_test_reads, bool)
+        or any(
+            not isinstance(spec.get("kind"), str)
+            or spec.get("kind") not in {"classical", "cnn", "cue"}
+            or not isinstance(spec.get("seed"), int)
+            or isinstance(spec.get("seed"), bool)
+            or not isinstance(spec.get("training_view"), str)
+            or not isinstance(spec.get("input_view"), str)
+            or spec.get("preprocessing") != preprocessing
+            for spec in model_specs.values()
+        )
+    ):
+        raise GatedEvaluationError("selection record has an invalid matrix schema")
+    return selection
+
+
 @contextmanager
 def _durable_temporary_file(path: Path, content: str) -> Iterator[Path]:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -430,9 +527,7 @@ def write_fixture_run_record(
     selection_path: Path | str, output_path: Path | str
 ) -> tuple[Path, str]:
     """Write a completion record for the synthetic CLI gate fixture."""
-    selection = _read_envelope(
-        Path(selection_path), "selection record", SELECTION_FORMAT
-    )
+    selection = _read_selection(Path(selection_path))
     fit_ids = selection["selection"]["planned_fit_ids"]
     record = {
         "issue": 139,
@@ -452,7 +547,7 @@ def write_run_record(
 ) -> tuple[Path, str]:
     """Bind every frozen analysis ID to an already completed model artifact."""
     selection_file = Path(selection_path)
-    selection = _read_envelope(selection_file, "selection record", SELECTION_FORMAT)
+    selection = _read_selection(selection_file)
     index_file = Path(model_index_path)
     try:
         index = json.loads(index_file.read_text(encoding="utf-8"))
@@ -539,7 +634,7 @@ def _test_access_records(
     selection_path: Path, run_path: Path, *, fixture: bool
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Validate both gates before the caller loads the manifest or test pixels."""
-    selection = _read_envelope(selection_path, "selection record", SELECTION_FORMAT)
+    selection = _read_selection(selection_path)
     run_record = _read_envelope(run_path, "run record", RUN_FORMAT)
     if not fixture:
         _assert_committed_selection(selection_path)
