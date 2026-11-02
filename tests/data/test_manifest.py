@@ -14,13 +14,13 @@ from jute_disease.data import (
     Manifest,
     build_manifest,
     load_manifest,
+    rebuild_partition_assignments,
     validate_manifest,
 )
 from jute_disease.data.manifest import (
     MANIFEST_FILE,
     RECEIPT_FILE,
     build_groups,
-    rebuild_partition_assignments,
     write_manifest,
 )
 

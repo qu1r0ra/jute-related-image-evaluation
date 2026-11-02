@@ -169,7 +169,7 @@ def _complete_synthetic_audit(
         "name": "synthetic independent reviewer",
         "provider": "synthetic provider",
         "fresh_context": True,
-        "reviewed_at": "synthetic fixture",
+        "reviewed_at": "2026-11-02T12:00:00+00:00",
         "record": "synthetic fixture audit record",
     }
     completed["manuscript_sha256"] = hashlib.sha256(manuscript.read_bytes()).hexdigest()
@@ -212,7 +212,7 @@ def _complete_synthetic_audit(
     completed["owner_signoff"] = {
         "status": "signed",
         "signed_by": "synthetic fixture owner",
-        "signed_at": "synthetic fixture",
+        "signed_at": "2026-11-02T12:05:00+00:00",
     }
     return completed
 
@@ -285,7 +285,7 @@ def test_fixture_freezes_exports_rebuilds_and_checks_macros(tmp_path: Path) -> N
         "name": "synthetic reviewer",
         "provider": "synthetic provider",
         "fresh_context": True,
-        "reviewed_at": "synthetic fixture",
+        "reviewed_at": "2026-11-02T12:00:00+00:00",
         "record": "synthetic fixture",
     }
     audit["manuscript_sha256"] = "0" * 64
@@ -329,6 +329,21 @@ def test_fixture_freezes_exports_rebuilds_and_checks_macros(tmp_path: Path) -> N
     )
     assert complete_audit_check.returncode == 0, complete_audit_check.stderr
     assert json.loads(complete_audit_check.stdout)["pass"] is True
+
+    old_signoff_audit = json.loads(json.dumps(completed_audit))
+    old_signoff_audit["owner_signoff"]["signed_at"] = "2026-11-02T11:59:00+00:00"
+    (export_dir / "claim-audit.json").write_text(
+        json.dumps(old_signoff_audit), encoding="utf-8"
+    )
+    old_signoff_check = _run(
+        "manuscript",
+        "audit-check",
+        str(export_dir),
+        "--manuscript",
+        str(manuscript),
+    )
+    assert old_signoff_check.returncode != 0
+    assert "owner sign-off must occur after" in old_signoff_check.stderr
 
     empty_inventory_audit = json.loads(json.dumps(completed_audit))
     empty_inventory_audit["claim_rows"] = []

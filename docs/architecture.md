@@ -85,8 +85,9 @@ pass, fail or unsupported for every macro and flagged claim, plus any unflagged
 numeric statements. The audit record must explicitly report when the manuscript
 has no flagged claims or no unflagged numeric statements. Any fail or unsupported
 row blocks submission; changed manuscript claims require a re-audit. The owner
-records a random 10% spot check and final sign-off in that record. The synthetic
-fixture does not perform or imply either review.
+records a random 10% spot check and signs after the reviewer timestamp. Audit
+timestamps use ISO 8601 with a timezone. The synthetic fixture does not perform
+or imply either review.
 `jute-disease manuscript audit-check EXPORT_DIR --manuscript PATH` is the
 separate submission gate: it binds the review to the current manuscript SHA-256
 and blocks until each macro and claim row passes, the numeric scan and claim

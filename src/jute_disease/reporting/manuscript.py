@@ -146,6 +146,18 @@ def _parse_timestamp(value: object, fit_id: str, field: str) -> datetime:
     return timestamp
 
 
+def _parse_audit_timestamp(value: object, field: str) -> datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"claim audit requires a {field} timestamp")
+    try:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"claim audit has an invalid {field} timestamp") from error
+    if timestamp.tzinfo is None:
+        raise ValueError(f"claim audit {field} timestamp must include a timezone")
+    return timestamp
+
+
 def _compute_report(runs_dir: Path) -> dict[str, Any]:
     """Measure A100 training time from verified completion receipts."""
     from jute_disease.training import RunStore
@@ -1471,6 +1483,7 @@ def validate_claim_audit(
         raise ValueError(
             "claim audit requires a different-provider fresh-context reviewer"
         )
+    reviewed_at = _parse_audit_timestamp(reviewer["reviewed_at"], "reviewed_at")
     manuscript_sha256 = audit.get("manuscript_sha256")
     if not isinstance(manuscript_sha256, str) or not re.fullmatch(
         r"[0-9a-f]{64}", manuscript_sha256
@@ -1584,10 +1597,15 @@ def validate_claim_audit(
     if (
         not isinstance(signoff, dict)
         or signoff.get("status") != "signed"
-        or not signoff.get("signed_by")
-        or not signoff.get("signed_at")
+        or not isinstance(signoff.get("signed_by"), str)
+        or not signoff["signed_by"].strip()
+        or not isinstance(signoff.get("signed_at"), str)
+        or not signoff["signed_at"].strip()
     ):
         raise ValueError("owner sign-off is incomplete")
+    signed_at = _parse_audit_timestamp(signoff["signed_at"], "signed_at")
+    if signed_at <= reviewed_at:
+        raise ValueError("owner sign-off must occur after the independent review")
     return {
         "export_id": export_check["export_id"],
         "checked_macros": export_check["checked_macros"],
