@@ -146,6 +146,14 @@ def _read_selection(path: Path) -> dict[str, Any]:
             or isinstance(spec.get("seed"), bool)
             or not isinstance(spec.get("training_view"), str)
             or not isinstance(spec.get("input_view"), str)
+            or (
+                spec["input_view"]
+                not in (
+                    {"pad-fraction", "aspect-ratio"}
+                    if spec["kind"] == "cue"
+                    else {"raw-test", "background-only", "border-frame"}
+                )
+            )
             or spec.get("preprocessing") != preprocessing
             for spec in model_specs.values()
         )
@@ -1649,6 +1657,7 @@ def evaluate_gated_test(
         "issue": 139,
         "selection_sha256": _digest(selection),
         "run_record_sha256": _digest(run_record),
+        "border_leaf_share_cutoff": selection["border_leaf_share_cutoff"]["final"],
         "manifest_digest": manifest.digest(),
         "post_hoc": selection["created_after_test_reads"],
         "test_images": len(entries),

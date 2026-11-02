@@ -166,6 +166,7 @@ def test_cli_refuses_test_read_without_both_records_then_evaluates_fixture(
     main(args)
 
     report = json.loads((output / "evaluation.json").read_text(encoding="utf-8"))
+    assert report["border_leaf_share_cutoff"] == 0.05
     assert report["leaf_only"]["sample_size"] <= 2_000
     assert report["leaf_only"]["fit_scores"]
     assert len(report["background_only"]["fit_scores"]) == 10
@@ -267,6 +268,61 @@ def test_fixture_run_record_translates_malformed_hashed_selection_to_cli_exit(
             ]
         )
     assert not run_record_path.exists()
+
+
+def test_score_test_rejects_hash_valid_selection_with_unknown_view(
+    inputs: Inputs, tmp_path: Path
+) -> None:
+    outcomes = tmp_path / "validation-114.json"
+    selection_path = tmp_path / "selection.json"
+    _outcomes(outcomes)
+    main(
+        [
+            "evaluate",
+            "freeze-matrix",
+            "--validation-outcomes",
+            str(outcomes),
+            "--benchmark",
+            str(_mini_benchmark(tmp_path)),
+            "--target-dir",
+            str(inputs.target_dir),
+            "--output",
+            str(selection_path),
+        ]
+    )
+
+    envelope = json.loads(selection_path.read_text(encoding="utf-8"))
+    record = envelope["record"]
+    fit_id = record["selection"]["planned_fit_ids"][0]
+    record["selection"]["model_specs"][fit_id]["input_view"] = "unknown-view"
+    canonical = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+    envelope["sha256"] = hashlib.sha256(canonical.encode()).hexdigest()
+    selection_path.write_text(
+        json.dumps(envelope, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(
+        SystemExit,
+        match="evaluation blocked: selection record has an invalid matrix schema",
+    ):
+        main(
+            [
+                "evaluate",
+                "score-test",
+                "--selection",
+                str(selection_path),
+                "--run-record",
+                str(tmp_path / "missing-run-record.json"),
+                "--target-dir",
+                str(inputs.target_dir),
+                "--image-root",
+                str(inputs.image_root),
+                "--output-dir",
+                str(tmp_path / "evaluation"),
+                "--fixture",
+            ]
+        )
+    assert not (inputs.target_dir / "evaluator" / "test-read-history.jsonl").exists()
 
 
 def test_gated_api_runs_hash_bound_artifacts_on_masked_views(
