@@ -85,8 +85,14 @@ def test_probe_plan_is_primary_split_classical_and_imagenet_route(
 def _setup_runs(
     tmp_path: Path, target: Path, root: Path, capsys: pytest.CaptureFixture[str]
 ) -> tuple[Path, Path, Path]:
-    record = _freeze(tmp_path, root, capsys, [FIT.format(0), "fixture/other"])
+    record = _freeze(
+        tmp_path,
+        root,
+        capsys,
+        [FIT.format(0), "fixture/mobilenet_v2_direct/leaf-seed-0"],
+    )
     _predictions(target, tmp_path / "runs" / "0.json", 7, None)
+    _predictions(target, tmp_path / "runs" / "leaf-0.json", 8, None)
     _write(
         tmp_path / "runs" / "runs.json",
         [
@@ -95,7 +101,15 @@ def _setup_runs(
                 "system": "mobilenet_v2_direct",
                 "seed": 0,
                 "predictions": "0.json",
-            }
+            },
+            {
+                "fit_id": "fixture/mobilenet_v2_direct/leaf-seed-0",
+                "system": "mobilenet_v2_direct",
+                "seed": 0,
+                "variant": "leaf_only",
+                "predictions": "leaf-0.json",
+                "of": FIT.format(0),
+            },
         ],
     )
     run_record = tmp_path / "runs" / "run-record.json"

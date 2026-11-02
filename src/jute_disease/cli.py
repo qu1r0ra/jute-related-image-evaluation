@@ -73,6 +73,12 @@ from jute_disease.evaluation import (
     write_freeze_record,
     write_run_record,
 )
+from jute_disease.reporting import (
+    export_manuscript,
+    run_manuscript_fixture,
+    validate_claim_audit,
+    validate_export,
+)
 from jute_disease.reporting.tables import aggregate_metrics
 from jute_disease.training import (
     WORKSPACE_FILE,
@@ -510,6 +516,49 @@ def _evaluate_aggregate(args: argparse.Namespace) -> None:
     aggregate_metrics(args.fit_ids, args.output, args.runs_dir)
 
 
+def _manuscript_fixture(args: argparse.Namespace) -> None:
+    try:
+        _print_json(run_manuscript_fixture(args.output))
+    except (ValueError, OSError, KeyError) as error:
+        raise SystemExit(f"manuscript fixture blocked: {error}") from error
+
+
+def _manuscript_export(args: argparse.Namespace) -> None:
+    try:
+        result = export_manuscript(
+            args.freeze_dir,
+            args.config,
+            args.output,
+            source_metadata=json.loads(
+                args.source_metadata.read_text(encoding="utf-8")
+            ),
+            training_runs_dir=args.training_runs,
+            evaluation_metrics_path=args.evaluation_metrics,
+            evaluation_artifacts_path=args.evaluation_artifacts,
+            statistics_artifacts_path=args.statistics_artifacts,
+            figure_sources_path=args.figure_sources,
+            export_id=args.export_id,
+            command="jute-disease " + " ".join(sys.argv[1:]),
+        )
+        _print_json(result)
+    except (ValueError, OSError, KeyError) as error:
+        raise SystemExit(f"manuscript export blocked: {error}") from error
+
+
+def _manuscript_check(args: argparse.Namespace) -> None:
+    try:
+        _print_json(validate_export(args.export_dir))
+    except (ValueError, OSError, KeyError) as error:
+        raise SystemExit(f"manuscript check blocked: {error}") from error
+
+
+def _manuscript_audit_check(args: argparse.Namespace) -> None:
+    try:
+        _print_json(validate_claim_audit(args.export_dir, args.manuscript))
+    except (ValueError, OSError, KeyError) as error:
+        raise SystemExit(f"manuscript audit blocked: {error}") from error
+
+
 def _read_json_file(path: Path) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -839,6 +888,58 @@ def build_parser() -> argparse.ArgumentParser:
     aggregate.set_defaults(run=_evaluate_aggregate)
     evaluate_actions.add_parser("predict", help="Classify one image (forwarded).")
     _add_gated_evaluator(evaluate_actions)
+
+    manuscript = commands.add_parser(
+        "manuscript", help="Export and verify manuscript tables, figures and macros."
+    )
+    manuscript_actions = manuscript.add_subparsers(
+        dest="manuscript_action", metavar="ACTION", required=True
+    )
+    manuscript_fixture = manuscript_actions.add_parser(
+        "fixture", help="Run synthetic freeze through export and macro validation."
+    )
+    manuscript_fixture.add_argument("--output", type=Path, required=True)
+    manuscript_fixture.set_defaults(run=_manuscript_fixture)
+    manuscript_export = manuscript_actions.add_parser(
+        "export", help="Export a verified freeze as manuscript artifacts."
+    )
+    manuscript_export.add_argument("--freeze-dir", type=Path, required=True)
+    manuscript_export.add_argument("--config", type=Path, required=True)
+    manuscript_export.add_argument("--output", type=Path, required=True)
+    manuscript_export.add_argument("--source-metadata", type=Path, required=True)
+    manuscript_export.add_argument("--training-runs", type=Path, required=True)
+    manuscript_export.add_argument(
+        "--evaluation-metrics",
+        type=Path,
+        help="Existing validation-metrics aggregate CSV; no evaluation is run.",
+    )
+    manuscript_export.add_argument(
+        "--evaluation-artifacts",
+        type=Path,
+        help=(
+            "Receipt-bound evaluation JSON bundle; no scoring or partition "
+            "images are read."
+        ),
+    )
+    manuscript_export.add_argument(
+        "--statistics-artifacts",
+        type=Path,
+        help="Receipt-bound statistics JSON bundle tied to evaluation artifacts.",
+    )
+    manuscript_export.add_argument("--figure-sources", type=Path)
+    manuscript_export.add_argument("--export-id")
+    manuscript_export.set_defaults(run=_manuscript_export)
+    manuscript_check = manuscript_actions.add_parser(
+        "check", help="Check exported macros against the authoritative freeze."
+    )
+    manuscript_check.add_argument("export_dir", type=Path)
+    manuscript_check.set_defaults(run=_manuscript_check)
+    manuscript_audit = manuscript_actions.add_parser(
+        "audit-check", help="Require the completed claim review and owner sign-off."
+    )
+    manuscript_audit.add_argument("export_dir", type=Path)
+    manuscript_audit.add_argument("--manuscript", type=Path)
+    manuscript_audit.set_defaults(run=_manuscript_audit_check)
 
     # planned commands owned by open tickets
     _add_freeze(commands)

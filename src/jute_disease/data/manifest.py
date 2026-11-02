@@ -8,6 +8,7 @@ so a directory that exists without a matching receipt is never trusted.
 
 import hashlib
 import json
+import math
 import os
 from collections import Counter
 from dataclasses import dataclass
@@ -245,6 +246,62 @@ def _assign_label(
     return placement
 
 
+def validate_partition_fractions(fractions: dict[str, float]) -> None:
+    """Require one finite, positive fraction per partition, summing to one."""
+    if (
+        set(fractions) != set(PARTITIONS)
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or (isinstance(value, float) and not math.isfinite(value))
+            or value <= 0
+            or value > 1
+            for value in fractions.values()
+        )
+        or abs(sum(fractions.values()) - 1) > 1e-9
+    ):
+        raise ValueError(
+            f"fractions must cover {PARTITIONS}, be positive finite numbers, "
+            "and sum to 1"
+        )
+
+
+def rebuild_partition_assignments(
+    entries: list[dict[str, str]],
+    seed: int,
+    fractions: dict[str, float],
+) -> dict[str, str]:
+    """Rebuild deterministic group-preserving partitions from a rebuild kit.
+
+    ``entries`` must provide stable ``image_id``, ``family_id`` and ``label``
+    strings. The output maps each image ID to its newly derived partition.
+    """
+    validate_partition_fractions(fractions)
+    ids = [entry["image_id"] for entry in entries]
+    if len(ids) != len(set(ids)):
+        raise ValueError("rebuild kit contains duplicate image IDs")
+    groups_by_label: dict[str, dict[str, int]] = {}
+    labels_by_group: dict[str, set[str]] = {}
+    for entry in entries:
+        image_id, family_id, label = (
+            entry["image_id"],
+            entry["family_id"],
+            entry["label"],
+        )
+        if not image_id or not family_id or not label:
+            raise ValueError("rebuild kit image_id, family_id and label are required")
+        labels_by_group.setdefault(family_id, set()).add(label)
+        counts = groups_by_label.setdefault(label, {})
+        counts[family_id] = counts.get(family_id, 0) + 1
+    mixed = [group for group, labels in labels_by_group.items() if len(labels) != 1]
+    if mixed:
+        raise ValueError(f"rebuild kit family mixes labels: {mixed[0]}")
+    placement: dict[str, str] = {}
+    for label in sorted(groups_by_label):
+        placement.update(_assign_label(groups_by_label[label], seed, fractions))
+    return {entry["image_id"]: placement[entry["family_id"]] for entry in entries}
+
+
 def validate_manifest(manifest: Manifest, min_support: int) -> None:
     """Check every invariant of a manifest.
 
@@ -339,8 +396,7 @@ def build_manifest(
             "grouping_version": grouping_version,
         }
     fractions = dict(SPLITS if fractions is None else fractions)
-    if set(fractions) != set(PARTITIONS) or abs(sum(fractions.values()) - 1) > 1e-9:
-        raise ValueError(f"fractions must cover {PARTITIONS} and sum to 1: {fractions}")
+    validate_partition_fractions(fractions)
     try:
         curation = curate(records, rules)
     except ValueError as error:

@@ -14,6 +14,7 @@ from jute_disease.data import (
     Manifest,
     build_manifest,
     load_manifest,
+    rebuild_partition_assignments,
     validate_manifest,
 )
 from jute_disease.data.manifest import (
@@ -230,6 +231,29 @@ def test_bad_fractions_and_unknown_partitions_raise(
         build_manifest(
             inventory, rules, fractions={"train": 0.5, "val": 0.2, "test": 0.2}
         )
+    with pytest.raises(ValueError, match="positive finite numbers"):
+        build_manifest(
+            inventory,
+            rules,
+            fractions={"train": 1.2, "val": -0.1, "test": -0.1},
+        )
     with pytest.raises(ValueError, match="Unknown partition"):
         frozen.partition("holdout")
     assert len(frozen.partition("train")) == sum(frozen.support()["train"].values())
+
+
+@pytest.mark.parametrize(
+    "fractions",
+    [
+        {"train": 1.2, "val": -0.1, "test": -0.1},
+        {"train": float("nan"), "val": 0.15, "test": 0.15},
+        {"train": True, "val": 0.15, "test": 0.15},
+        {"train": 0.0, "val": 0.5, "test": 0.5},
+    ],
+)
+def test_rebuilding_assignments_rejects_nonpositive_or_nonfinite_fractions(
+    fractions: dict[str, float],
+) -> None:
+    entries = [{"image_id": "image", "family_id": "family", "label": "label"}]
+    with pytest.raises(ValueError, match="positive finite numbers"):
+        rebuild_partition_assignments(entries, seed=42, fractions=fractions)

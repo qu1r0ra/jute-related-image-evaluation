@@ -137,7 +137,16 @@ def test_test_read_refused_without_records_and_permitted_after(
         "evaluate",
         "freeze-record",
         "--spec",
-        _spec(tmp_path, [FIT.format(0), FIT.format(1)], probes),
+        _spec(
+            tmp_path,
+            [
+                FIT.format(0),
+                FIT.format(1),
+                "fixture/mobilenet_v2_direct/leaf-seed-0",
+                "fixture/mobilenet_v2_direct/leaf-seed-1",
+            ],
+            probes,
+        ),
         "--outcomes",
         _outcomes(tmp_path),
         "--output",
@@ -145,19 +154,31 @@ def test_test_read_refused_without_records_and_permitted_after(
         "--root",
         root,
     )
+    runs = []
     for seed in (0, 1):
         _predictions(target, tmp_path / "runs" / f"{seed}.json", seed + 8, None)
+        _predictions(target, tmp_path / "runs" / f"{seed}-leaf.json", seed + 9, None)
+        runs.extend(
+            [
+                {
+                    "fit_id": FIT.format(seed),
+                    "system": "mobilenet_v2_direct",
+                    "seed": seed,
+                    "predictions": f"{seed}.json",
+                },
+                {
+                    "fit_id": f"fixture/mobilenet_v2_direct/leaf-seed-{seed}",
+                    "system": "mobilenet_v2_direct",
+                    "seed": seed,
+                    "variant": "leaf_only",
+                    "predictions": f"{seed}-leaf.json",
+                    "of": FIT.format(seed),
+                },
+            ]
+        )
     _write(
         tmp_path / "runs" / "runs.json",
-        [
-            {
-                "fit_id": FIT.format(seed),
-                "system": "mobilenet_v2_direct",
-                "seed": seed,
-                "predictions": f"{seed}.json",
-            }
-            for seed in (0, 1)
-        ],
+        runs,
     )
     with pytest.raises(SystemExit, match="no run record"):
         _cli(*arguments, "--freeze-record", tmp_path / "freeze-record.json")
