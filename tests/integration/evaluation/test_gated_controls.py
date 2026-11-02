@@ -270,3 +270,28 @@ def test_all_analyses_run_through_the_evaluator(
     assert border["headline"] is None and "fewer than 50" in border["headline_withheld"]
     assert border["pad_cue"] is not None
     assert report["leaf_sample"]["image_ids"] == sample
+
+
+def test_two_runs_for_one_system_and_seed_are_refused(
+    tmp_path: Path, target: Path, root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    record = _freeze(tmp_path, root, capsys, [FIT.format(0), "fixture/dup"])
+    _predictions(target, tmp_path / "runs" / "0.json", 7, None)
+    entry = {"system": "mobilenet_v2_direct", "seed": 0, "predictions": "0.json"}
+    _write(
+        tmp_path / "runs" / "runs.json",
+        [{**entry, "fit_id": FIT.format(0)}, {**entry, "fit_id": "fixture/dup"}],
+    )
+    run_record = tmp_path / "runs" / "run-record.json"
+    _cli(
+        "evaluate",
+        "run-record",
+        "--freeze-record",
+        record,
+        "--runs",
+        tmp_path / "runs" / "runs.json",
+        "--output",
+        run_record,
+    )
+    with pytest.raises(SystemExit, match="more than one run"):
+        _cli(*_test_args(tmp_path, target, root, record, run_record))

@@ -107,7 +107,13 @@ def evaluate_test(
     runs: dict[tuple[str, str], dict[int, tuple[str, ...]]] = defaultdict(dict)
     for run in authorization.runs:
         expected = sample_ids if run.variant == "leaf_only" else ids
-        runs[(run.system, run.variant)][run.seed] = _load(run, base, expected)
+        group = runs[(run.system, run.variant)]
+        if run.seed in group:
+            raise FreezeRecordError(
+                f"more than one run for {run.system} {run.variant} seed {run.seed}; "
+                "restrict the call to one pool, view, policy and split with --fit-id"
+            )
+        group[run.seed] = _load(run, base, expected)
 
     def build(system: str, variant: str) -> PredictionSet:
         chosen = sample_ids if variant == "leaf_only" else ids
@@ -147,6 +153,10 @@ def evaluate_test(
             f"leaf-only evaluation misses final checkpoints: {uncovered}"
         )
     report["leaf_sample"] = {"size": len(sample_ids), "image_ids": list(sample_ids)}
+    report["leaf_only_coverage"] = {
+        "complete": bool(leaf_required) and not uncovered,
+        "missing": uncovered,
+    }
     for system in sorted(s for s, v in runs if v == "leaf_only"):
         leaf = build(system, "leaf_only")
         entry = report["systems"].setdefault(system, {})

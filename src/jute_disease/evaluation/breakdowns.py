@@ -74,7 +74,11 @@ def scene_summaries(
         rows = tags == scene
         counts = np.bincount(truth[rows], minlength=k)
         present = {system.classes[i]: int(c) for i, c in enumerate(counts) if c}
-        short = sorted(label for label, c in present.items() if c < SCENE_MIN_PER_CLASS)
+        short = sorted(
+            label
+            for label, c in zip(system.classes, counts, strict=True)
+            if c < SCENE_MIN_PER_CLASS
+        )
         if short:
             out.append(
                 SceneSummary(

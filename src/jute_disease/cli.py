@@ -544,7 +544,7 @@ def _evaluate_run_record(args: argparse.Namespace) -> None:
         record = write_run_record(
             args.freeze_record,
             _read_json_file(args.runs),
-            args.runs.parent,
+            args.output.parent,
             args.output,
         )
     except (FreezeRecordError, TestReadRefusedError, OSError) as error:

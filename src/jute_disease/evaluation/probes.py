@@ -107,7 +107,8 @@ def frame_mask(valid_mask: np.ndarray, width: int) -> np.ndarray:
     top, bottom, left, right = _content_box(np.asarray(valid_mask, dtype=bool))
     frame = np.zeros(valid_mask.shape, dtype=bool)
     frame[top:bottom, left:right] = True
-    frame[top + width : bottom - width, left + width : right - width] = False
+    if bottom - top > 2 * width and right - left > 2 * width:
+        frame[top + width : bottom - width, left + width : right - width] = False
     return frame
 
 
