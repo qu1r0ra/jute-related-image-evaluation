@@ -25,9 +25,19 @@ Preprocessing identity revision 2 covers the shared 256-pixel letterbox, bilinea
 
 The scripts in `scripts/` are Linux-only command-line helpers for lab runs:
 
-- `notify_run.py` sends start, hourly heartbeat and completion messages to an `ntfy` topic. `NTFY_TOPIC` and `NTFY_TOKEN` come from the environment. The token is sent only in the HTTPS Authorization header, never in process arguments; transport errors do not print credentials.
+- `notify_run.py` sends start, hourly heartbeat, success and failure messages to an `ntfy` topic. `NTFY_TOPIC` and `NTFY_TOKEN` come from the environment. The token is sent only in the HTTPS Authorization header, never in process arguments; transport errors do not print credentials. A cull or other abrupt kill can prevent a final failure message; a missed heartbeat signals interruption.
 - `lab_run.sh` holds a `flock` lock for the full process lifetime, applies a timeout to the process group, and can detach a run while recording its PID and log path. Example: `scripts/lab_run.sh /path/to/run.lock 7200 uv run jute-disease queue run`.
+- `queue_unattended.sh` (through `just queue-unattended`) checks notification connectivity, launches a detached locked queue, and records a transfer manifest after each invocation. Re-run it after a JupyterLab cull or host restart; the queue reuses only fits whose receipts still match.
+- `queue_batch.py` runs one queue command and records the full `artifacts/runs/` tree after it exits, including a failed invocation, so completed receipts and partial-run evidence can be copied together.
 - `verify_transfer.py record ROOT MANIFEST` writes a SHA-256 inventory outside the batch. Run `verify_transfer.py verify ROOT MANIFEST` after copy-back; missing, changed, unexpected, unsafe, hard-linked, non-regular and colliding paths reject the batch.
+
+On the lab, run `just queue-unattended` from the checkout. The ntfy topic and token must already be supplied through the host's environment secret mechanism. After the detached invocation ends, copy `artifacts/runs/` and the newly written manifest from `artifacts/transfer-manifests/` to the PC. Verify the PC copy, for example:
+
+```powershell
+uv run --locked python scripts/verify_transfer.py verify artifacts/runs artifacts/transfer-manifests/queue-<batch-id>.json
+```
+
+Repeat the copy and verification after every queue invocation. Keep the lab copy until verification succeeds; the manifest snapshots the full run store so earlier receipts needed for resume remain included.
 
 These helpers do not run real lab sessions or experiments as part of tooling CI. Lab validation and A100 readiness are tracked separately in [issue 114](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/114).
 

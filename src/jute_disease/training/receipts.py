@@ -18,6 +18,8 @@ from typing import Any
 
 STATE_FILE = "state.json"
 RECEIPT_FILE = "receipt.json"
+ATTEMPT_FILE = "attempt.json"
+RECEIPT_FORMAT_VERSION = 2
 SUPERSEDED_DIR = "superseded"
 
 
@@ -95,8 +97,14 @@ class ActiveRun:
     def attempt_dir(self) -> Path:
         return self.run_dir / f"attempt-{self.attempt}"
 
-    def complete(self, results: dict[str, Any], artifacts: dict[str, Path]) -> None:
-        """Hash the artifacts, write the receipt, then mark the run completed."""
+    def complete(
+        self,
+        results: dict[str, Any],
+        artifacts: dict[str, Path],
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Hash artifacts, record this attempt, then write its completion receipt."""
         recorded: dict[str, dict[str, Any]] = {}
         for name, path in artifacts.items():
             path = Path(path).resolve()
@@ -110,21 +118,32 @@ class ActiveRun:
                 "sha256": _sha256(path),
                 "bytes": path.stat().st_size,
             }
+        self.store.finish_attempt(self, RunState.COMPLETED, metadata=metadata)
         write_json_atomic(
             self.run_dir / RECEIPT_FILE,
             {
+                "format_version": RECEIPT_FORMAT_VERSION,
                 "fit_id": self.fit_id,
                 "identity": self.identity,
                 "attempt": self.attempt,
                 "completed_at": _now(),
                 "results": results,
                 "artifacts": recorded,
+                "metadata": metadata or {},
+                "attempts": self.store.attempts(self.fit_id, identity=self.identity),
             },
         )
         self.store.write_state(self, RunState.COMPLETED)
 
-    def fail(self, state: RunState, reason: str) -> None:
+    def fail(
+        self,
+        state: RunState,
+        reason: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         """Record a non-complete end: failed, timed-out or interrupted."""
+        self.store.finish_attempt(self, state, reason, metadata=metadata)
         self.store.write_state(self, state, reason)
 
 
@@ -157,15 +176,57 @@ class RunStore:
     def _valid_receipt(self, fit_id: str) -> dict[str, Any] | None:
         directory = self.run_dir(fit_id)
         receipt = read_json(directory / RECEIPT_FILE)
-        if receipt is None or "identity" not in receipt:
+        if (
+            receipt is None
+            or receipt.get("format_version") != RECEIPT_FORMAT_VERSION
+            or not isinstance(receipt.get("identity"), str)
+            or receipt.get("fit_id") != fit_id
+        ):
             return None
         artifacts = receipt.get("artifacts")
         if not isinstance(artifacts, dict):
             return None
         for entry in artifacts.values():
-            path = directory / str(entry.get("path", ""))
+            if (
+                not isinstance(entry, dict)
+                or not isinstance(entry.get("path"), str)
+                or not isinstance(entry.get("sha256"), str)
+            ):
+                return None
+            path = directory / entry["path"]
             if not path.is_file() or _sha256(path) != entry.get("sha256"):
                 return None
+        attempts = receipt.get("attempts")
+        terminal_states = {
+            RunState.COMPLETED.value,
+            RunState.FAILED.value,
+            RunState.TIMED_OUT.value,
+            RunState.INTERRUPTED.value,
+            RunState.OMITTED.value,
+        }
+        if (
+            not isinstance(attempts, list)
+            or not attempts
+            or not all(isinstance(attempt, dict) for attempt in attempts)
+        ):
+            return None
+        attempt_numbers = [attempt.get("attempt") for attempt in attempts]
+        if any(type(number) is not int for number in attempt_numbers):
+            return None
+        if (
+            type(receipt.get("attempt")) is not int
+            or attempts[-1].get("state") != RunState.COMPLETED.value
+            or receipt.get("attempt") != attempt_numbers[-1]
+            or attempt_numbers
+            != list(range(attempt_numbers[0], attempt_numbers[0] + len(attempts)))
+            or any(
+                attempt.get("identity") != receipt["identity"]
+                or attempt.get("state") not in terminal_states
+                or not isinstance(attempt.get("metadata"), dict)
+                for attempt in attempts
+            )
+        ):
+            return None
         return receipt
 
     def receipt(self, fit_id: str, missing_ok: bool = False) -> dict[str, Any] | None:
@@ -202,7 +263,11 @@ class RunStore:
     def resolve(self, fit_id: str, identity: str) -> Resume:
         """Skip only a complete run whose identity matches exactly."""
         receipt = self._valid_receipt(fit_id)
-        if receipt is not None and receipt["identity"] == identity:
+        if (
+            receipt is not None
+            and receipt["identity"] == identity
+            and self.state(fit_id) is RunState.COMPLETED
+        ):
             return Resume.SKIP
         return Resume.RUN_FRESH
 
@@ -217,8 +282,12 @@ class RunStore:
             run = ActiveRun(
                 self, fit_id, str(payload.get("identity")), int(payload["attempt"])
             )
-            self.write_state(
-                run, RunState.INTERRUPTED, "process ended without a result"
+            runtime = read_json(run.attempt_dir / "runtime.json")
+            metadata = {"runtime": runtime} if isinstance(runtime, dict) else None
+            run.fail(
+                RunState.INTERRUPTED,
+                "process ended without a result",
+                metadata=metadata,
             )
         return self.state(fit_id)
 
@@ -232,6 +301,46 @@ class RunStore:
             if child.name.removeprefix("attempt-").isdigit()
         )
 
+    def attempts(
+        self, fit_id: str, *, identity: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Return durable attempts in order, optionally for one run identity."""
+        directory = self.run_dir(fit_id)
+        records: list[dict[str, Any]] = []
+        for number in self._attempts(fit_id):
+            record = read_json(directory / f"attempt-{number}" / ATTEMPT_FILE)
+            if record is not None and (
+                identity is None or record.get("identity") == identity
+            ):
+                records.append(record)
+        return records
+
+    def finish_attempt(
+        self,
+        run: ActiveRun,
+        state: RunState,
+        reason: str | None = None,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist one attempt's terminal outcome without replacing its log."""
+        record = read_json(run.attempt_dir / ATTEMPT_FILE) or {}
+        current_metadata = record.get("metadata", {})
+        if not isinstance(current_metadata, dict):
+            current_metadata = {}
+        write_json_atomic(
+            run.attempt_dir / ATTEMPT_FILE,
+            {
+                **record,
+                "attempt": run.attempt,
+                "identity": run.identity,
+                "state": state.value,
+                "reason": reason,
+                "finished_at": _now(),
+                "metadata": {**current_metadata, **(metadata or {})},
+            },
+        )
+
     def _supersede(self, fit_id: str) -> None:
         directory = self.run_dir(fit_id)
         receipt = directory / RECEIPT_FILE
@@ -242,13 +351,29 @@ class RunStore:
         number = len(list(target.glob("*.json")))
         os.replace(receipt, target / f"receipt-{number}.json")
 
-    def start(self, fit_id: str, identity: str) -> ActiveRun:
+    def start(
+        self,
+        fit_id: str,
+        identity: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> ActiveRun:
         """Open a new attempt; any earlier receipt is retired, never reused."""
         self.settle(fit_id)
         self._supersede(fit_id)
         attempts = self._attempts(fit_id)
         run = ActiveRun(self, fit_id, identity, (attempts[-1] + 1) if attempts else 1)
         run.attempt_dir.mkdir(parents=True)
+        write_json_atomic(
+            run.attempt_dir / ATTEMPT_FILE,
+            {
+                "attempt": run.attempt,
+                "identity": identity,
+                "state": RunState.RUNNING.value,
+                "started_at": _now(),
+                "metadata": metadata or {},
+            },
+        )
         self.write_state(run, RunState.RUNNING)
         return run
 

@@ -159,6 +159,8 @@ def load_benchmark(path: Path | str) -> Benchmark:
     recipe_raw = _checked("recipe", raw["recipe"], Recipe)
     recipe_raw["seeds"] = tuple(recipe_raw["seeds"])
     recipe = Recipe(**recipe_raw)
+    if recipe.precision != "bf16-mixed":
+        raise ValueError("Benchmark precision must be bf16-mixed on CUDA")
     if recipe.compile_model:
         raise ValueError("Benchmark recipe must keep compile_model off on this stack")
     limits = QueueLimits(**_checked("queue", raw["queue"], QueueLimits))
@@ -192,13 +194,20 @@ def fit_identity(
     manifests: dict[str, str],
     upstream_sha256: str | None,
     environment: dict[str, Any] | None = None,
+    *,
+    config_sha256: str | None = None,
+    code_commit: str | None = None,
+    environment_lock_sha256: str | None = None,
+    preprocessing_sha256: str | None = None,
+    assignment_table_sha256: str | None = None,
+    source_checkpoint_ancestry: list[dict[str, str]] | None = None,
 ) -> str:
     """Digest of everything that makes two runs of ``fit`` interchangeable.
 
-    Covers the fit, the recipe, the manifests it reads, the exact bytes of the
-    source checkpoint it starts from, and run choices outside the recipe such as
-    the initialization, so a changed manifest, config or upstream checkpoint
-    never matches an earlier receipt.
+    Covers the fit, recipe, data manifests, source checkpoint ancestry,
+    preprocessing, assignment table, config, code commit and locked environment.
+    Dynamic backend and package-version observations belong in receipts, not in
+    this compatibility identity.
     """
     payload = {
         "fit": asdict(fit),
@@ -206,6 +215,12 @@ def fit_identity(
         "manifests": manifests,
         "upstream_sha256": upstream_sha256,
         "environment": environment or {},
+        "config_sha256": config_sha256,
+        "code_commit": code_commit,
+        "environment_lock_sha256": environment_lock_sha256,
+        "preprocessing_sha256": preprocessing_sha256,
+        "assignment_table_sha256": assignment_table_sha256,
+        "source_checkpoint_ancestry": source_checkpoint_ancestry or [],
     }
     text = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(text.encode()).hexdigest()
