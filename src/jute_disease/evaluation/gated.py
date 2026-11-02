@@ -248,6 +248,14 @@ def _read_selection(path: Path) -> dict[str, Any]:
         or not isinstance(model_specs, dict)
         or set(model_specs) != set(planned_fit_ids)
         or any(not isinstance(spec, dict) for spec in model_specs.values())
+        or any(
+            not _is_sha256(spec.get("fit_manifest_digest"))
+            or (
+                "policy_artifact_sha256" in spec
+                and not _is_sha256(spec.get("policy_artifact_sha256"))
+            )
+            for spec in model_specs.values()
+        )
         or not isinstance(selected_hyperparameters, dict)
         or not selected_hyperparameters
         or selected_hyperparameters_sha256 != _digest(selected_hyperparameters)
@@ -377,7 +385,11 @@ def probe_plan(benchmark_path: Path | str) -> dict[str, Any]:
     benchmark = load_benchmark(benchmark_path)
     from jute_disease.models.ml import classical_configurations
 
-    pools, policies = list(benchmark.pools), list(benchmark.policies)
+    pools, policies, views = (
+        list(benchmark.pools),
+        list(benchmark.policies),
+        list(benchmark.views),
+    )
     seeds = list(benchmark.recipe.seeds)
     primary = benchmark.primary_split
     cnn_systems = [
@@ -400,106 +412,115 @@ def probe_plan(benchmark_path: Path | str) -> dict[str, Any]:
     for estimator in benchmark.estimators:
         for features in benchmark.features:
             for pool in pools:
-                for policy in policies:
-                    for seed in seeds[: background_config["seed_count"]]:
-                        fit_id = (
-                            f"probe/background/classical/{estimator}-{features}/pool-{pool}"
-                            f"/{policy}/split-{primary}/seed-{seed}"
-                        )
-                        background.append(fit_id)
-                        model_specs[fit_id] = {
-                            "kind": "classical",
-                            "estimator": estimator,
-                            "features": features,
-                            "pool": pool,
-                            "policy": policy,
-                            "split": primary,
-                            "seed": seed,
-                            "training_view": background_config["training_view"],
-                            "input_view": "background-only",
-                        }
-    for pool in pools:
-        for policy in policies:
-            for seed in seeds[: background_config["seed_count"]]:
-                fit_id = (
-                    f"probe/background/mobilenetv2_100.ra_in1k/pool-{pool}"
-                    f"/{policy}/split-{primary}/seed-{seed}"
-                )
-                background.append(fit_id)
-                model_specs[fit_id] = {
-                    "kind": "cnn",
-                    "system": cnn_system,
-                    "model": "mobilenetv2_100.ra_in1k",
-                    "pool": pool,
-                    "policy": policy,
-                    "split": primary,
-                    "seed": seed,
-                    "training_view": background_config["training_view"],
-                    "input_view": "background-only",
-                }
-    border: list[str] = []
-    for estimator in benchmark.estimators:
-        for features in benchmark.features:
-            for pool in pools:
-                for policy in policies:
-                    for seed in seeds[: border_config["seed_count"]]:
-                        for configuration_index, parameters in enumerate(
-                            classical_configurations(estimator)
-                        ):
+                for view in views[:1]:
+                    for policy in policies:
+                        for seed in seeds[: background_config["seed_count"]]:
                             fit_id = (
-                                f"probe/border/classical/{estimator}-{features}/pool-{pool}"
-                                f"/{policy}/split-{primary}/seed-{seed}"
-                                f"/config-{configuration_index:02d}"
+                                f"probe/background/classical/{estimator}-{features}/pool-{pool}"
+                                f"/view-{view}/{policy}/split-{primary}/seed-{seed}"
                             )
-                            border.append(fit_id)
+                            background.append(fit_id)
                             model_specs[fit_id] = {
                                 "kind": "classical",
                                 "estimator": estimator,
                                 "features": features,
                                 "pool": pool,
+                                "view": view,
                                 "policy": policy,
                                 "split": primary,
                                 "seed": seed,
-                                "configuration": configuration_index,
-                                "parameters": parameters,
-                                "training_view": border_config["training_view"],
-                                "input_view": "border-frame",
+                                "training_view": background_config["training_view"],
+                                "input_view": "background-only",
                             }
     for pool in pools:
-        for policy in policies:
-            for seed in seeds[: border_config["seed_count"]]:
-                fit_id = (
-                    f"probe/border/mobilenetv2_100.ra_in1k/pool-{pool}"
-                    f"/{policy}/split-{primary}/seed-{seed}"
-                )
-                border.append(fit_id)
-                model_specs[fit_id] = {
-                    "kind": "cnn",
-                    "system": cnn_system,
-                    "model": "mobilenetv2_100.ra_in1k",
-                    "pool": pool,
-                    "policy": policy,
-                    "split": primary,
-                    "seed": seed,
-                    "training_view": border_config["training_view"],
-                    "input_view": "border-frame",
-                }
-                for cue in ("pad-fraction", "aspect-ratio"):
-                    cue_id = (
-                        f"probe/border/{cue}/pool-{pool}/{policy}"
-                        f"/split-{primary}/seed-{seed}"
+        for view in views[:1]:
+            for policy in policies:
+                for seed in seeds[: background_config["seed_count"]]:
+                    fit_id = (
+                        f"probe/background/mobilenetv2_100.ra_in1k/pool-{pool}"
+                        f"/view-{view}/{policy}/split-{primary}/seed-{seed}"
                     )
-                    border.append(cue_id)
-                    model_specs[cue_id] = {
-                        "kind": "cue",
-                        "cue": cue,
+                    background.append(fit_id)
+                    model_specs[fit_id] = {
+                        "kind": "cnn",
+                        "system": cnn_system,
+                        "model": "mobilenetv2_100.ra_in1k",
                         "pool": pool,
+                        "view": view,
                         "policy": policy,
                         "split": primary,
                         "seed": seed,
-                        "training_view": cue,
-                        "input_view": cue,
+                        "training_view": background_config["training_view"],
+                        "input_view": "background-only",
                     }
+    border: list[str] = []
+    for estimator in benchmark.estimators:
+        for features in benchmark.features:
+            for pool in pools:
+                for view in views[:1]:
+                    for policy in policies:
+                        for seed in seeds[: border_config["seed_count"]]:
+                            for configuration_index, parameters in enumerate(
+                                classical_configurations(estimator)
+                            ):
+                                fit_id = (
+                                    f"probe/border/classical/{estimator}-{features}/pool-{pool}"
+                                    f"/view-{view}/{policy}/split-{primary}/seed-{seed}"
+                                    f"/config-{configuration_index:02d}"
+                                )
+                                border.append(fit_id)
+                                model_specs[fit_id] = {
+                                    "kind": "classical",
+                                    "estimator": estimator,
+                                    "features": features,
+                                    "pool": pool,
+                                    "view": view,
+                                    "policy": policy,
+                                    "split": primary,
+                                    "seed": seed,
+                                    "configuration": configuration_index,
+                                    "parameters": parameters,
+                                    "training_view": border_config["training_view"],
+                                    "input_view": "border-frame",
+                                }
+    for pool in pools:
+        for view in views[:1]:
+            for policy in policies:
+                for seed in seeds[: border_config["seed_count"]]:
+                    fit_id = (
+                        f"probe/border/mobilenetv2_100.ra_in1k/pool-{pool}"
+                        f"/view-{view}/{policy}/split-{primary}/seed-{seed}"
+                    )
+                    border.append(fit_id)
+                    model_specs[fit_id] = {
+                        "kind": "cnn",
+                        "system": cnn_system,
+                        "model": "mobilenetv2_100.ra_in1k",
+                        "pool": pool,
+                        "view": view,
+                        "policy": policy,
+                        "split": primary,
+                        "seed": seed,
+                        "training_view": border_config["training_view"],
+                        "input_view": "border-frame",
+                    }
+                    for cue in ("pad-fraction", "aspect-ratio"):
+                        cue_id = (
+                            f"probe/border/{cue}/pool-{pool}/view-{view}/{policy}"
+                            f"/split-{primary}/seed-{seed}"
+                        )
+                        border.append(cue_id)
+                        model_specs[cue_id] = {
+                            "kind": "cue",
+                            "cue": cue,
+                            "pool": pool,
+                            "view": view,
+                            "policy": policy,
+                            "split": primary,
+                            "seed": seed,
+                            "training_view": cue,
+                            "input_view": cue,
+                        }
     fits = {
         fit.fit_id: fit
         for fit in benchmark.fits()
@@ -631,9 +652,14 @@ def write_matrix_freeze(
     benchmark_path: Path | str,
     target_dir: Path | str,
     output_path: Path | str,
+    policy_dir: Path | str | None = None,
 ) -> tuple[Path, str]:
     """Write a hash-bound selection only after recorded #114 outcomes."""
-    from jute_disease.data import EVALUATOR_TEST_SOURCE_DIGEST, load_manifest
+    from jute_disease.data import (
+        EVALUATOR_TEST_SOURCE_DIGEST,
+        load_manifest,
+        load_policy_manifest,
+    )
 
     outcomes_path = Path(validation_outcomes)
     try:
@@ -642,6 +668,10 @@ def write_matrix_freeze(
         raise GatedEvaluationError("#114 validation outcomes are required") from error
     if not isinstance(outcomes, dict) or outcomes.get("issue") != 114:
         raise GatedEvaluationError("validation outcomes must identify issue #114")
+    if outcomes.get("partition") != "val":
+        raise GatedEvaluationError(
+            "#114 outcomes must come from the validation partition"
+        )
     letterbox = outcomes.get("letterbox_comparison")
     audit = outcomes.get("mask_audit")
     budget = outcomes.get("post_pilot_budget_hours")
@@ -649,10 +679,31 @@ def write_matrix_freeze(
     frame = outcomes.get("border_frame_width_px")
     leaf_cutoff = outcomes.get("border_leaf_share_cutoff")
     hyperparameters = outcomes.get("selected_hyperparameters")
-    if letterbox not in {"letterbox", "resize-center-crop"}:
-        raise GatedEvaluationError("#114 letterbox comparison outcome is required")
-    if not isinstance(audit, dict) or audit.get("status") not in {"passed", "failed"}:
-        raise GatedEvaluationError("#114 mask-audit outcome must be recorded")
+    if (
+        not isinstance(letterbox, dict)
+        or len(letterbox) < 2
+        or any(
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+            for value in letterbox.values()
+        )
+    ):
+        raise GatedEvaluationError(
+            "#114 outcomes need a numeric, two-candidate letterbox comparison"
+        )
+    choice = outcomes.get("letterbox_decision")
+    if (
+        not isinstance(choice, str)
+        or choice not in {"letterbox", "resize-center-crop"}
+        or choice not in letterbox
+    ):
+        raise GatedEvaluationError(
+            "#114 letterbox decision must name one of the compared candidates"
+        )
+    letterbox = choice
+    if not isinstance(audit, dict) or type(audit.get("passed")) is not bool:
+        raise GatedEvaluationError("#114 mask-audit pass/fail outcome must be recorded")
     if not isinstance(budget, (int, float)) or isinstance(budget, bool) or budget <= 0:
         raise GatedEvaluationError("#114 post-pilot budget must be recorded")
     if not isinstance(scene, dict) or any(
@@ -671,6 +722,15 @@ def write_matrix_freeze(
     if not isinstance(hyperparameters, dict) or not hyperparameters:
         raise GatedEvaluationError(
             "validation-selected hyperparameters must be recorded"
+        )
+    recorded_selections = outcomes.get("selections")
+    if not isinstance(recorded_selections, dict) or any(
+        not isinstance(recorded_selections.get(key), dict)
+        or recorded_selections[key].get("selected") != value
+        for key, value in hyperparameters.items()
+    ):
+        raise GatedEvaluationError(
+            "validation-selected hyperparameters must match recorded #114 outcomes"
         )
 
     target = Path(target_dir)
@@ -695,6 +755,27 @@ def write_matrix_freeze(
     validation_hyperparameters_sha256 = _digest(hyperparameters)
     for fit_id, model_spec in plan["model_specs"].items():
         model_spec["preprocessing"] = preprocessing
+        model_spec["fit_manifest_digest"] = full_manifest_digest
+        if policy_dir is not None and all(
+            key in model_spec for key in ("pool", "view", "policy", "split")
+        ):
+            try:
+                fit_manifest = load_policy_manifest(
+                    policy_dir,
+                    pool=model_spec["pool"],
+                    view=model_spec["view"],
+                    policy=model_spec["policy"],
+                    draw=model_spec["split"],
+                    image_size=image_size,
+                )
+            except (OSError, ValueError, KeyError) as error:
+                raise GatedEvaluationError(
+                    f"receipted policy manifest is required for {fit_id}"
+                ) from error
+            model_spec["fit_manifest_digest"] = fit_manifest.digest()
+            model_spec["policy_artifact_sha256"] = dict(fit_manifest.dependencies)[
+                "policy_file"
+            ]
         model_spec["validation_hyperparameters_sha256"] = (
             validation_hyperparameters_sha256
         )
@@ -704,6 +785,7 @@ def write_matrix_freeze(
     payload = {
         "issue": 139,
         "manifest_digest": full_manifest_digest,
+        "public_manifest_digest": manifest.digest(),
         "classes": list(manifest.labels),
         "manifest_file_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
         "assignment_table": [
@@ -725,7 +807,7 @@ def write_matrix_freeze(
         ),
         "letterbox_decision": letterbox,
         "preprocessing": preprocessing,
-        "mask_audit_outcome": audit["status"],
+        "mask_audit_outcome": "passed" if audit["passed"] else "failed",
         "border_frame_width_px": {
             "starting": plan["border"]["frame_width_px_start"],
             "final": frame,
@@ -767,6 +849,12 @@ def write_fixture_run_record(
         "selection_sha256": _digest(selection),
         "status": "completed",
         "completed_analysis_ids": analysis_ids,
+        "analysis_receipts": {
+            "gradcam/test-pass": {
+                "status": "not-implemented-by-decision",
+                "leaf_score_implemented": False,
+            }
+        },
         "fixture_predictions": True,
     }
     output = Path(output_path)
@@ -936,7 +1024,8 @@ def _verified_training_receipt(
         or not isinstance(identity_inputs.get("recipe"), dict)
         or identity_inputs.get("recipe") != recipe
         or not isinstance(input_manifests, dict)
-        or input_manifests.get("target") != selection.get("manifest_digest")
+        or input_manifests.get("target")
+        != model_spec.get("fit_manifest_digest", selection.get("manifest_digest"))
         or not input_manifests
         or any(not _is_sha256(value) for value in input_manifests.values())
         or identity_inputs.get("config_sha256") != selection["benchmark_sha256"]
@@ -1124,8 +1213,23 @@ def write_run_record(
             "sha256": digest,
             "fit_spec_sha256": _digest(model_specs[fit_id]),
         }
+    gradcam_id = "gradcam/test-pass"
+    selection_gradcam = selection["selection"].get("gradcam_test_pass")
+    if (
+        gradcam_id not in extra_analysis_ids
+        or not isinstance(selection_gradcam, dict)
+        or selection_gradcam.get("planned") is not True
+        or selection_gradcam.get("leaf_score_implemented") is not False
+    ):
+        raise GatedEvaluationError(
+            "selection must freeze the no-Grad-CAM-score test-pass decision"
+        )
+    receipt_analysis_ids = extra_analysis_ids - {gradcam_id}
     analysis_rows = index.get("analyses") if isinstance(index, dict) else None
-    if not isinstance(analysis_rows, dict) or set(analysis_rows) != extra_analysis_ids:
+    if (
+        not isinstance(analysis_rows, dict)
+        or set(analysis_rows) != receipt_analysis_ids
+    ):
         raise GatedEvaluationError(
             "analysis index must cover every non-fit analysis exactly once"
         )
@@ -1134,6 +1238,11 @@ def write_run_record(
             analysis_id, analysis_rows[analysis_id], index_file
         )
         for analysis_id in sorted(extra_analysis_ids)
+        if analysis_id != gradcam_id
+    }
+    analysis_receipts[gradcam_id] = {
+        "status": "not-implemented-by-decision",
+        "leaf_score_implemented": False,
     }
     record = {
         "issue": 139,
@@ -1271,6 +1380,15 @@ def _test_access_records(
                 "run record must bind every non-fit analysis to its result receipt"
             )
         for analysis_id, receipt_record in analysis_receipts.items():
+            if analysis_id == "gradcam/test-pass":
+                if receipt_record != {
+                    "status": "not-implemented-by-decision",
+                    "leaf_score_implemented": False,
+                }:
+                    raise GatedEvaluationError(
+                        "Grad-CAM test-pass must preserve the no-score decision"
+                    )
+                continue
             if (
                 not isinstance(receipt_record, dict)
                 or not isinstance(receipt_record.get("path"), str)
@@ -1379,6 +1497,111 @@ def _restore_gated_test_manifest(
         )
     validate_manifest(full_manifest, 1)
     return full_manifest
+
+
+def _policy_test_entries(
+    policy_dir: Path,
+    model_spec: dict[str, Any],
+    selection: dict[str, Any],
+) -> list[Any]:
+    """Read one receipt-bound policy test support after both evaluator gates."""
+    from jute_disease.data import ManifestEntry, letterbox_pad_fraction
+
+    relative = (
+        Path(model_spec["pool"])
+        / f"view{model_spec['view']}"
+        / str(model_spec["policy"])
+        / f"draw-{model_spec['split']}.json"
+    )
+    artifact_path = policy_dir / relative
+    try:
+        artifact_bytes = artifact_path.read_bytes()
+        receipt = json.loads((policy_dir / "receipt.json").read_text(encoding="utf-8"))
+        payload = json.loads(artifact_bytes)
+    except (OSError, ValueError) as error:
+        raise GatedEvaluationError(
+            f"receipted test support is missing for {relative.as_posix()}"
+        ) from error
+    digest = hashlib.sha256(artifact_bytes).hexdigest()
+    files = receipt.get("files") if isinstance(receipt, dict) else None
+    lineage = payload.get("lineage") if isinstance(payload, dict) else None
+    if (
+        digest != model_spec.get("policy_artifact_sha256")
+        or not isinstance(receipt, dict)
+        or not isinstance(files, dict)
+        or files.get(relative.as_posix()) != digest
+        or not isinstance(payload, dict)
+        or payload.get("pool") != model_spec["pool"]
+        or payload.get("view") != model_spec["view"]
+        or payload.get("policy") != model_spec["policy"]
+        or payload.get("draw") != model_spec["split"]
+        or not isinstance(lineage, dict)
+        or lineage.get("manifest_digest") != selection.get("public_manifest_digest")
+    ):
+        raise GatedEvaluationError(
+            f"policy artifact is not bound to the frozen support: {relative.as_posix()}"
+        )
+    rows = payload.get("entries")
+    if not isinstance(rows, list):
+        raise GatedEvaluationError("policy artifact entries are invalid")
+    entries = []
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict) or row.get("partition") not in {
+            "train",
+            "val",
+            "test",
+        }:
+            raise GatedEvaluationError(
+                "policy artifact contains an invalid partition row"
+            )
+        if row["partition"] != "test":
+            continue
+        try:
+            image_id = row["sha256"]
+            width, height = row["width"], row["height"]
+            if (
+                not isinstance(image_id, str)
+                or not _is_sha256(image_id)
+                or image_id in seen
+                or type(width) is not int
+                or type(height) is not int
+                or width < 1
+                or height < 1
+                or row["label"] not in selection["classes"]
+                or not isinstance(row["family"], str)
+                or not row["family"]
+                or not isinstance(row["source"], str)
+                or not row["source"]
+                or not isinstance(row["path"], str)
+                or not row["path"]
+            ):
+                raise ValueError("invalid policy test row")
+            entries.append(
+                ManifestEntry(
+                    image_id=image_id,
+                    path=row["path"],
+                    label=row["label"],
+                    partition="test",
+                    group=row["family"],
+                    source=row["source"],
+                    width=width,
+                    height=height,
+                    pad_fraction=letterbox_pad_fraction(
+                        width, height, selection["preprocessing"]["size"]
+                    ),
+                )
+            )
+            seen.add(image_id)
+        except (KeyError, TypeError, ValueError) as error:
+            raise GatedEvaluationError(
+                "policy test support contains an invalid row"
+            ) from error
+    if not entries:
+        raise GatedEvaluationError(
+            f"policy test support is empty: {relative.as_posix()}"
+        )
+    return sorted(entries, key=lambda entry: entry.image_id)
 
 
 def _fixture_prediction(fit_id: str, image_id: str, classes: tuple[str, ...]) -> str:
@@ -1718,7 +1941,7 @@ def _predict_model_artifact(
     classes: tuple[str, ...],
     view_name: str,
     read_views: Callable[
-        [Any], tuple[dict[str, np.ndarray], np.ndarray, float, float, str]
+        [Any, str], tuple[dict[str, np.ndarray], np.ndarray, float, float, str]
     ],
 ) -> list[str]:
     """Apply one hash-checked trained artifact to a selected evaluator view."""
@@ -1782,7 +2005,7 @@ def _predict_model_artifact(
         batch_entries = entries[offset : offset + batch_size]
         batch_inputs: list[Any] = []
         for entry in batch_entries:
-            views, valid, _, pad_fraction, _ = read_views(entry)
+            views, valid, _, pad_fraction, _ = read_views(entry, spec["pool"])
             if kind == "cue":
                 value = (
                     pad_fraction
@@ -1822,6 +2045,8 @@ def evaluate_gated_test(
     output_dir: Path | str,
     fixture: bool = False,
     mask_checkpoint: Path | str | None = None,
+    policy_dir: Path | str | None = None,
+    pool_roots: dict[str, Path | str] | None = None,
 ) -> Path:
     """Score frozen model artifacts; this is the only test-image reader."""
     from jute_disease.data import (
@@ -1832,6 +2057,7 @@ def evaluate_gated_test(
         classical_pipeline,
         classify_scene,
         extract_scene_features,
+        file_sha256,
         load_manifest,
     )
 
@@ -1896,22 +2122,58 @@ def evaluate_gated_test(
         raise GatedEvaluationError(
             "selection class order differs from the target freeze"
         )
-    full_manifest = _restore_gated_test_manifest(
-        Path(target_dir),
-        manifest,
-        selection_file,
-        run_file,
-        fixture=fixture,
-    )
-    if full_manifest.digest() != selection.get("manifest_digest"):
-        raise GatedEvaluationError(
-            "selection does not match the complete target freeze"
-        )
-    entries = list(full_manifest.partition("test"))
-    entries.sort(key=lambda entry: entry.image_id)
-    if not entries:
-        raise GatedEvaluationError("frozen test partition is empty")
     classes = tuple(manifest.labels)
+    if fixture:
+        full_manifest = _restore_gated_test_manifest(
+            Path(target_dir),
+            manifest,
+            selection_file,
+            run_file,
+            fixture=True,
+        )
+        if full_manifest.digest() != selection.get("manifest_digest"):
+            raise GatedEvaluationError(
+                "selection does not match the complete target freeze"
+            )
+        fixture_entries = sorted(
+            full_manifest.partition("test"), key=lambda entry: entry.image_id
+        )
+        if not fixture_entries:
+            raise GatedEvaluationError("frozen test partition is empty")
+        entries_by_fit = dict.fromkeys(
+            selection["selection"]["planned_fit_ids"], fixture_entries
+        )
+    else:
+        if manifest.digest() != selection.get("public_manifest_digest"):
+            raise GatedEvaluationError(
+                "selection does not match the public target manifest"
+            )
+        if policy_dir is None:
+            raise GatedEvaluationError(
+                "production evaluation requires receipted policy test supports"
+            )
+        entries_by_fit = {
+            fit_id: _policy_test_entries(Path(policy_dir), spec, selection)
+            for fit_id, spec in selection["selection"]["model_specs"].items()
+            if fit_id in selection["selection"]["planned_fit_ids"]
+        }
+        if set(entries_by_fit) != set(selection["selection"]["planned_fit_ids"]):
+            raise GatedEvaluationError(
+                "the frozen selection has no policy support for every planned fit"
+            )
+    pool_for_fit = {
+        fit_id: ""
+        if fixture
+        else str(selection["selection"]["model_specs"][fit_id].get("pool", ""))
+        for fit_id in entries_by_fit
+    }
+    entry_by_key: dict[tuple[str, str], ManifestEntry] = {}
+    for fit_id, fit_entries in entries_by_fit.items():
+        pool = pool_for_fit[fit_id]
+        for entry in fit_entries:
+            entry_by_key[(pool, entry.image_id)] = entry
+    support_keys = sorted(entry_by_key)
+    entries = [entry_by_key[key] for key in support_keys]
     resize_decision = selection["letterbox_decision"]
     preprocessing = selection.get("preprocessing")
     if (
@@ -1953,16 +2215,30 @@ def evaluate_gated_test(
         dtype=np.uint8,
         shape=(len(entries), packed_width),
     )
-    entry_indices = {entry.image_id: index for index, entry in enumerate(entries)}
-    prepared: dict[str, tuple[tuple[int, int, int, int], float, float, str]] = {}
+    entry_indices = {key: index for index, key in enumerate(support_keys)}
+    prepared: dict[
+        tuple[str, str], tuple[tuple[int, int, int, int], float, float, str]
+    ] = {}
 
     def read_views(
         entry: ManifestEntry,
+        pool: str,
     ) -> tuple[dict[str, np.ndarray], np.ndarray, float, float, str]:
-        cache_index = entry_indices[entry.image_id]
-        if entry.image_id not in prepared:
-            image_path = Path(image_root) / entry.path
+        key = (pool, entry.image_id)
+        cache_index = entry_indices[key]
+        if key not in prepared:
+            roots = pool_roots or {}
+            image_root_path = Path(roots.get(pool, image_root)).resolve()
+            image_path = (image_root_path / entry.path).resolve()
+            if not image_path.is_relative_to(image_root_path):
+                raise GatedEvaluationError(
+                    f"frozen test path escapes its image root: {entry.image_id}"
+                )
             try:
+                if file_sha256(image_path) != entry.image_id:
+                    raise GatedEvaluationError(
+                        f"frozen test image hash changed: {entry.image_id}"
+                    )
                 with Image.open(image_path) as source:
                     original = source.convert("RGB")
             except OSError as error:
@@ -2007,13 +2283,13 @@ def evaluate_gated_test(
             pixels_cache[cache_index] = pixels
             mask_cache[cache_index] = np.packbits(resized_mask.ravel())
             frame_cache[cache_index] = np.packbits(frame.ravel())
-            prepared[entry.image_id] = (
+            prepared[key] = (
                 (top, bottom, left, right),
                 leaf_share,
                 pad_fraction,
                 scene,
             )
-        bounds, leaf_share, pad_fraction, scene = prepared[entry.image_id]
+        bounds, leaf_share, pad_fraction, scene = prepared[key]
         pixels = pixels_cache[cache_index]
         top, bottom, left, right = bounds
         valid = np.zeros((image_size, image_size), dtype=bool)
@@ -2036,20 +2312,15 @@ def evaluate_gated_test(
         }
         return views, valid, leaf_share, pad_fraction, scene
 
-    scenes: list[str] = []
-    border_leaf_shares: list[float] = []
-    pad_fractions: list[float] = []
     image_view_hashes = {
         name: hashlib.sha256()
         for name in ("raw-test", "background-only", "leaf-only", "border-frame")
     }
-    for entry in entries:
-        views, _, leaf_share, pad_fraction, scene = read_views(entry)
-        scenes.append(scene)
-        border_leaf_shares.append(leaf_share)
-        pad_fractions.append(pad_fraction)
+    for pool, image_id in support_keys:
+        entry = entry_by_key[(pool, image_id)]
+        views, _, _, _, _ = read_views(entry, pool)
         for name, view_pixels in views.items():
-            image_view_hashes[name].update(entry.image_id.encode("ascii"))
+            image_view_hashes[name].update(f"{pool}:{entry.image_id}".encode("ascii"))
             image_view_hashes[name].update(
                 np.asarray(view_pixels, dtype=np.uint8).tobytes()
             )
@@ -2078,40 +2349,55 @@ def evaluate_gated_test(
     # The record covers every planned fit, preventing partial or selective test reads.
     if set(final_ids + background_ids + border_ids) != set(expected_ids):
         raise GatedEvaluationError("selection and run record analysis IDs differ")
-    truths = [entry.label for entry in entries]
     mask_audit_passed = selection["mask_audit_outcome"] == "passed"
     sample_target = selection["selection"]["leaf_only"]["sample_size"]
-    sample_indices = (
-        _sample_indices(entries, scenes, min(sample_target, len(entries)))
-        if mask_audit_passed
-        else []
-    )
-    sample_entries = [entries[index] for index in sample_indices]
-    background_scores = (
-        {
-            fit_id: _metrics(entries, predictions_for(fit_id, entries), classes)
-            for fit_id in background_ids
-        }
-        if mask_audit_passed
-        else None
-    )
-    leaf_scores = (
-        {
-            fit_id: _metrics(
-                sample_entries,
-                predictions_for(fit_id, sample_entries, leaf=True),
-                classes,
-            )
-            for fit_id in final_ids
-        }
-        if mask_audit_passed
-        else None
-    )
+
+    def support_context(
+        fit_id: str,
+    ) -> tuple[list[Any], list[str], list[float], list[float]]:
+        fit_entries = entries_by_fit[fit_id]
+        pool = pool_for_fit[fit_id]
+        metadata = [prepared[(pool, entry.image_id)] for entry in fit_entries]
+        return (
+            fit_entries,
+            [item[3] for item in metadata],
+            [item[1] for item in metadata],
+            [item[2] for item in metadata],
+        )
+
+    def support_digest(fit_id: str) -> str:
+        return hashlib.sha256(
+            _canonical([entry.image_id for entry in entries_by_fit[fit_id]])
+        ).hexdigest()
+
+    sample_sizes: dict[str, int] = {}
+    full_sample_scores: dict[str, Any] | None = {} if mask_audit_passed else None
+    leaf_scores: dict[str, Any] | None = {} if mask_audit_passed else None
+    background_scores = {} if mask_audit_passed else None
     scene_tables: dict[str, Any] = {}
     if mask_audit_passed:
         for fit_id in final_ids:
+            fit_entries, fit_scenes, _, _ = support_context(fit_id)
+            indices = _sample_indices(
+                fit_entries, fit_scenes, min(sample_target, len(fit_entries))
+            )
+            sampled = [fit_entries[index] for index in indices]
+            sample_sizes[fit_id] = len(sampled)
+            full_sample_scores[fit_id] = _metrics(
+                sampled, predictions_for(fit_id, sampled), classes
+            )
+            leaf_scores[fit_id] = _metrics(
+                sampled,
+                predictions_for(fit_id, sampled, leaf=True),
+                classes,
+            )
             scene_tables[fit_id] = _scene_report(
-                entries, scenes, predictions_for(fit_id, entries), classes
+                fit_entries, fit_scenes, predictions_for(fit_id, fit_entries), classes
+            )
+        for fit_id in background_ids:
+            fit_entries = entries_by_fit[fit_id]
+            background_scores[fit_id] = _metrics(
+                fit_entries, predictions_for(fit_id, fit_entries), classes
             )
 
     border_groups: dict[str, list[str]] = defaultdict(list)
@@ -2122,63 +2408,21 @@ def evaluate_gated_test(
             if not component.startswith("seed-")
         )
         border_groups[group_id].append(fit_id)
-    family_ids = sorted({entry.group for entry in entries})
-    family_labels: dict[str, int] = {}
-    class_indices = {label: index for index, label in enumerate(classes)}
-    for entry in entries:
-        label_index = class_indices[entry.label]
-        if entry.group in family_labels and family_labels[entry.group] != label_index:
-            raise GatedEvaluationError("a family spans multiple true classes")
-        family_labels[entry.group] = label_index
-    family_label_vector = np.asarray(
-        [family_labels[family] for family in family_ids], dtype=np.int64
-    )
     null_count = selection["selection"]["border"]["null_permutations"]
-    null_rng = np.random.default_rng(42)
-    permuted_family_labels = np.vstack(
-        [null_rng.permutation(family_label_vector) for _ in range(null_count)]
-    )
     border_seeds = selection["selection"]["border"]["seeds"]
-    seed_draws, family_weights = _hierarchical_bootstrap_plan(
-        len(border_seeds),
-        len(family_ids),
-        resamples=null_count,
-        seed=42,
-    )
-    retained = [
-        index
-        for index, share in enumerate(border_leaf_shares)
-        if share <= selection["border_leaf_share_cutoff"]["final"]
-    ]
-    retained_entries = [entries[index] for index in retained]
-    retained_family_ids = sorted({entry.group for entry in retained_entries})
-    retained_class_counts = dict.fromkeys(classes, 0)
-    retained_class_counts.update(Counter(entry.label for entry in retained_entries))
-    retained_scene_counts = dict.fromkeys(sorted(set(scenes)), 0)
-    retained_scene_counts.update(Counter(scenes[index] for index in retained))
-    headline_allowed = mask_audit_passed and all(
-        retained_class_counts.get(label, 0) >= 50 for label in classes
-    )
-    survival_seed_draws: np.ndarray | None = None
-    survival_family_weights: np.ndarray | None = None
-    if headline_allowed:
-        survival_seed_draws, survival_family_weights = _hierarchical_bootstrap_plan(
-            len(border_seeds),
-            len(retained_family_ids),
-            resamples=null_count,
-            seed=43,
-        )
+    cutoff = selection["border_leaf_share_cutoff"]["final"]
     border_results: dict[str, Any] = {}
     cue_baselines: dict[str, Any] = {}
-    expected_seed_count = len(border_seeds)
-    for group_id, unsorted_fit_ids in sorted(border_groups.items()):
+    for group_index, (group_id, unsorted_fit_ids) in enumerate(
+        sorted(border_groups.items())
+    ):
         fit_ids = sorted(
             unsorted_fit_ids,
             key=lambda fit_id: border_seeds.index(
                 selection["selection"]["model_specs"][fit_id]["seed"]
             ),
         )
-        if len(fit_ids) != expected_seed_count:
+        if len(fit_ids) != len(border_seeds):
             raise GatedEvaluationError(
                 f"border model group does not cover every frozen seed: {group_id}"
             )
@@ -2187,19 +2431,67 @@ def evaluate_gated_test(
             for key, value in selection["selection"]["model_specs"][fit_ids[0]].items()
             if key != "seed"
         }
+        group_entries, group_scenes, leaf_shares, pad_fractions = support_context(
+            fit_ids[0]
+        )
+        expected_support = [entry.image_id for entry in group_entries]
+        if any(
+            [entry.image_id for entry in entries_by_fit[fit_id]] != expected_support
+            for fit_id in fit_ids[1:]
+        ):
+            raise GatedEvaluationError(
+                f"border seeds do not share one frozen test support: {group_id}"
+            )
+        truths = [entry.label for entry in group_entries]
+        family_ids = sorted({entry.group for entry in group_entries})
+        class_indices = {label: index for index, label in enumerate(classes)}
+        family_labels: dict[str, int] = {}
+        for entry in group_entries:
+            label_index = class_indices[entry.label]
+            if (
+                entry.group in family_labels
+                and family_labels[entry.group] != label_index
+            ):
+                raise GatedEvaluationError("a family spans multiple true classes")
+            family_labels[entry.group] = label_index
+        family_label_vector = np.asarray(
+            [family_labels[family] for family in family_ids], dtype=np.int64
+        )
+        null_rng = np.random.default_rng(42 + group_index)
+        permuted_family_labels = np.vstack(
+            [null_rng.permutation(family_label_vector) for _ in range(null_count)]
+        )
+        seed_draws, family_weights = _hierarchical_bootstrap_plan(
+            len(border_seeds),
+            len(family_ids),
+            resamples=null_count,
+            seed=42 + group_index,
+        )
+        retained = [index for index, share in enumerate(leaf_shares) if share <= cutoff]
+        retained_entries = [group_entries[index] for index in retained]
+        retained_scenes = [group_scenes[index] for index in retained]
+        retained_class_counts = dict.fromkeys(classes, 0)
+        retained_class_counts.update(Counter(entry.label for entry in retained_entries))
+        retained_scene_counts = dict.fromkeys(sorted(set(group_scenes)), 0)
+        retained_scene_counts.update(Counter(retained_scenes))
+        headline_allowed = mask_audit_passed and all(
+            retained_class_counts.get(label, 0) >= 50 for label in classes
+        )
+        retained_family_ids = sorted({entry.group for entry in retained_entries})
         seed_metrics: dict[str, dict[str, Any]] = {}
         family_stats_by_seed = []
         predicted_counts_by_seed = []
         retained_stats_by_seed = []
+        retained_predicted_counts_by_seed = []
         retained_seed_metrics: dict[str, dict[str, Any]] = {}
         retained_family_order: list[str] | None = None
         is_cue = group_spec["kind"] == "cue"
         for fit_id in fit_ids:
             seed = selection["selection"]["model_specs"][fit_id]["seed"]
-            predicted = predictions_for(fit_id, entries)
-            seed_metrics[str(seed)] = _metrics(entries, predicted, classes)
+            predicted = predictions_for(fit_id, group_entries)
+            seed_metrics[str(seed)] = _metrics(group_entries, predicted, classes)
             current_families, family_stats, family_predictions, _ = (
-                _family_metric_counts(entries, predicted, classes)
+                _family_metric_counts(group_entries, predicted, classes)
             )
             if current_families != family_ids:
                 raise GatedEvaluationError("border family order changed between seeds")
@@ -2210,7 +2502,12 @@ def evaluate_gated_test(
                 retained_seed_metrics[str(seed)] = _metrics(
                     retained_entries, retained_predictions, classes
                 )
-                current_retained_families, retained_stats, _, _ = _family_metric_counts(
+                (
+                    current_retained_families,
+                    retained_stats,
+                    retained_predictions_by_family,
+                    _,
+                ) = _family_metric_counts(
                     retained_entries, retained_predictions, classes
                 )
                 if retained_family_order is None:
@@ -2220,77 +2517,121 @@ def evaluate_gated_test(
                         "retained family order changed between border seeds"
                     )
                 retained_stats_by_seed.append(retained_stats)
+                retained_predicted_counts_by_seed.append(retained_predictions_by_family)
 
-        if is_cue:
-            intervals = _hierarchical_intervals(
-                np.stack(family_stats_by_seed),
-                seed_draws,
-                family_weights,
-                len(classes),
-            )
-            null = _family_permutation_macro_f1(
-                np.stack(predicted_counts_by_seed),
-                permuted_family_labels,
-                len(classes),
-            )
-            lower = intervals["macro_f1"]["lower"] if intervals["macro_f1"] else None
-            upper_null = float(np.percentile(null, 95))
-            cue_baselines[group_id] = {
-                "fit_ids": fit_ids,
-                "fit_spec": group_spec,
-                "metrics": _mean_seed_metrics(seed_metrics),
-                "accuracy_ci_95": intervals["accuracy"],
-                "macro_f1_ci_95": intervals["macro_f1"],
-                "majority_class_accuracy": max(Counter(truths).values()) / len(truths),
-                "permutation_macro_f1_95th": upper_null,
-                "rule": "cue baseline exceeds the family-label null"
-                if lower is not None and lower > upper_null
-                else "cue baseline does not exceed the family-label null",
-            }
-            continue
-
-        full_stats_array = np.stack(family_stats_by_seed)
         full_intervals = _hierarchical_intervals(
-            full_stats_array,
+            np.stack(family_stats_by_seed),
             seed_draws,
             family_weights,
             len(classes),
         )
-        survival_intervals: dict[str, Any] | None = None
-        symptom_survival: dict[str, Any] | None = None
-        if headline_allowed:
-            if retained_family_order != retained_family_ids:
-                raise GatedEvaluationError(
-                    "retained family order differs from the probe"
-                )
-            if survival_seed_draws is None or survival_family_weights is None:
-                raise GatedEvaluationError("symptom-survival bootstrap plan is missing")
-            retained_stats_array = np.stack(retained_stats_by_seed)
-            survival_intervals = _hierarchical_intervals(
-                retained_stats_array,
-                survival_seed_draws,
-                survival_family_weights,
-                len(classes),
-            )
-            symptom_survival = _mean_seed_metrics(retained_seed_metrics)
-        null = _family_permutation_macro_f1(
+        full_null = _family_permutation_macro_f1(
             np.stack(predicted_counts_by_seed),
             permuted_family_labels,
             len(classes),
         )
-        lower = (
+        full_lower = (
             full_intervals["macro_f1"]["lower"] if full_intervals["macro_f1"] else None
         )
-        upper_null = float(np.percentile(null, 95))
+        full_upper_null = float(np.percentile(full_null, 95))
         unrestricted = _mean_seed_metrics(seed_metrics)
+        if is_cue:
+            cue_baselines[group_id] = {
+                "fit_ids": fit_ids,
+                "fit_spec": group_spec,
+                "metrics": unrestricted,
+                "accuracy_ci_95": full_intervals["accuracy"],
+                "macro_f1_ci_95": full_intervals["macro_f1"],
+                "majority_class_accuracy": max(Counter(truths).values()) / len(truths),
+                "permutation_macro_f1_95th": full_upper_null,
+                "rule": "cue baseline exceeds the family-label null"
+                if full_lower is not None and full_lower > full_upper_null
+                else "cue baseline does not exceed the family-label null",
+            }
+            continue
+
+        symptom_survival: dict[str, Any] | None = None
+        survival_intervals: dict[str, Any] | None = None
+        survival_upper_null: float | None = None
+        survival_lower: float | None = None
+        survival_rule: str | None = None
+        if headline_allowed:
+            if retained_family_order != retained_family_ids:
+                raise GatedEvaluationError(
+                    "retained family order differs from the symptom-survival support"
+                )
+            retained_seed_draws, retained_family_weights = _hierarchical_bootstrap_plan(
+                len(border_seeds),
+                len(retained_family_ids),
+                resamples=null_count,
+                seed=43 + group_index,
+            )
+            survival_intervals = _hierarchical_intervals(
+                np.stack(retained_stats_by_seed),
+                retained_seed_draws,
+                retained_family_weights,
+                len(classes),
+            )
+            retained_family_labels = np.asarray(
+                [
+                    class_indices[
+                        next(
+                            entry.label
+                            for entry in retained_entries
+                            if entry.group == family
+                        )
+                    ]
+                    for family in retained_family_ids
+                ],
+                dtype=np.int64,
+            )
+            retained_rng = np.random.default_rng(1043 + group_index)
+            retained_permuted_labels = np.vstack(
+                [
+                    retained_rng.permutation(retained_family_labels)
+                    for _ in range(null_count)
+                ]
+            )
+            retained_null = _family_permutation_macro_f1(
+                np.stack(retained_predicted_counts_by_seed),
+                retained_permuted_labels,
+                len(classes),
+            )
+            survival_lower = (
+                survival_intervals["macro_f1"]["lower"]
+                if survival_intervals["macro_f1"]
+                else None
+            )
+            survival_upper_null = float(np.percentile(retained_null, 95))
+            survival_rule = (
+                "border information detected among symptom-survival images"
+                if survival_lower is not None and survival_lower > survival_upper_null
+                else "no detectable border information among symptom-survival images"
+            )
+            symptom_survival = _mean_seed_metrics(retained_seed_metrics)
+        omission_reason = (
+            None
+            if headline_allowed
+            else (
+                "mask audit failed"
+                if not mask_audit_passed
+                else "a class has fewer than 50 retained test images"
+            )
+        )
         border_results[group_id] = {
             "fit_ids": fit_ids,
             "fit_spec": group_spec,
+            "test_support_n": len(group_entries),
+            "test_support_sha256": support_digest(fit_ids[0]),
             "unrestricted": unrestricted,
             "symptom_survival": symptom_survival,
             "retained_class_counts": retained_class_counts,
             "retained_scene_counts": retained_scene_counts,
-            "frame_leaf_share_mean": float(np.mean(border_leaf_shares)),
+            "frame_leaf_share_mean": float(np.mean(leaf_shares)),
+            "frame_leaf_shares": [
+                {"image_id": entry.image_id, "leaf_pixel_share": share}
+                for entry, share in zip(group_entries, leaf_shares, strict=True)
+            ],
             "pad_fraction_baseline_mean": float(np.mean(pad_fractions)),
             "majority_class_accuracy": max(Counter(truths).values()) / len(truths),
             "accuracy_ci_95": full_intervals["accuracy"],
@@ -2301,24 +2642,21 @@ def evaluate_gated_test(
             "symptom_survival_macro_f1_ci_95": None
             if survival_intervals is None
             else survival_intervals["macro_f1"],
-            "macro_f1_lower_95": lower,
-            "permutation_macro_f1_95th": upper_null,
+            "symptom_survival_permutation_macro_f1_95th": survival_upper_null,
+            "symptom_survival_macro_f1_lower_95": survival_lower,
+            "symptom_survival_rule": survival_rule,
+            "macro_f1_lower_95": full_lower,
+            "permutation_macro_f1_95th": full_upper_null,
             "permutations": null_count,
             "bootstrap_method": (
                 "hierarchical: seeds within primary split, then test families; "
                 "family multiplicities paired across systems"
             ),
             "rule": "border information detected"
-            if lower is not None and lower > upper_null
+            if full_lower is not None and full_lower > full_upper_null
             else "no detectable border information at this frame width",
-            "headline": symptom_survival if headline_allowed else None,
-            "headline_omission_reason": None
-            if headline_allowed
-            else (
-                "mask audit failed"
-                if not mask_audit_passed
-                else "a class has fewer than 50 retained test images"
-            ),
+            "headline": symptom_survival,
+            "headline_omission_reason": omission_reason,
             "limitation": (
                 "Leaf share in a 32 px strip is more sensitive to mask-edge errors "
                 "than whole-leaf mask quality."
@@ -2350,6 +2688,13 @@ def evaluate_gated_test(
         "manifest_digest": selection["manifest_digest"],
         "post_hoc": selection["created_after_test_reads"],
         "test_images": len(entries),
+        "test_supports": {
+            fit_id: {
+                "n": len(entries_by_fit[fit_id]),
+                "sha256": support_digest(fit_id),
+            }
+            for fit_id in expected_ids
+        },
         "evaluated_view_sha256": {
             name: digest.hexdigest() for name, digest in image_view_hashes.items()
         },
@@ -2367,8 +2712,10 @@ def evaluate_gated_test(
         },
         "leaf_only": {
             "status": "completed" if mask_audit_passed else "blocked by mask audit",
-            "sample_size": len(sample_indices),
+            "sample_size": max(sample_sizes.values(), default=0),
+            "sample_sizes": sample_sizes,
             "fit_scores": leaf_scores,
+            "full_image_sample_scores": full_sample_scores,
         },
         "prediction_views": {
             fit_id: selection["selection"]["model_specs"][fit_id]["input_view"]
@@ -2383,8 +2730,12 @@ def evaluate_gated_test(
         "border": border_results,
         "border_cue_baselines": cue_baselines,
         "frame_leaf_shares": [
-            {"image_id": entry.image_id, "leaf_pixel_share": share}
-            for entry, share in zip(entries, border_leaf_shares, strict=True)
+            {
+                "pool": pool,
+                "image_id": entry_by_key[(pool, image_id)].image_id,
+                "leaf_pixel_share": prepared[(pool, image_id)][1],
+            }
+            for pool, image_id in support_keys
         ],
         "class_by_scene": scene_tables,
         "class_by_scene_status": (

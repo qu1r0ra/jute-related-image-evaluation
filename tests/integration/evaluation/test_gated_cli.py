@@ -122,12 +122,21 @@ def _outcomes(
             for pool in benchmark.pools
         }
     )
+    selections = {
+        key: {"selected": value, "val_macro_f1": 0.9}
+        for key, value in selected_hyperparameters.items()
+    }
     path.write_text(
         json.dumps(
             {
                 "issue": 114,
-                "letterbox_comparison": letterbox,
-                "mask_audit": {"status": mask_audit},
+                "partition": "val",
+                "letterbox_comparison": {
+                    "letterbox": 0.9,
+                    "resize-center-crop": 0.8,
+                },
+                "letterbox_decision": letterbox,
+                "mask_audit": {"passed": mask_audit == "passed"},
                 "post_pilot_budget_hours": 100.0,
                 "scene_thresholds": {
                     "background_fraction_min": 0.1,
@@ -136,6 +145,7 @@ def _outcomes(
                 "border_frame_width_px": 32,
                 "border_leaf_share_cutoff": border_leaf_share_cutoff,
                 "selected_hyperparameters": selected_hyperparameters,
+                "selections": selections,
             }
         ),
         encoding="utf-8",
@@ -189,7 +199,7 @@ def _complete_fit_receipt(
         "fit": fit_inputs,
         "recipe": training_recipe,
         "manifests": {
-            "target": selection_record["manifest_digest"],
+            "target": model_spec["fit_manifest_digest"],
             "target_content": "b" * 64,
         },
         "upstream_sha256": None,
@@ -644,23 +654,13 @@ def test_gated_api_runs_hash_bound_artifacts_on_masked_views(
             "fit_spec": spec,
         }
         _complete_fit_receipt(run_store, fit_id, artifact_path, spec, selection_record)
-    gradcam_receipt_path = tmp_path / "gradcam-test-pass.json"
-    gradcam_receipt = {"analysis_id": "gradcam/test-pass", "status": "passed"}
-    gradcam_receipt_path.write_text(json.dumps(gradcam_receipt), encoding="utf-8")
     index_path = tmp_path / "model-index.json"
     index_path.write_text(
         json.dumps(
             {
                 "run_root": str(run_store.root),
                 "models": model_index,
-                "analyses": {
-                    "gradcam/test-pass": {
-                        "path": str(gradcam_receipt_path),
-                        "sha256": hashlib.sha256(
-                            gradcam_receipt_path.read_bytes()
-                        ).hexdigest(),
-                    }
-                },
+                "analyses": {},
             }
         ),
         encoding="utf-8",
@@ -718,16 +718,12 @@ def test_gated_api_runs_hash_bound_artifacts_on_masked_views(
     finally:
         first_receipt_path.write_bytes(original_receipt)
 
-    missing_analysis = json.loads(index_path.read_text(encoding="utf-8"))
-    missing_analysis["analyses"] = {}
-    missing_analysis_path = tmp_path / "missing-analysis-index.json"
-    missing_analysis_path.write_text(json.dumps(missing_analysis), encoding="utf-8")
-    with pytest.raises(GatedEvaluationError, match="analysis index must cover"):
-        write_run_record(
-            selection, missing_analysis_path, tmp_path / "invalid-run.json"
-        )
-
     write_run_record(selection, index_path, run_record)
+    run_payload = json.loads(run_record.read_text(encoding="utf-8"))["record"]
+    assert run_payload["analysis_receipts"]["gradcam/test-pass"] == {
+        "status": "not-implemented-by-decision",
+        "leaf_score_implemented": False,
+    }
 
     with pytest.raises(
         GatedEvaluationError, match="production evaluation requires a local SAM 2"
@@ -740,6 +736,19 @@ def test_gated_api_runs_hash_bound_artifacts_on_masked_views(
             output_dir=tmp_path / "without-sam",
         )
 
+    def fixture_policy_support(
+        _policy_dir: Path, _model_spec: dict, _selection_record: dict
+    ) -> list:
+        frozen = gated._restore_gated_test_manifest(
+            inputs.target_dir,
+            load_manifest(inputs.target_dir),
+            selection,
+            run_record,
+            fixture=False,
+        )
+        return sorted(frozen.partition("test"), key=lambda entry: entry.image_id)
+
+    monkeypatch.setattr(gated, "_policy_test_entries", fixture_policy_support)
     output = evaluate_gated_test(
         selection_path=selection,
         run_record_path=run_record,
@@ -747,6 +756,7 @@ def test_gated_api_runs_hash_bound_artifacts_on_masked_views(
         image_root=inputs.image_root,
         output_dir=tmp_path / "evaluation",
         mask_checkpoint=tmp_path / "local-sam-checkpoint",
+        policy_dir=tmp_path / "synthetic-policy-supports",
     )
     report = json.loads(output.read_text(encoding="utf-8"))
     specs = selection_record["selection"]["model_specs"]
@@ -868,6 +878,73 @@ def test_matrix_freeze_requires_recorded_issue_114_outcomes(
             ]
         )
     assert not (tmp_path / "selection.json").exists()
+
+
+def test_matrix_freeze_requires_validation_comparison_and_matching_selection(
+    inputs: Inputs, tmp_path: Path
+) -> None:
+    benchmark = _mini_benchmark(tmp_path)
+    outcomes = tmp_path / "validation-114.json"
+    _outcomes(outcomes)
+    recorded = json.loads(outcomes.read_text(encoding="utf-8"))
+    recorded["partition"] = "test"
+    outcomes.write_text(json.dumps(recorded), encoding="utf-8")
+    with pytest.raises(SystemExit, match="validation partition"):
+        main(
+            [
+                "evaluate",
+                "freeze-matrix",
+                "--validation-outcomes",
+                str(outcomes),
+                "--benchmark",
+                str(benchmark),
+                "--target-dir",
+                str(inputs.target_dir),
+                "--output",
+                str(tmp_path / "wrong-partition.json"),
+            ]
+        )
+
+    _outcomes(outcomes)
+    recorded = json.loads(outcomes.read_text(encoding="utf-8"))
+    key = next(iter(recorded["selected_hyperparameters"]))
+    recorded["selections"][key]["selected"] = "different-choice"
+    outcomes.write_text(json.dumps(recorded), encoding="utf-8")
+    with pytest.raises(SystemExit, match="must match recorded #114 outcomes"):
+        main(
+            [
+                "evaluate",
+                "freeze-matrix",
+                "--validation-outcomes",
+                str(outcomes),
+                "--benchmark",
+                str(benchmark),
+                "--target-dir",
+                str(inputs.target_dir),
+                "--output",
+                str(tmp_path / "mismatched-choice.json"),
+            ]
+        )
+
+    _outcomes(outcomes)
+    recorded = json.loads(outcomes.read_text(encoding="utf-8"))
+    recorded["letterbox_comparison"] = {"letterbox": 0.9}
+    outcomes.write_text(json.dumps(recorded), encoding="utf-8")
+    with pytest.raises(SystemExit, match="two-candidate letterbox comparison"):
+        main(
+            [
+                "evaluate",
+                "freeze-matrix",
+                "--validation-outcomes",
+                str(outcomes),
+                "--benchmark",
+                str(benchmark),
+                "--target-dir",
+                str(inputs.target_dir),
+                "--output",
+                str(tmp_path / "one-candidate.json"),
+            ]
+        )
 
 
 def test_matrix_freeze_requires_a_validation_choice_for_each_tuning_route(

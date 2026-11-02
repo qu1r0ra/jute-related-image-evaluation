@@ -98,16 +98,17 @@ def _load_test_manifest(target_dir: Path | str) -> Manifest:
 
 def leaf_sample_ids(
     target_dir: Path | str,
-    freeze_record: Mapping[str, Any],
+    authorization: Authorization,
     size: int = LEAF_SAMPLE_SIZE,
     seed: int = 42,
 ) -> tuple[str, ...]:
     """The stratified test sample on which leaf-only checkpoints are evaluated.
 
-    ``freeze_record`` is a record returned by ``verify_freeze_record``; the sample
-    must be known before leaf-only checkpoints are scored.
+    ``authorization`` must come from ``authorize_test_read``, so the sample is
+    disclosed only after both the frozen selection and completed run are checked.
     """
-    del freeze_record  # presence proves the gate was passed
+    if not isinstance(authorization, Authorization):
+        raise FreezeRecordError("leaf sample requires an authorized test read")
     entries = _load_test_manifest(target_dir).partition("test")
     return stratified_sample(
         [e.image_id for e in entries], [e.label for e in entries], size, seed

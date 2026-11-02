@@ -70,7 +70,6 @@ from jute_disease.evaluation import (
     leaf_sample_ids,
     log_test_read,
     planned_probe_fit_ids,
-    verify_freeze_record,
     write_fixture_run_record,
     write_freeze_record,
     write_gated_run_record,
@@ -532,6 +531,7 @@ def _evaluate_matrix_freeze(args: argparse.Namespace) -> None:
             benchmark_path=args.benchmark,
             target_dir=args.target_dir,
             output_path=args.output,
+            policy_dir=args.policy_dir,
         )
     except (OSError, ValueError) as error:
         raise SystemExit(f"matrix freeze blocked: {error}") from error
@@ -653,6 +653,16 @@ def _evaluate_gated(args: argparse.Namespace) -> None:
             output_dir=args.output_dir,
             fixture=args.fixture,
             mask_checkpoint=args.sam_checkpoint,
+            policy_dir=args.policy_dir,
+            pool_roots={
+                pool: root
+                for pool, root in (
+                    ("A", args.pool_a_root),
+                    ("B", args.pool_b_root),
+                    ("C", args.pool_c_root),
+                )
+                if root is not None
+            },
         )
     except (OSError, ValueError) as error:
         raise SystemExit(f"evaluation blocked: {error}") from error
@@ -661,14 +671,16 @@ def _evaluate_gated(args: argparse.Namespace) -> None:
 
 def _evaluate_leaf_sample(args: argparse.Namespace) -> None:
     try:
-        record = verify_freeze_record(args.freeze_record, args.root)
+        auth = authorize_test_read(
+            args.freeze_record, args.run_record, args.root, args.fit_id or None
+        )
         log_test_read(
             default_reads_log_path(args.root),
-            record["hash"],
-            [],
+            auth.record_hash,
+            [run.fit_id for run in auth.runs],
             operation="leaf_sample",
         )
-        _print_json(list(leaf_sample_ids(args.target_dir, record, args.sample_size)))
+        _print_json(list(leaf_sample_ids(args.target_dir, auth, args.sample_size)))
     except (TestReadRefusedError, FreezeRecordError, OSError) as error:
         raise SystemExit(f"test read refused: {error}") from error
 
@@ -1010,6 +1022,11 @@ def build_parser() -> argparse.ArgumentParser:
     matrix_freeze.add_argument("--validation-outcomes", type=Path, required=True)
     matrix_freeze.add_argument("--benchmark", type=Path, default=BENCHMARK_CONFIG)
     matrix_freeze.add_argument("--target-dir", type=Path, required=True)
+    matrix_freeze.add_argument(
+        "--policy-dir",
+        type=Path,
+        help="Bind policy-specific fit manifests and test supports into the freeze.",
+    )
     matrix_freeze.add_argument("--output", type=Path, required=True)
     matrix_freeze.set_defaults(run=_evaluate_matrix_freeze)
 
@@ -1037,6 +1054,14 @@ def build_parser() -> argparse.ArgumentParser:
     gated.add_argument("--run-record", type=Path, required=True)
     gated.add_argument("--target-dir", type=Path, required=True)
     gated.add_argument("--image-root", type=Path, required=True)
+    gated.add_argument(
+        "--policy-dir",
+        type=Path,
+        help="Read test supports from the hash-bound pool/view/policy manifests.",
+    )
+    gated.add_argument("--pool-a-root", type=Path)
+    gated.add_argument("--pool-b-root", type=Path)
+    gated.add_argument("--pool-c-root", type=Path)
     gated.add_argument("--output-dir", type=Path, required=True)
     gated.add_argument(
         "--sam-checkpoint",
@@ -1105,9 +1130,11 @@ def _add_gated_evaluator(actions: argparse._SubParsersAction) -> None:
         "leaf-sample", help="Print the stratified leaf-only test sample."
     )
     sample.add_argument("--freeze-record", type=Path)
+    sample.add_argument("--run-record", type=Path)
     sample.add_argument("--target-dir", type=Path, required=True)
     sample.add_argument("--root", type=Path, default=ROOT_DIR)
     sample.add_argument("--sample-size", type=int, default=2000)
+    sample.add_argument("--fit-id", action="append")
     sample.set_defaults(run=_evaluate_leaf_sample)
 
 

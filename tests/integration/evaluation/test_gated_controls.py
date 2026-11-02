@@ -126,6 +126,32 @@ def _setup_runs(
     return record, run_record, tmp_path / "runs" / "0.json"
 
 
+def test_leaf_sample_requires_both_frozen_selection_and_run_record(
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    record, run_record, _ = _setup_runs(tmp_path, target, root, capsys)
+    common = [
+        "evaluate",
+        "leaf-sample",
+        "--freeze-record",
+        record,
+        "--target-dir",
+        target,
+        "--root",
+        root,
+        "--sample-size",
+        12,
+    ]
+    with pytest.raises(SystemExit, match="no run record"):
+        _cli(*common)
+    capsys.readouterr()
+    _cli(*common, "--run-record", run_record)
+    assert len(json.loads(capsys.readouterr().out)) == 12
+
+
 def _test_args(
     tmp_path: Path, target: Path, root: Path, record: Path, run_record: Path
 ) -> list[object]:
@@ -227,7 +253,43 @@ def test_all_analyses_run_through_the_evaluator(
     record = _freeze(tmp_path, root, capsys, list(fits.values()))
     sample_args = ["--freeze-record", record, "--target-dir", target, "--root", root]
     capsys.readouterr()
-    _cli("evaluate", "leaf-sample", *sample_args, "--sample-size", 12)
+    preliminary_predictions = tmp_path / "runs" / "preliminary.json"
+    _predictions(target, preliminary_predictions, 5, None)
+    preliminary_runs = _write(
+        tmp_path / "runs" / "preliminary-runs.json",
+        [
+            {
+                "fit_id": fits["full"],
+                "system": "mobilenet_v2_direct",
+                "seed": 0,
+                "variant": "full",
+                "predictions": preliminary_predictions.name,
+            }
+        ],
+    )
+    preliminary_record = tmp_path / "runs" / "preliminary-record.json"
+    _cli(
+        "evaluate",
+        "run-record",
+        "--freeze-record",
+        record,
+        "--runs",
+        preliminary_runs,
+        "--output",
+        preliminary_record,
+    )
+    capsys.readouterr()
+    _cli(
+        "evaluate",
+        "leaf-sample",
+        *sample_args,
+        "--run-record",
+        preliminary_record,
+        "--fit-id",
+        fits["full"],
+        "--sample-size",
+        12,
+    )
     sample = json.loads(capsys.readouterr().out)
     assert len(sample) == 12
     runs = []
