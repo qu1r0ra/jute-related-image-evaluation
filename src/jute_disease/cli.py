@@ -21,6 +21,7 @@ from jute_disease.config import (
     ML_FEATURES_DIR,
     PLANTDOC_DIR,
     PLANTVILLAGE_DIR,
+    ROOT_DIR,
     RUNS_DIR,
     SOURCE_INVENTORY_DIR,
 )
@@ -59,6 +60,17 @@ from jute_disease.data import (
     write_policy_manifests,
     write_thresholds,
 )
+from jute_disease.evaluation.evaluator import evaluate_test, leaf_sample_ids
+from jute_disease.evaluation.freeze_record import (
+    FreezeRecordError,
+    TestReadRefusedError,
+    authorize_test_read,
+    log_test_read,
+    verify_freeze_record,
+    write_freeze_record,
+    write_run_record,
+)
+from jute_disease.evaluation.probes import planned_probe_fit_ids
 from jute_disease.reporting.tables import aggregate_metrics
 from jute_disease.training import (
     WORKSPACE_FILE,
@@ -78,6 +90,7 @@ from jute_disease.training import (
     subprocess_launcher,
     verify_stack,
 )
+from jute_disease.training.benchmark import load_benchmark
 from jute_disease.training.engines.ml import predict_ml
 
 Handler = Callable[[argparse.Namespace], None]
@@ -495,6 +508,87 @@ def _evaluate_aggregate(args: argparse.Namespace) -> None:
     aggregate_metrics(args.fit_ids, args.output, args.runs_dir)
 
 
+def _read_json_file(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise SystemExit(f"cannot read {path}: {error}") from error
+
+
+def _evaluate_probe_plan(args: argparse.Namespace) -> None:
+    _print_json(planned_probe_fit_ids(load_benchmark(args.benchmark)))
+
+
+def _evaluate_freeze_record(args: argparse.Namespace) -> None:
+    benchmark = load_benchmark(args.benchmark)
+    required = [fit.fit_id for fit in benchmark.fits()] + planned_probe_fit_ids(
+        benchmark
+    )
+    outcomes = _read_json_file(args.outcomes) if args.outcomes else None
+    try:
+        record = write_freeze_record(
+            _read_json_file(args.spec),
+            outcomes,
+            args.output,
+            args.root,
+            required_fit_ids=required,
+            reads_log=args.reads_log,
+        )
+    except (FreezeRecordError, OSError) as error:
+        raise SystemExit(f"freeze record blocked: {error}") from error
+    _print_json({"hash": record["hash"], "post_hoc": record["body"]["post_hoc"]})
+
+
+def _evaluate_run_record(args: argparse.Namespace) -> None:
+    try:
+        record = write_run_record(
+            args.freeze_record,
+            _read_json_file(args.runs),
+            args.runs.parent,
+            args.output,
+        )
+    except (FreezeRecordError, TestReadRefusedError, OSError) as error:
+        raise SystemExit(f"run record blocked: {error}") from error
+    _print_json({"hash": record["hash"], "fits": sorted(record["body"]["fits"])})
+
+
+def _evaluate_leaf_sample(args: argparse.Namespace) -> None:
+    try:
+        record = verify_freeze_record(args.freeze_record, args.root)
+        _print_json(list(leaf_sample_ids(args.target_dir, record, args.sample_size)))
+    except (TestReadRefusedError, FreezeRecordError, OSError) as error:
+        raise SystemExit(f"test read refused: {error}") from error
+
+
+def _evaluate_test(args: argparse.Namespace) -> None:
+    try:
+        auth = authorize_test_read(
+            args.freeze_record, args.run_record, args.root, args.fit_id or None
+        )
+        if args.reads_log is not None:
+            log_test_read(
+                args.reads_log, auth.record_hash, [r.fit_id for r in auth.runs]
+            )
+        features = _read_json_file(args.features) if args.features else {}
+        report = evaluate_test(
+            args.target_dir,
+            auth,
+            args.run_record.parent,
+            scenes=features.get("scenes"),
+            frame_leaf_share=features.get("frame_leaf_share"),
+            sample_size=args.sample_size,
+            resamples=args.resamples,
+            permutations=args.permutations,
+        )
+    except (TestReadRefusedError, FreezeRecordError, OSError) as error:
+        raise SystemExit(f"test read refused: {error}") from error
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + chr(10), encoding="utf-8"
+    )
+    _print_json({"output": str(args.output), "record_hash": report["record_hash"]})
+
+
 def _bounds(text: str) -> tuple[int, int]:
     try:
         train, val = (int(part) for part in text.split(","))
@@ -734,6 +828,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     aggregate.set_defaults(run=_evaluate_aggregate)
     evaluate_actions.add_parser("predict", help="Classify one image (forwarded).")
+    _add_gated_evaluator(evaluate_actions)
 
     # planned commands owned by open tickets
     _add_freeze(commands)
@@ -742,6 +837,58 @@ def build_parser() -> argparse.ArgumentParser:
     ).set_defaults(run=_planned("profile", "#721"))
 
     return parser
+
+
+def _add_gated_evaluator(actions: argparse._SubParsersAction) -> None:
+    plan = actions.add_parser("probe-plan", help="List the background and border fits.")
+    plan.add_argument("--benchmark", type=Path, default=BENCHMARK_CONFIG)
+    plan.set_defaults(run=_evaluate_probe_plan)
+
+    record = actions.add_parser(
+        "freeze-record", help="Write the hashed matrix-freeze and selection record."
+    )
+    record.add_argument("--spec", type=Path, required=True)
+    record.add_argument(
+        "--outcomes", type=Path, help="Recorded #114 validation outcomes."
+    )
+    record.add_argument("--output", type=Path, required=True)
+    record.add_argument("--benchmark", type=Path, default=BENCHMARK_CONFIG)
+    record.add_argument("--root", type=Path, default=ROOT_DIR)
+    record.add_argument("--reads-log", type=Path)
+    record.set_defaults(run=_evaluate_freeze_record)
+
+    runs = actions.add_parser(
+        "run-record", help="Bind finished fits to a freeze record."
+    )
+    runs.add_argument("--freeze-record", type=Path, required=True)
+    runs.add_argument("--runs", type=Path, required=True)
+    runs.add_argument("--output", type=Path, required=True)
+    runs.set_defaults(run=_evaluate_run_record)
+
+    test = actions.add_parser(
+        "test", help="Read test predictions; refused without both records."
+    )
+    test.add_argument("--freeze-record", type=Path)
+    test.add_argument("--run-record", type=Path)
+    test.add_argument("--target-dir", type=Path, required=True)
+    test.add_argument("--output", type=Path, required=True)
+    test.add_argument("--features", type=Path, help="Scene tags and frame leaf shares.")
+    test.add_argument("--fit-id", action="append")
+    test.add_argument("--root", type=Path, default=ROOT_DIR)
+    test.add_argument("--reads-log", type=Path)
+    test.add_argument("--sample-size", type=int, default=2000)
+    test.add_argument("--resamples", type=int, default=10_000)
+    test.add_argument("--permutations", type=int, default=1000)
+    test.set_defaults(run=_evaluate_test)
+
+    sample = actions.add_parser(
+        "leaf-sample", help="Print the stratified leaf-only test sample."
+    )
+    sample.add_argument("--freeze-record", type=Path)
+    sample.add_argument("--target-dir", type=Path, required=True)
+    sample.add_argument("--root", type=Path, default=ROOT_DIR)
+    sample.add_argument("--sample-size", type=int, default=2000)
+    sample.set_defaults(run=_evaluate_leaf_sample)
 
 
 def _add_freeze(commands: argparse._SubParsersAction) -> None:
