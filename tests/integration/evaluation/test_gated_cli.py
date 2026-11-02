@@ -15,6 +15,7 @@ from jute_disease.cli import main
 from jute_disease.config import CURATION_RULES_PATH
 from jute_disease.data import SyntheticPlan, freeze_target
 from jute_disease.evaluation import (
+    GatedEvaluationError,
     evaluate_gated_test,
     write_matrix_freeze,
     write_run_record,
@@ -78,12 +79,17 @@ def _mini_benchmark(tmp_path: Path) -> Path:
     return path
 
 
-def _outcomes(path: Path, *, mask_audit: str = "passed") -> None:
+def _outcomes(
+    path: Path,
+    *,
+    mask_audit: str = "passed",
+    letterbox: str = "letterbox",
+) -> None:
     path.write_text(
         json.dumps(
             {
                 "issue": 114,
-                "letterbox_comparison": "letterbox",
+                "letterbox_comparison": letterbox,
                 "mask_audit": {"status": mask_audit},
                 "post_pilot_budget_hours": 100.0,
                 "scene_thresholds": {
@@ -207,6 +213,7 @@ def test_cli_refuses_test_read_without_both_records_then_evaluates_fixture(
 def test_gated_api_runs_hash_bound_artifacts_on_masked_views(
     inputs: Inputs, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    import jute_disease.data as data
     import jute_disease.evaluation.gated as gated
     import jute_disease.models.dl as dl
 
@@ -217,12 +224,13 @@ def test_gated_api_runs_hash_bound_artifacts_on_masked_views(
             return batch.mean(dim=(2, 3))
 
     monkeypatch.setattr(gated, "_assert_committed_selection", lambda _: None)
+    monkeypatch.setattr(data, "Sam2Refiner", lambda _: data.ColorThresholdBackend())
     monkeypatch.setattr(
         dl, "TimmBackbone", lambda model_name, pretrained: TinyBackbone()
     )
     benchmark = _mini_benchmark(tmp_path)
     outcomes = tmp_path / "validation-114.json"
-    _outcomes(outcomes)
+    _outcomes(outcomes, letterbox="resize-center-crop")
     selection = tmp_path / "selection.json"
     write_matrix_freeze(
         validation_outcomes=outcomes,
@@ -255,13 +263,34 @@ def test_gated_api_runs_hash_bound_artifacts_on_masked_views(
         fit_id: {
             "path": str(paths[spec["kind"]]),
             "sha256": hashlib.sha256(paths[spec["kind"]].read_bytes()).hexdigest(),
+            "fit_spec": spec,
         }
         for fit_id, spec in selection_record["selection"]["model_specs"].items()
     }
     index_path = tmp_path / "model-index.json"
     index_path.write_text(json.dumps({"models": model_index}), encoding="utf-8")
     run_record = tmp_path / "run.json"
+    invalid_index = json.loads(index_path.read_text(encoding="utf-8"))
+    first_fit_id = next(iter(invalid_index["models"]))
+    invalid_index["models"][first_fit_id]["fit_spec"]["training_view"] = (
+        "__mismatched-view__"
+    )
+    invalid_index_path = tmp_path / "invalid-model-index.json"
+    invalid_index_path.write_text(json.dumps(invalid_index), encoding="utf-8")
+    with pytest.raises(GatedEvaluationError, match="model fit spec differs"):
+        write_run_record(selection, invalid_index_path, tmp_path / "invalid-run.json")
     write_run_record(selection, index_path, run_record)
+
+    with pytest.raises(
+        GatedEvaluationError, match="production evaluation requires a local SAM 2"
+    ):
+        evaluate_gated_test(
+            selection_path=selection,
+            run_record_path=run_record,
+            target_dir=inputs.target_dir,
+            image_root=inputs.image_root,
+            output_dir=tmp_path / "without-sam",
+        )
 
     output = evaluate_gated_test(
         selection_path=selection,
@@ -269,6 +298,7 @@ def test_gated_api_runs_hash_bound_artifacts_on_masked_views(
         target_dir=inputs.target_dir,
         image_root=inputs.image_root,
         output_dir=tmp_path / "evaluation",
+        mask_checkpoint=tmp_path / "local-sam-checkpoint",
     )
     report = json.loads(output.read_text(encoding="utf-8"))
     specs = selection_record["selection"]["model_specs"]
@@ -276,6 +306,9 @@ def test_gated_api_runs_hash_bound_artifacts_on_masked_views(
     final_id = selection_record["selection"]["final_fit_ids"][0]
     assert report["prediction_views"][cue_id] in {"pad-fraction", "aspect-ratio"}
     assert report["prediction_views"][final_id] == "raw-test"
+    assert report["preprocessing"]["resize"] == "resize-center-crop"
+    assert report["mask_pipeline"]["model"] == "excess-green-otsu-largest-component"
+    assert report["model_provenance"][final_id]["training_view"] == "raw-training"
     assert report["leaf_prediction_view"][final_id] == "leaf-only"
     assert (
         report["leaf_only"]["fit_scores"][final_id]["n"]
@@ -286,6 +319,14 @@ def test_gated_api_runs_hash_bound_artifacts_on_masked_views(
         "background-only",
         "leaf-only",
         "border-frame",
+    }
+    border_result = next(iter(report["border"].values()))
+    assert len(border_result["fit_ids"]) == 3
+    assert "seeds within primary split" in border_result["bootstrap_method"]
+    assert border_result["symptom_survival"]
+    assert border_result["rule"] in {
+        "border information detected",
+        "no detectable border information at this frame width",
     }
 
 
@@ -317,6 +358,9 @@ def test_default_matrix_freeze_records_all_probe_routes(
     assert background["seeds"] == [42, 1337, 7, 21, 84]
     assert len(background["fit_ids"]) == 495
     assert background["cnn_route"] == "mobilenetv2_100.ra_in1k (ImageNet)"
+    background_spec = selection["model_specs"][background["fit_ids"][0]]
+    assert background_spec["training_view"] == background_spec["input_view"]
+    assert background["leaf_mask"].endswith("+sam2")
     assert len(selection["pools"]) == 3
     assert len(selection["policies"]) == 3
     assert selection["primary_split"] == 0
@@ -327,6 +371,9 @@ def test_default_matrix_freeze_records_all_probe_routes(
     assert selection["border"]["leaf_share_cutoff_start"] == 0.05
     assert selection["border"]["null_permutations"] == 1_000
     assert selection["border"]["classical_configurations_per_estimator"] == 9
+    border_spec = selection["model_specs"][selection["border"]["fit_ids"][0]]
+    assert border_spec["training_view"] == "border-frame"
+    assert border_spec["input_view"] == "border-frame"
     assert len(selection["border"]["fit_ids"]) == 2_511
 
 
@@ -349,3 +396,64 @@ def test_matrix_freeze_requires_recorded_issue_114_outcomes(
             ]
         )
     assert not (tmp_path / "selection.json").exists()
+
+
+def test_failed_mask_audit_blocks_mask_dependent_report_scores(
+    inputs: Inputs, tmp_path: Path
+) -> None:
+    benchmark = _mini_benchmark(tmp_path)
+    outcomes = tmp_path / "validation-114.json"
+    _outcomes(outcomes, mask_audit="failed")
+    selection = tmp_path / "selection.json"
+    run_record = tmp_path / "run.json"
+    output = tmp_path / "evaluation"
+    main(
+        [
+            "evaluate",
+            "matrix-freeze",
+            "--validation-outcomes",
+            str(outcomes),
+            "--benchmark",
+            str(benchmark),
+            "--target-dir",
+            str(inputs.target_dir),
+            "--output",
+            str(selection),
+        ]
+    )
+    main(
+        [
+            "evaluate",
+            "fixture-run-record",
+            "--selection",
+            str(selection),
+            "--output",
+            str(run_record),
+        ]
+    )
+    main(
+        [
+            "evaluate",
+            "gated",
+            "--selection",
+            str(selection),
+            "--run-record",
+            str(run_record),
+            "--target-dir",
+            str(inputs.target_dir),
+            "--image-root",
+            str(inputs.image_root),
+            "--output-dir",
+            str(output),
+            "--fixture",
+        ]
+    )
+    report = json.loads((output / "evaluation.json").read_text(encoding="utf-8"))
+    assert report["background_only"] == {
+        "fit_scores": None,
+        "status": "blocked by mask audit",
+    }
+    assert report["leaf_only"]["sample_size"] == 0
+    assert report["leaf_only"]["fit_scores"] is None
+    assert not report["class_by_scene"]
+    assert all(row["headline"] is None for row in report["border"].values())

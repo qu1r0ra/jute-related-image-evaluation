@@ -540,6 +540,7 @@ def _evaluate_gated(args: argparse.Namespace) -> None:
             image_root=args.image_root,
             output_dir=args.output_dir,
             fixture=args.fixture,
+            mask_checkpoint=args.sam_checkpoint,
         )
     except GatedEvaluationError as error:
         raise SystemExit(f"evaluation blocked: {error}") from error
@@ -821,6 +822,11 @@ def build_parser() -> argparse.ArgumentParser:
     gated.add_argument("--target-dir", type=Path, required=True)
     gated.add_argument("--image-root", type=Path, required=True)
     gated.add_argument("--output-dir", type=Path, required=True)
+    gated.add_argument(
+        "--sam-checkpoint",
+        type=Path,
+        help="Use this existing local SAM 2 checkpoint for evaluator masks.",
+    )
     gated.add_argument(
         "--fixture",
         action="store_true",
