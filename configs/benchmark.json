@@ -13,9 +13,9 @@
     "early_stopping_patience": 8,
     "scheduler_patience": 3,
     "scheduler_factor": 0.1,
-    "precision": "16-mixed",
+    "precision": "bf16-mixed",
     "compile_model": false,
-    "num_workers": 0,
+    "num_workers": 8,
     "weighted_sampler": true,
     "effective_batch": 32
   },

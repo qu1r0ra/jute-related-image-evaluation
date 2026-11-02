@@ -17,7 +17,9 @@ from jute_disease.training.queue import (
     MAX_CONSECUTIVE_FAILURES,
     RETRIES,
     Clock,
+    ConfirmatoryAnalysisBlockedError,
     Executor,
+    FailureKind,
     IdentityFor,
     Outcome,
     QueueAbortedError,
@@ -25,6 +27,8 @@ from jute_disease.training.queue import (
     Stage,
     SystemClock,
     build_plan,
+    confirmatory_blockers,
+    require_confirmatory_completion,
     run_queue,
 )
 from jute_disease.training.receipts import (
@@ -43,7 +47,7 @@ from jute_disease.training.resume import (
     verified_progress,
 )
 from jute_disease.training.seed import seed_everything
-from jute_disease.training.stack import StackError, verify_stack
+from jute_disease.training.stack import StackError, configure_runtime, verify_stack
 from jute_disease.training.workflow import (
     WORKSPACE_FILE,
     Job,
@@ -51,6 +55,7 @@ from jute_disease.training.workflow import (
     UpstreamError,
     Workspace,
     find_fit,
+    load_assignment_table,
     make_executor,
     make_identity,
     open_workspace,
@@ -87,6 +92,7 @@ __all__ = [
     "UpstreamError",
     "Workspace",
     "find_fit",
+    "load_assignment_table",
     "make_executor",
     "make_identity",
     "open_workspace",
@@ -116,8 +122,11 @@ __all__ = [
     "record_progress",
     "verified_progress",
     "verify_stack",
+    "configure_runtime",
     "load_benchmark",
     "Clock",
+    "ConfirmatoryAnalysisBlockedError",
+    "FailureKind",
     "MAX_CONSECUTIVE_FAILURES",
     "QueueAbortedError",
     "RETRIES",
@@ -127,6 +136,8 @@ __all__ = [
     "RunState",
     "RunStore",
     "SystemClock",
+    "confirmatory_blockers",
+    "require_confirmatory_completion",
     "write_json_atomic",
     "experiment_loggers",
     "get_logger",

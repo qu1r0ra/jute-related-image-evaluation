@@ -81,6 +81,8 @@ class Classifier(LightningModule):
         x, y = batch
         y_hat = self(x)
         loss = self.loss(y_hat, y)
+        if not torch.isfinite(loss).all():
+            raise RuntimeError("training divergence: non-finite loss")
 
         self.log("train_loss", loss, prog_bar=True)
         self.train_metrics(y_hat, y)
@@ -94,6 +96,8 @@ class Classifier(LightningModule):
         x, y = batch
         y_hat = self(x)
         loss = self.loss(y_hat, y)
+        if not torch.isfinite(loss).all():
+            raise RuntimeError("training divergence: non-finite loss")
 
         self.log("val_loss", loss, prog_bar=True)
         self.val_metrics(y_hat, y)

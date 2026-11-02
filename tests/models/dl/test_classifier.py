@@ -96,6 +96,19 @@ def test_classifier_validation_step(classifier: Classifier) -> None:
     assert loss is not None
 
 
+@pytest.mark.parametrize("step_name", ["training_step", "validation_step"])
+def test_non_finite_loss_is_an_explicit_divergence(
+    classifier: Classifier, step_name: str
+) -> None:
+    classifier.forward = lambda x: torch.full(
+        (x.shape[0], NUM_CLASSES), float("nan"), requires_grad=True
+    )
+    batch = (torch.zeros(2, 3, 8, 8), torch.zeros(2, dtype=torch.long))
+
+    with pytest.raises(RuntimeError, match="training divergence: non-finite loss"):
+        getattr(classifier, step_name)(batch, 0)
+
+
 def test_classifier_predict_step(classifier: Classifier) -> None:
     batch = (torch.randn(4, 3, 224, 224), torch.randint(0, NUM_CLASSES, (4,)))
     preds = classifier.predict_step(batch, 0)

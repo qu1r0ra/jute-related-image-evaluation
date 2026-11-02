@@ -11,6 +11,7 @@ from jute_disease.training import (
     record_progress,
     verified_progress,
 )
+from jute_disease.training.receipts import RECEIPT_FORMAT_VERSION
 
 IDENTITY = "identity-a"
 
@@ -37,7 +38,11 @@ def test_a_first_attempt_starts_fresh_and_claims_the_directory(
     plan = prepare_checkpoints(directory, IDENTITY, "attempt-1")
     assert (plan.checkpoint, plan.resumed_from, plan.refusal) == (None, None, None)
     owner = json.loads((directory / "owner.json").read_text("utf-8"))
-    assert owner == {"identity": IDENTITY, "attempt": "attempt-1"}
+    assert owner == {
+        "identity": IDENTITY,
+        "attempt": "attempt-1",
+        "receipt_format_version": RECEIPT_FORMAT_VERSION,
+    }
 
 
 def test_a_killed_attempt_resumes_from_its_verified_checkpoint(
@@ -108,6 +113,23 @@ def test_finished_training_is_never_resumed(directory: Path) -> None:
     plan = prepare_checkpoints(directory, IDENTITY, "attempt-2")
     assert plan.checkpoint is None
     assert plan.refusal == "the earlier training had already finished"
+    assert _aside(directory) == ["checkpoints-0"]
+
+
+def test_checkpoint_from_a_different_receipt_format_is_refused(
+    directory: Path,
+) -> None:
+    prepare_checkpoints(directory, IDENTITY, "attempt-1")
+    _train(directory)
+    owner_path = directory / "owner.json"
+    owner = json.loads(owner_path.read_text("utf-8"))
+    owner["receipt_format_version"] = RECEIPT_FORMAT_VERSION - 1
+    owner_path.write_text(json.dumps(owner), encoding="utf-8")
+
+    plan = prepare_checkpoints(directory, IDENTITY, "attempt-2")
+
+    assert plan.checkpoint is None
+    assert plan.refusal == "checkpoints use a different receipt format"
     assert _aside(directory) == ["checkpoints-0"]
 
 

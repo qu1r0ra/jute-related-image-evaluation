@@ -14,7 +14,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from jute_disease.training.receipts import SUPERSEDED_DIR, read_json, write_json_atomic
+from jute_disease.training.receipts import (
+    RECEIPT_FORMAT_VERSION,
+    SUPERSEDED_DIR,
+    read_json,
+    write_json_atomic,
+)
 
 CHECKPOINT_DIR = "checkpoints"
 LAST_CHECKPOINT = "last.ckpt"
@@ -96,7 +101,11 @@ def prepare_checkpoints(
     ):
         owner = read_json(directory / OWNER_FILE) or {}
         progress = verified_progress(directory)
-        if owner.get("identity") != identity:
+        if not owner:
+            plan = ResumePlan(refusal="checkpoints have no recorded owner")
+        elif owner.get("receipt_format_version") != RECEIPT_FORMAT_VERSION:
+            plan = ResumePlan(refusal="checkpoints use a different receipt format")
+        elif owner.get("identity") != identity:
             plan = ResumePlan(
                 refusal="checkpoints belong to a different run identity"
                 if owner
@@ -114,7 +123,12 @@ def prepare_checkpoints(
             _move_aside(directory)
     directory.mkdir(parents=True, exist_ok=True)
     write_json_atomic(
-        directory / OWNER_FILE, {"identity": identity, "attempt": attempt}
+        directory / OWNER_FILE,
+        {
+            "identity": identity,
+            "attempt": attempt,
+            "receipt_format_version": RECEIPT_FORMAT_VERSION,
+        },
     )
     return plan
 
@@ -123,5 +137,10 @@ def mark_finished(directory: Path | str, identity: str, attempt: str) -> None:
     """Record that training ended, so its checkpoints are never resumed."""
     write_json_atomic(
         Path(directory) / OWNER_FILE,
-        {"identity": identity, "attempt": attempt, "finished": True},
+        {
+            "identity": identity,
+            "attempt": attempt,
+            "receipt_format_version": RECEIPT_FORMAT_VERSION,
+            "finished": True,
+        },
     )
