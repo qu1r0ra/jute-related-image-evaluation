@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from jute_disease.data import Manifest, ManifestEntry, write_manifest
-from jute_disease.evaluation import evaluate_fixture_runs
+from jute_disease.evaluation.validation import evaluate_fixture_runs
 
 
 def _target_manifest() -> Manifest:
@@ -23,6 +23,7 @@ def _target_manifest() -> Manifest:
                     source="synthetic",
                     width=1,
                     height=1,
+                    pad_fraction=0.0,
                 )
                 for partition in ("train", "val", "test")
                 for label in ("a", "b")

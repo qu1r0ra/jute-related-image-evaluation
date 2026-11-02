@@ -24,11 +24,6 @@ from jute_disease.evaluation.statistics import (
     kendall_tau,
     wilson_interval,
 )
-from jute_disease.evaluation.validation import (
-    FixtureEvaluationError,
-    FixtureEvaluationOutput,
-    evaluate_fixture_runs,
-)
 
 __all__ = [
     "CONFIDENCE_LEVEL",
@@ -39,15 +34,12 @@ __all__ = [
     "Agreement",
     "ClassScore",
     "Evaluation",
-    "FixtureEvaluationError",
-    "FixtureEvaluationOutput",
     "Interval",
     "PredictionSet",
     "Resampling",
     "RunScores",
     "SeedSummary",
     "agreement_gate",
-    "evaluate_fixture_runs",
     "evaluate_predictions",
     "format_metrics",
     "kendall_tau",
