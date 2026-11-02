@@ -64,6 +64,7 @@ from jute_disease.evaluation import (
     evaluate_gated_test,
     write_fixture_run_record,
     write_matrix_freeze,
+    write_run_record,
 )
 from jute_disease.reporting.tables import aggregate_metrics
 from jute_disease.training import (
@@ -522,6 +523,14 @@ def _evaluate_fixture_run_record(args: argparse.Namespace) -> None:
     _print_json({"run_record": str(path), "sha256": digest})
 
 
+def _evaluate_run_record(args: argparse.Namespace) -> None:
+    try:
+        path, digest = write_run_record(args.selection, args.model_index, args.output)
+    except GatedEvaluationError as error:
+        raise SystemExit(f"run record blocked: {error}") from error
+    _print_json({"run_record": str(path), "sha256": digest})
+
+
 def _evaluate_gated(args: argparse.Namespace) -> None:
     try:
         path = evaluate_gated_test(
@@ -794,6 +803,15 @@ def build_parser() -> argparse.ArgumentParser:
     fixture_record.add_argument("--selection", type=Path, required=True)
     fixture_record.add_argument("--output", type=Path, required=True)
     fixture_record.set_defaults(run=_evaluate_fixture_run_record)
+
+    run_record = evaluate_actions.add_parser(
+        "run-record",
+        help="Bind every frozen evaluation to completed model artifacts.",
+    )
+    run_record.add_argument("--selection", type=Path, required=True)
+    run_record.add_argument("--model-index", type=Path, required=True)
+    run_record.add_argument("--output", type=Path, required=True)
+    run_record.set_defaults(run=_evaluate_run_record)
 
     gated = evaluate_actions.add_parser(
         "gated", help="Read the held-out partition through the gated evaluator."

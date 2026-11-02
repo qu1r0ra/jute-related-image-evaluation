@@ -4,6 +4,7 @@ from jute_disease.evaluation.gated import (
     probe_plan,
     write_fixture_run_record,
     write_matrix_freeze,
+    write_run_record,
 )
 from jute_disease.evaluation.metrics import EVAL_METRICS, TRAIN_METRICS, format_metrics
 from jute_disease.evaluation.resampling import (
@@ -60,4 +61,5 @@ __all__ = [
     "wilson_interval",
     "write_fixture_run_record",
     "write_matrix_freeze",
+    "write_run_record",
 ]

@@ -5,11 +5,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import tempfile
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 import numpy as np
 from PIL import Image
@@ -21,7 +25,7 @@ SELECTION_FORMAT = "jute-evaluation-selection-v1"
 RUN_FORMAT = "jute-evaluation-run-v1"
 CURRENT_SELECTION_FORMAT = "jute-evaluation-current-selection-v1"
 CURRENT_SELECTION_FILE = "evaluator/current-selection.json"
-TEST_READ_HISTORY_FILE = "evaluator/test-read-history.json"
+TEST_READ_HISTORY_FILE = "evaluator/test-read-history.jsonl"
 
 
 class GatedEvaluationError(ValueError):
@@ -91,6 +95,17 @@ def _write_json_atomic(path: Path, payload: dict[str, Any] | list[Any]) -> None:
         Path(temporary).unlink(missing_ok=True)
 
 
+def _append_test_read_event(path: Path, event: dict[str, Any]) -> None:
+    """Durably append the pre-read journal before any test image is opened."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+    try:
+        os.write(descriptor, _canonical(event))
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def description_name(path: Path) -> str:
     """Name a protected file in a concise error message."""
     return "selection record" if path.name == "selection.json" else "record"
@@ -106,6 +121,8 @@ def probe_plan(benchmark_path: Path | str) -> dict[str, Any]:
     leaf_config = probe_config["leaf_only"]
     border_config = probe_config["border"]
     benchmark = load_benchmark(benchmark_path)
+    from jute_disease.models.ml import classical_configurations
+
     pools, policies = list(benchmark.pools), list(benchmark.policies)
     seeds = list(benchmark.recipe.seeds)
     primary = benchmark.primary_split
@@ -115,43 +132,131 @@ def probe_plan(benchmark_path: Path | str) -> dict[str, Any]:
         if fit.phase == "final" and fit.kind.value in {"target", "classical"}
     ]
     background: list[str] = []
+    model_specs: dict[str, dict[str, Any]] = {}
     for estimator in benchmark.estimators:
         for features in benchmark.features:
             for pool in pools:
                 for policy in policies:
                     for seed in seeds[: background_config["seed_count"]]:
-                        background.append(
+                        fit_id = (
                             f"probe/background/classical/{estimator}-{features}/pool-{pool}"
                             f"/{policy}/split-{primary}/seed-{seed}"
                         )
+                        background.append(fit_id)
+                        model_specs[fit_id] = {
+                            "kind": "classical",
+                            "estimator": estimator,
+                            "features": features,
+                            "pool": pool,
+                            "policy": policy,
+                            "split": primary,
+                            "seed": seed,
+                            "input_view": "background-only",
+                        }
     for pool in pools:
         for policy in policies:
             for seed in seeds[: background_config["seed_count"]]:
-                background.append(
+                fit_id = (
                     f"probe/background/mobilenetv2_100.ra_in1k/pool-{pool}"
                     f"/{policy}/split-{primary}/seed-{seed}"
                 )
+                background.append(fit_id)
+                model_specs[fit_id] = {
+                    "kind": "cnn",
+                    "model": "mobilenetv2_100.ra_in1k",
+                    "pool": pool,
+                    "policy": policy,
+                    "split": primary,
+                    "seed": seed,
+                    "input_view": "background-only",
+                }
     border: list[str] = []
     for estimator in benchmark.estimators:
         for features in benchmark.features:
             for pool in pools:
                 for policy in policies:
                     for seed in seeds[: border_config["seed_count"]]:
-                        border.append(
-                            f"probe/border/classical/{estimator}-{features}/pool-{pool}"
-                            f"/{policy}/split-{primary}/seed-{seed}"
-                        )
+                        for configuration_index, parameters in enumerate(
+                            classical_configurations(estimator)
+                        ):
+                            fit_id = (
+                                f"probe/border/classical/{estimator}-{features}/pool-{pool}"
+                                f"/{policy}/split-{primary}/seed-{seed}"
+                                f"/config-{configuration_index:02d}"
+                            )
+                            border.append(fit_id)
+                            model_specs[fit_id] = {
+                                "kind": "classical",
+                                "estimator": estimator,
+                                "features": features,
+                                "pool": pool,
+                                "policy": policy,
+                                "split": primary,
+                                "seed": seed,
+                                "configuration": configuration_index,
+                                "parameters": parameters,
+                                "input_view": "border-frame",
+                            }
     for pool in pools:
         for policy in policies:
             for seed in seeds[: border_config["seed_count"]]:
-                border.append(
+                fit_id = (
                     f"probe/border/mobilenetv2_100.ra_in1k/pool-{pool}"
                     f"/{policy}/split-{primary}/seed-{seed}"
                 )
+                border.append(fit_id)
+                model_specs[fit_id] = {
+                    "kind": "cnn",
+                    "model": "mobilenetv2_100.ra_in1k",
+                    "pool": pool,
+                    "policy": policy,
+                    "split": primary,
+                    "seed": seed,
+                    "input_view": "border-frame",
+                }
                 for cue in ("pad-fraction", "aspect-ratio"):
-                    border.append(
-                        f"probe/border/{cue}/pool-{pool}/{policy}/split-{primary}/seed-{seed}"
+                    cue_id = (
+                        f"probe/border/{cue}/pool-{pool}/{policy}"
+                        f"/split-{primary}/seed-{seed}"
                     )
+                    border.append(cue_id)
+                    model_specs[cue_id] = {
+                        "kind": "cue",
+                        "cue": cue,
+                        "pool": pool,
+                        "policy": policy,
+                        "split": primary,
+                        "seed": seed,
+                        "input_view": cue,
+                    }
+    fits = {
+        fit.fit_id: fit
+        for fit in benchmark.fits()
+        if fit.phase == "final" and fit.kind.value in {"target", "classical"}
+    }
+    for fit_id in final_ids:
+        fit = fits[fit_id]
+        if fit.kind.value == "classical":
+            model_specs[fit_id] = {
+                "kind": "classical",
+                "estimator": fit.estimator,
+                "features": fit.features,
+                "pool": fit.pool,
+                "policy": fit.policy,
+                "split": fit.split,
+                "seed": fit.seed,
+                "input_view": "raw-test",
+            }
+        else:
+            model_specs[fit_id] = {
+                "kind": "cnn",
+                "model": fit.model,
+                "pool": fit.pool,
+                "policy": fit.policy,
+                "split": fit.split,
+                "seed": fit.seed,
+                "input_view": "raw-test",
+            }
     return {
         "primary_split": primary,
         "pools": pools,
@@ -171,6 +276,7 @@ def probe_plan(benchmark_path: Path | str) -> dict[str, Any]:
         },
         "border": {
             "fit_ids": border,
+            "classical_configurations_per_estimator": 9,
             "classical_estimators": list(benchmark.estimators),
             "classical_features": list(benchmark.features),
             "cnn_route": "mobilenetv2_100.ra_in1k (ImageNet)",
@@ -183,6 +289,7 @@ def probe_plan(benchmark_path: Path | str) -> dict[str, Any]:
         },
         "gradcam_test_pass": {"planned": True, "leaf_score_implemented": False},
         "final_fit_ids": final_ids,
+        "model_specs": model_specs,
         "planned_fit_ids": sorted(set(final_ids + background + border)),
         "analysis_ids": sorted(
             set(final_ids + background + border + ["gradcam/test-pass"])
@@ -258,6 +365,7 @@ def write_matrix_freeze(
     payload = {
         "issue": 139,
         "manifest_digest": manifest.digest(),
+        "classes": list(manifest.labels),
         "manifest_file_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
         "benchmark_sha256": hashlib.sha256(benchmark_bytes).hexdigest(),
         "validation_outcomes_sha256": hashlib.sha256(
@@ -319,12 +427,98 @@ def write_fixture_run_record(
     return output, _write_immutable(output, RUN_FORMAT, record)
 
 
+def write_run_record(
+    selection_path: Path | str,
+    model_index_path: Path | str,
+    output_path: Path | str,
+) -> tuple[Path, str]:
+    """Bind every frozen analysis ID to an already completed model artifact."""
+    selection_file = Path(selection_path)
+    selection = _read_envelope(selection_file, "selection record", SELECTION_FORMAT)
+    index_file = Path(model_index_path)
+    try:
+        index = json.loads(index_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise GatedEvaluationError(
+            "a completed model-artifact index is required"
+        ) from error
+    models = index.get("models") if isinstance(index, dict) else None
+    expected = set(selection["selection"]["planned_fit_ids"])
+    model_specs = selection["selection"].get("model_specs")
+    if not isinstance(model_specs, dict) or set(model_specs) != expected:
+        raise GatedEvaluationError("selection lacks a model spec for every analysis")
+    if not isinstance(models, dict) or set(models) != expected:
+        raise GatedEvaluationError(
+            "model-artifact index must cover every frozen analysis exactly once"
+        )
+    artifacts: dict[str, dict[str, str]] = {}
+    for fit_id in sorted(expected):
+        row = models[fit_id]
+        if not isinstance(row, dict) or not isinstance(row.get("path"), str):
+            raise GatedEvaluationError(f"model artifact path is missing for {fit_id}")
+        path = Path(row["path"])
+        if not path.is_absolute():
+            path = index_file.parent / path
+        path = path.resolve()
+        try:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as error:
+            raise GatedEvaluationError(
+                f"model artifact is missing for {fit_id}"
+            ) from error
+        if row.get("sha256") != digest:
+            raise GatedEvaluationError(f"model artifact hash differs for {fit_id}")
+        artifacts[fit_id] = {"path": str(path), "sha256": digest}
+    record = {
+        "issue": 139,
+        "selection_sha256": _digest(selection),
+        "status": "completed",
+        "completed_analysis_ids": sorted(expected),
+        "model_artifacts": artifacts,
+        "model_index_sha256": hashlib.sha256(index_file.read_bytes()).hexdigest(),
+        "fixture_predictions": False,
+    }
+    output = Path(output_path)
+    return output, _write_immutable(output, RUN_FORMAT, record)
+
+
+def _assert_committed_selection(selection_path: Path) -> None:
+    """Require the exact frozen selection bytes to exist in the current commit."""
+    root = Path(__file__).resolve().parents[3]
+    try:
+        relative = selection_path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError as error:
+        raise GatedEvaluationError(
+            "selection record must be committed in this repository"
+        ) from error
+    tracked = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "--error-unmatch", "--", relative],
+        capture_output=True,
+        check=False,
+    )
+    committed = subprocess.run(
+        ["git", "-C", str(root), "show", f"HEAD:{relative}"],
+        capture_output=True,
+        check=False,
+    )
+    if (
+        tracked.returncode
+        or committed.returncode
+        or committed.stdout != selection_path.read_bytes()
+    ):
+        raise GatedEvaluationError(
+            "selection record must be tracked and committed before test reads"
+        )
+
+
 def _test_access_records(
-    selection_path: Path, run_path: Path
+    selection_path: Path, run_path: Path, *, fixture: bool
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Validate both gates before the caller loads the manifest or test pixels."""
     selection = _read_envelope(selection_path, "selection record", SELECTION_FORMAT)
     run_record = _read_envelope(run_path, "run record", RUN_FORMAT)
+    if not fixture:
+        _assert_committed_selection(selection_path)
     selection_digest = _digest(selection)
     if run_record.get("selection_sha256") != selection_digest:
         raise GatedEvaluationError("run record does not match the frozen selection")
@@ -338,36 +532,34 @@ def _test_access_records(
         or set(completed) != expected
     ):
         raise GatedEvaluationError("run record does not cover every frozen analysis")
-    if run_record.get("fixture_predictions") is not True:
-        views = run_record.get("prediction_views")
-        leaf_views = run_record.get("leaf_prediction_views")
-        if not isinstance(views, dict) or not isinstance(leaf_views, dict):
+    model_specs = selection["selection"].get("model_specs")
+    if not isinstance(model_specs, dict) or set(model_specs) != expected:
+        raise GatedEvaluationError("selection lacks a model spec for every analysis")
+    fixture_record = run_record.get("fixture_predictions") is True
+    if fixture != fixture_record:
+        raise GatedEvaluationError("fixture mode and run record type do not match")
+    if not fixture:
+        artifacts = run_record.get("model_artifacts")
+        if not isinstance(artifacts, dict) or set(artifacts) != expected:
             raise GatedEvaluationError(
-                "run record must declare each prediction input view"
+                "run record must bind every analysis to a model artifact"
             )
-        for fit_id in expected:
-            view = (
-                "background-only"
-                if fit_id in selection["selection"]["background_only"]["fit_ids"]
-                else "border-frame"
-                if fit_id in selection["selection"]["border"]["fit_ids"]
-                else "raw-test"
-            )
-            if "/pad-fraction/" in fit_id:
-                view = "pad-fraction"
-            elif "/aspect-ratio/" in fit_id:
-                view = "aspect-ratio"
-            if views.get(fit_id) != view:
+        for fit_id, artifact in artifacts.items():
+            if (
+                not isinstance(artifact, dict)
+                or not isinstance(artifact.get("path"), str)
+                or not isinstance(artifact.get("sha256"), str)
+            ):
                 raise GatedEvaluationError(
-                    f"run record has the wrong input view for {fit_id}"
+                    f"model artifact record is invalid for {fit_id}"
                 )
-        if any(
-            leaf_views.get(fit_id) != "leaf-only"
-            for fit_id in selection["selection"]["final_fit_ids"]
-        ):
-            raise GatedEvaluationError(
-                "run record must include leaf-only predictions for every final fit"
-            )
+            path = Path(artifact["path"])
+            if not path.is_file() or hashlib.sha256(
+                path.read_bytes()
+            ).hexdigest() != artifact.get("sha256"):
+                raise GatedEvaluationError(
+                    f"model artifact is missing or changed for {fit_id}"
+                )
     return selection, run_record
 
 
@@ -528,6 +720,126 @@ def _permutation_null(
     return samples
 
 
+def _decode_model_labels(values: np.ndarray, classes: tuple[str, ...]) -> list[str]:
+    labels: list[str] = []
+    for value in values:
+        if isinstance(value, str) and value in classes:
+            labels.append(value)
+            continue
+        try:
+            index = int(value)
+        except (TypeError, ValueError) as error:
+            raise GatedEvaluationError(
+                "model emitted an unknown class label"
+            ) from error
+        if index < 0 or index >= len(classes):
+            raise GatedEvaluationError("model emitted an unknown class index")
+        labels.append(classes[index])
+    return labels
+
+
+def _predict_model_artifact(
+    spec: dict[str, Any],
+    artifact_path: Path,
+    entries: list[Any],
+    classes: tuple[str, ...],
+    view_name: str,
+    read_views: Callable[
+        [Any], tuple[dict[str, np.ndarray], np.ndarray, float, float, str]
+    ],
+) -> list[str]:
+    """Apply one hash-checked trained artifact to a selected evaluator view."""
+    import joblib
+    import torch
+
+    from jute_disease.data import ImageWithMask
+    from jute_disease.models.dl import Classifier, TimmBackbone, read_checkpoint_state
+    from jute_disease.models.ml import CraftedFeatureExtractor, RawPixelFeatureExtractor
+
+    kind = spec["kind"]
+    model: Any
+    extractor: Any = None
+    if kind in {"classical", "cue"}:
+        try:
+            model = joblib.load(artifact_path)
+        except Exception as error:
+            raise GatedEvaluationError(
+                f"cannot load model artifact for {artifact_path.name}"
+            ) from error
+        if kind == "classical":
+            extractor = (
+                CraftedFeatureExtractor()
+                if spec["features"] == "crafted"
+                else RawPixelFeatureExtractor()
+            )
+    elif kind == "cnn":
+        try:
+            model = Classifier(
+                TimmBackbone(spec["model"], pretrained=False),
+                num_classes=len(classes),
+            )
+            state = read_checkpoint_state(artifact_path)
+            missing, unexpected = model.load_state_dict(state, strict=False)
+            invalid_missing = [
+                key
+                for key in missing
+                if not key.startswith(("train_metrics.", "val_metrics."))
+            ]
+            invalid_unexpected = [
+                key
+                for key in unexpected
+                if not key.startswith(("train_metrics.", "val_metrics."))
+            ]
+            if invalid_missing or invalid_unexpected:
+                raise ValueError("checkpoint weights do not match the CNN route")
+            model.eval()
+        except Exception as error:
+            raise GatedEvaluationError(
+                f"cannot load CNN artifact for {artifact_path.name}"
+            ) from error
+    else:
+        raise GatedEvaluationError(f"unknown model kind {kind!r}")
+
+    predictions: list[str] = []
+    batch_size = 16
+    if kind == "cnn":
+        mean = torch.tensor((0.485, 0.456, 0.406))[:, None, None]
+        std = torch.tensor((0.229, 0.224, 0.225))[:, None, None]
+    for offset in range(0, len(entries), batch_size):
+        batch_entries = entries[offset : offset + batch_size]
+        batch_inputs: list[Any] = []
+        for entry in batch_entries:
+            views, valid, _, pad_fraction, _ = read_views(entry)
+            if kind == "cue":
+                value = (
+                    pad_fraction
+                    if spec["cue"] == "pad-fraction"
+                    else entry.width / entry.height
+                )
+                batch_inputs.append([value])
+            elif kind == "classical":
+                batch_inputs.append(
+                    extractor.extract(ImageWithMask(views[view_name], valid))
+                )
+            else:
+                tensor = (
+                    torch.from_numpy(
+                        np.asarray(views[view_name], dtype=np.float32).copy()
+                    )
+                    .permute(2, 0, 1)
+                    .div_(255.0)
+                )
+                batch_inputs.append((tensor - mean) / std)
+        if kind in {"classical", "cue"}:
+            values = model.predict(np.asarray(batch_inputs, dtype=np.float32))
+        else:
+            with torch.inference_mode():
+                logits = model(torch.stack(batch_inputs))
+            values = logits.argmax(dim=1).cpu().numpy()
+        predictions.extend(_decode_model_labels(np.asarray(values), classes))
+    return predictions
+
+
 def evaluate_gated_test(
     *,
     selection_path: Path | str,
@@ -537,19 +849,21 @@ def evaluate_gated_test(
     output_dir: Path | str,
     fixture: bool = False,
 ) -> Path:
-    """Evaluate already completed predictions; only this function reads test pixels."""
+    """Score frozen model artifacts; this is the only test-image reader."""
     from jute_disease.data import (
         EVALUATOR_TEST_MANIFEST,
         ColorThresholdBackend,
+        ManifestEntry,
         classical_pipeline,
         classify_scene,
         extract_scene_features,
         load_manifest,
     )
-    from jute_disease.data.manifest import ManifestEntry
 
     selection_file, run_file = Path(selection_path), Path(run_record_path)
-    selection, run_record = _test_access_records(selection_file, run_file)
+    selection, run_record = _test_access_records(
+        selection_file, run_file, fixture=fixture
+    )
     try:
         current = json.loads(
             (Path(target_dir) / CURRENT_SELECTION_FILE).read_text(encoding="utf-8")
@@ -562,19 +876,26 @@ def evaluate_gated_test(
         or current.get("selection_sha256") != _digest(selection)
     ):
         raise GatedEvaluationError("selection was superseded by a later matrix freeze")
-    if fixture and run_record.get("fixture_predictions") is not True:
-        raise GatedEvaluationError(
-            "fixture mode requires a synthetic fixture run record"
-        )
-    if not fixture and run_record.get("fixture_predictions") is True:
-        raise GatedEvaluationError(
-            "synthetic fixture records cannot be used as study results"
-        )
-
+    evaluation_id = uuid4().hex
+    history_path = Path(target_dir) / TEST_READ_HISTORY_FILE
+    _append_test_read_event(
+        history_path,
+        {
+            "evaluation_id": evaluation_id,
+            "status": "started",
+            "selection_sha256": _digest(selection),
+            "run_record_sha256": _digest(run_record),
+            "read_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        },
+    )
     # No manifest partition or image bytes are read until both immutable records pass.
     manifest = load_manifest(Path(target_dir))
     if manifest.digest() != selection.get("manifest_digest"):
         raise GatedEvaluationError("selection does not match the target freeze")
+    if list(manifest.labels) != selection.get("classes"):
+        raise GatedEvaluationError(
+            "selection class order differs from the target freeze"
+        )
     test_manifest_path = Path(target_dir) / EVALUATOR_TEST_MANIFEST
     try:
         envelope = json.loads(test_manifest_path.read_text(encoding="utf-8"))
@@ -615,33 +936,25 @@ def evaluate_gated_test(
     classes = tuple(manifest.labels)
     backend = ColorThresholdBackend()
     transform = classical_pipeline(include_mask=True)
-    scenes: list[str] = []
-    border_leaf_shares: list[float] = []
-    pad_fractions: list[float] = []
-    image_view_hashes = {
-        name: hashlib.sha256()
-        for name in ("background-only", "leaf-only", "border-frame")
-    }
-    for entry in entries:
-        path = Path(image_root) / entry.path
+    scene_thresholds = SimpleNamespace(
+        **selection["validation_outcomes"]["scene_thresholds"]
+    )
+    frame_width = int(selection["border_frame_width_px"]["final"])
+    pad_rgb = np.asarray((124, 116, 104), dtype=np.uint8)
+
+    def read_views(
+        entry: ManifestEntry,
+    ) -> tuple[dict[str, np.ndarray], np.ndarray, float, float, str]:
+        image_path = Path(image_root) / entry.path
         try:
-            with Image.open(path) as source:
+            with Image.open(image_path) as source:
                 original = source.convert("RGB")
         except OSError as error:
             raise GatedEvaluationError(
                 f"cannot read frozen test image {entry.image_id}"
             ) from error
         mask = backend.predict(original).mask
-        scenes.append(
-            classify_scene(
-                extract_scene_features(original, mask),
-                type(
-                    "Thresholds",
-                    (),
-                    selection["validation_outcomes"]["scene_thresholds"],
-                )(),
-            )
-        )
+        scene = classify_scene(extract_scene_features(original, mask), scene_thresholds)
         boxed = transform(original)
         pixels, valid = boxed.pixels, boxed.valid_mask
         y, x = np.where(valid)
@@ -651,12 +964,11 @@ def evaluate_gated_test(
             int(x.min()),
             int(x.max()) + 1,
         )
-        width = int(selection["border_frame_width_px"]["final"])
         frame = np.zeros_like(valid)
-        frame[top : min(bottom, top + width), left:right] = True
-        frame[max(top, bottom - width) : bottom, left:right] = True
-        frame[top:bottom, left : min(right, left + width)] = True
-        frame[top:bottom, max(left, right - width) : right] = True
+        frame[top : min(bottom, top + frame_width), left:right] = True
+        frame[max(top, bottom - frame_width) : bottom, left:right] = True
+        frame[top:bottom, left : min(right, left + frame_width)] = True
+        frame[top:bottom, max(left, right - frame_width) : right] = True
         resized_mask = np.zeros_like(valid)
         resized = (
             np.asarray(
@@ -667,16 +979,27 @@ def evaluate_gated_test(
             > 0
         )
         resized_mask[top:bottom, left:right] = resized
-        border_leaf_shares.append(
-            float(np.logical_and(frame, resized_mask).sum() / frame.sum())
-        )
-        pad_fractions.append(1 - float(valid.mean()))
-        pad_rgb = np.asarray((124, 116, 104), dtype=np.uint8)
+        leaf_share = float(np.logical_and(frame, resized_mask).sum() / frame.sum())
         views = {
+            "raw-test": pixels,
             "background-only": np.where(resized_mask[..., None], pad_rgb, pixels),
             "leaf-only": np.where(resized_mask[..., None], pixels, pad_rgb),
             "border-frame": np.where(frame[..., None], pixels, pad_rgb),
         }
+        return views, valid, leaf_share, 1 - float(valid.mean()), scene
+
+    scenes: list[str] = []
+    border_leaf_shares: list[float] = []
+    pad_fractions: list[float] = []
+    image_view_hashes = {
+        name: hashlib.sha256()
+        for name in ("raw-test", "background-only", "leaf-only", "border-frame")
+    }
+    for entry in entries:
+        views, _, leaf_share, pad_fraction, scene = read_views(entry)
+        scenes.append(scene)
+        border_leaf_shares.append(leaf_share)
+        pad_fractions.append(pad_fraction)
         for name, view_pixels in views.items():
             image_view_hashes[name].update(entry.image_id.encode("ascii"))
             image_view_hashes[name].update(
@@ -684,54 +1007,22 @@ def evaluate_gated_test(
             )
 
     expected_ids = run_record["completed_analysis_ids"]
-    embedded = run_record.get("predictions", {})
 
-    def predictions_for(fit_id: str) -> list[str]:
-        row = embedded.get(fit_id) if isinstance(embedded, dict) else None
+    def predictions_for(
+        fit_id: str, selected: list[Any], *, leaf: bool = False
+    ) -> list[str]:
         if fixture:
+            suffix = ":leaf-only" if leaf else ""
             return [
-                _fixture_prediction(fit_id, entry.image_id, classes)
-                for entry in entries
+                _fixture_prediction(f"{fit_id}{suffix}", entry.image_id, classes)
+                for entry in selected
             ]
-        if not isinstance(row, dict) or row.get("image_ids") != [
-            entry.image_id for entry in entries
-        ]:
-            raise GatedEvaluationError(
-                f"predictions are absent or misaligned for {fit_id}"
-            )
-        labels = row.get("labels")
-        if (
-            not isinstance(labels, list)
-            or len(labels) != len(entries)
-            or any(label not in classes for label in labels)
-        ):
-            raise GatedEvaluationError(f"predictions are invalid for {fit_id}")
-        return labels
-
-    def leaf_predictions_for(fit_id: str) -> list[str]:
-        row = run_record.get("leaf_predictions", {})
-        row = row.get(fit_id) if isinstance(row, dict) else None
-        if fixture:
-            return [
-                _fixture_prediction(f"{fit_id}:leaf-only", entry.image_id, classes)
-                for entry in entries
-            ]
-        if not isinstance(row, dict) or row.get("image_ids") != [
-            entry.image_id for entry in entries
-        ]:
-            raise GatedEvaluationError(
-                f"leaf-only predictions are absent or misaligned for {fit_id}"
-            )
-        labels = row.get("labels")
-        if (
-            not isinstance(labels, list)
-            or len(labels) != len(entries)
-            or any(label not in classes for label in labels)
-        ):
-            raise GatedEvaluationError(
-                f"leaf-only predictions are invalid for {fit_id}"
-            )
-        return labels
+        spec = selection["selection"]["model_specs"][fit_id]
+        artifact_path = Path(run_record["model_artifacts"][fit_id]["path"])
+        view_name = "leaf-only" if leaf else spec["input_view"]
+        return _predict_model_artifact(
+            spec, artifact_path, selected, classes, view_name, read_views
+        )
 
     final_ids = selection["selection"]["final_fit_ids"]
     background_ids = selection["selection"]["background_only"]["fit_ids"]
@@ -744,13 +1035,13 @@ def evaluate_gated_test(
     sample_indices = _sample_indices(entries, scenes, min(sample_target, len(entries)))
     sample_entries = [entries[index] for index in sample_indices]
     background_scores = {
-        fit_id: _metrics(entries, predictions_for(fit_id), classes)
+        fit_id: _metrics(entries, predictions_for(fit_id, entries), classes)
         for fit_id in background_ids
     }
     leaf_scores = {
         fit_id: _metrics(
             sample_entries,
-            [leaf_predictions_for(fit_id)[index] for index in sample_indices],
+            predictions_for(fit_id, sample_entries, leaf=True),
             classes,
         )
         for fit_id in final_ids
@@ -758,18 +1049,16 @@ def evaluate_gated_test(
     scene_tables: dict[str, Any] = {}
     for fit_id in final_ids:
         scene_tables[fit_id] = _scene_report(
-            entries, scenes, predictions_for(fit_id), classes
+            entries, scenes, predictions_for(fit_id, entries), classes
         )
 
     border_results = {}
-    cue_baselines = {
-        fit_id: _metrics(entries, predictions_for(fit_id), classes)
-        for fit_id in border_ids
-        if "/pad-fraction/" in fit_id or "/aspect-ratio/" in fit_id
-    }
+    cue_baselines: dict[str, Any] = {}
     for fit_id in border_ids:
-        predicted = predictions_for(fit_id)
+        predicted = predictions_for(fit_id, entries)
         all_score = _metrics(entries, predicted, classes)
+        if selection["selection"]["model_specs"][fit_id]["kind"] == "cue":
+            cue_baselines[fit_id] = all_score
         retained = [
             index
             for index, share in enumerate(border_leaf_shares)
@@ -868,6 +1157,11 @@ def evaluate_gated_test(
             name: digest.hexdigest() for name, digest in image_view_hashes.items()
         },
         "leaf_only": {"sample_size": len(sample_indices), "fit_scores": leaf_scores},
+        "prediction_views": {
+            fit_id: selection["selection"]["model_specs"][fit_id]["input_view"]
+            for fit_id in expected_ids
+        },
+        "leaf_prediction_view": dict.fromkeys(final_ids, "leaf-only"),
         "background_only": {"fit_scores": background_scores},
         "border": border_results,
         "border_cue_baselines": cue_baselines,
@@ -879,20 +1173,15 @@ def evaluate_gated_test(
         json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n",
         encoding="utf-8",
     )
-    history_path = Path(target_dir) / TEST_READ_HISTORY_FILE
-    try:
-        history = json.loads(history_path.read_text(encoding="utf-8"))
-        if not isinstance(history, list):
-            raise ValueError("test-read history is not an array")
-    except FileNotFoundError:
-        history = []
-    history.append(
+    _append_test_read_event(
+        history_path,
         {
+            "evaluation_id": evaluation_id,
+            "status": "completed",
             "selection_sha256": _digest(selection),
             "run_record_sha256": _digest(run_record),
             "read_at": datetime.now(UTC).isoformat(timespec="seconds"),
             "evaluation_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
-        }
+        },
     )
-    _write_json_atomic(history_path, history)
     return output
