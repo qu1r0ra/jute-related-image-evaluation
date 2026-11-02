@@ -160,6 +160,27 @@ def test_cli_refuses_test_read_without_both_records_then_evaluates_fixture(
             eligible = all(count >= 30 for count in scene_row["class_counts"].values())
             assert ("macro_f1" in scene_row) is eligible
 
+    later_selection = tmp_path / "another-folder" / "selection.json"
+    main(
+        [
+            "evaluate",
+            "matrix-freeze",
+            "--validation-outcomes",
+            str(outcomes),
+            "--benchmark",
+            str(benchmark),
+            "--target-dir",
+            str(inputs.target_dir),
+            "--output",
+            str(later_selection),
+        ]
+    )
+    later_record = json.loads(later_selection.read_text(encoding="utf-8"))["record"]
+    assert later_record["created_after_test_reads"] is True
+    assert "test_read_history_sha256" in later_record
+    with pytest.raises(SystemExit, match="selection was superseded"):
+        main(args)
+
 
 def test_default_matrix_freeze_records_all_probe_routes(
     inputs: Inputs, tmp_path: Path

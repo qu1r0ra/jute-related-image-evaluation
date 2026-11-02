@@ -19,6 +19,9 @@ from jute_disease.training.benchmark import load_benchmark
 
 SELECTION_FORMAT = "jute-evaluation-selection-v1"
 RUN_FORMAT = "jute-evaluation-run-v1"
+CURRENT_SELECTION_FORMAT = "jute-evaluation-current-selection-v1"
+CURRENT_SELECTION_FILE = "evaluator/current-selection.json"
+TEST_READ_HISTORY_FILE = "evaluator/test-read-history.json"
 
 
 class GatedEvaluationError(ValueError):
@@ -70,6 +73,20 @@ def _write_immutable(path: Path, format_name: str, payload: dict[str, Any]) -> s
                 f"{description_name(path)} already exists; create a new freeze"
             ) from error
         return digest
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any] | list[Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    handle, temporary = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
     finally:
         Path(temporary).unlink(missing_ok=True)
 
@@ -218,7 +235,7 @@ def write_matrix_freeze(
         )
 
     target = Path(target_dir)
-    read_history = Path(output_path).parent / "test-read-history.json"
+    read_history = target / TEST_READ_HISTORY_FILE
     manifest_path = target / "manifest.json"
     try:
         manifest_bytes = manifest_path.read_bytes()
@@ -273,6 +290,13 @@ def write_matrix_freeze(
         ).hexdigest()
     output = Path(output_path)
     digest = _write_immutable(output, SELECTION_FORMAT, payload)
+    _write_json_atomic(
+        target / CURRENT_SELECTION_FILE,
+        {
+            "format": CURRENT_SELECTION_FORMAT,
+            "selection_sha256": digest,
+        },
+    )
     return output, digest
 
 
@@ -526,6 +550,18 @@ def evaluate_gated_test(
 
     selection_file, run_file = Path(selection_path), Path(run_record_path)
     selection, run_record = _test_access_records(selection_file, run_file)
+    try:
+        current = json.loads(
+            (Path(target_dir) / CURRENT_SELECTION_FILE).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError) as error:
+        raise GatedEvaluationError("a current matrix freeze is required") from error
+    if (
+        not isinstance(current, dict)
+        or current.get("format") != CURRENT_SELECTION_FORMAT
+        or current.get("selection_sha256") != _digest(selection)
+    ):
+        raise GatedEvaluationError("selection was superseded by a later matrix freeze")
     if fixture and run_record.get("fixture_predictions") is not True:
         raise GatedEvaluationError(
             "fixture mode requires a synthetic fixture run record"
@@ -843,7 +879,7 @@ def evaluate_gated_test(
         json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n",
         encoding="utf-8",
     )
-    history_path = selection_file.parent / "test-read-history.json"
+    history_path = Path(target_dir) / TEST_READ_HISTORY_FILE
     try:
         history = json.loads(history_path.read_text(encoding="utf-8"))
         if not isinstance(history, list):
@@ -858,7 +894,5 @@ def evaluate_gated_test(
             "evaluation_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
         }
     )
-    history_path.write_text(
-        json.dumps(history, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    _write_json_atomic(history_path, history)
     return output
