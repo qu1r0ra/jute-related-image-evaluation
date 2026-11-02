@@ -131,6 +131,37 @@ def test_classical_and_dl_routes_share_uint8_letterbox_padding() -> None:
     assert np.array_equal(classical[0], np.tile(expected_padding, (40, 1)))
 
 
+def test_background_only_fixture_mask_removes_leaf_pixels() -> None:
+    pixels = np.full((32, 32, 3), (100, 50, 30), dtype=np.uint8)
+    pixels[8:24, 8:24] = (20, 160, 20)
+    image = Image.fromarray(pixels)
+
+    transformed = create_pipeline(
+        size=32,
+        is_dl=False,
+        training_view="background-only",
+        fixture_masks=True,
+    )(image)
+
+    assert np.array_equal(transformed[16, 16], np.array((124, 116, 104)))
+    assert np.array_equal(transformed[2, 2], np.array((100, 50, 30)))
+
+
+def test_border_frame_keeps_only_content_edge_strips() -> None:
+    image = Image.fromarray(np.full((20, 40, 3), (80, 90, 100), dtype=np.uint8))
+
+    transformed = create_pipeline(
+        size=40,
+        is_dl=False,
+        training_view="border-frame",
+        border_frame_width_px=3,
+    )(image)
+
+    assert np.array_equal(transformed[10, 20], np.array((80, 90, 100)))
+    assert np.array_equal(transformed[20, 20], np.array((124, 116, 104)))
+    assert np.array_equal(transformed[0, 20], np.array((124, 116, 104)))
+
+
 def test_preprocessing_spec_digest_changes_with_every_field() -> None:
     base = PreprocessingSpec()
     assert base.digest() == PreprocessingSpec().digest()

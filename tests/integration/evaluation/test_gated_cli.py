@@ -175,6 +175,10 @@ def _complete_fit_receipt(
         "pretrained": True,
         "accelerator": "cuda",
         "require_cuda": True,
+        "mask_checkpoint_sha256": (
+            "c" * 64 if model_spec["training_view"] == "background-only" else None
+        ),
+        "fixture_masks": False,
     }
     fit_inputs = {
         "fit_id": fit_id,
@@ -199,7 +203,8 @@ def _complete_fit_receipt(
         "fit": fit_inputs,
         "recipe": training_recipe,
         "manifests": {
-            "target": model_spec["fit_manifest_digest"],
+            "target": selection_record["manifest_digest"],
+            "fit": model_spec["fit_manifest_digest"],
             "target_content": "b" * 64,
         },
         "upstream_sha256": None,
@@ -293,9 +298,13 @@ def _complete_fit_receipt(
             **training_recipe,
             "learning_rate": model_spec["selected_learning_rate"],
         }
+    else:
+        results["cue"] = model_spec["cue"]
     run.complete(
         results=results,
-        artifacts={"model": artifact_path},
+        artifacts={
+            "checkpoint" if model_spec["kind"] == "cnn" else "model": artifact_path
+        },
         metadata=metadata,
     )
 
@@ -645,25 +654,21 @@ def test_gated_api_runs_hash_bound_artifacts_on_masked_views(
     paths = {"classical": classical_path, "cue": cue_path, "cnn": cnn_path}
     selection_record = json.loads(selection.read_text(encoding="utf-8"))["record"]
     run_store = RunStore(tmp_path / "training-runs")
-    model_index = {}
     for fit_id, spec in selection_record["selection"]["model_specs"].items():
         artifact_path = paths[spec["kind"]]
-        model_index[fit_id] = {
-            "path": str(artifact_path),
-            "sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
-            "fit_spec": spec,
-        }
         _complete_fit_receipt(run_store, fit_id, artifact_path, spec, selection_record)
     index_path = tmp_path / "model-index.json"
-    index_path.write_text(
-        json.dumps(
-            {
-                "run_root": str(run_store.root),
-                "models": model_index,
-                "analyses": {},
-            }
-        ),
-        encoding="utf-8",
+    main(
+        [
+            "evaluate",
+            "write-model-index",
+            "--selection",
+            str(selection),
+            "--runs-dir",
+            str(run_store.root),
+            "--output",
+            str(index_path),
+        ]
     )
     run_record = tmp_path / "run.json"
     invalid_index = json.loads(index_path.read_text(encoding="utf-8"))

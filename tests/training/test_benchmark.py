@@ -19,7 +19,19 @@ from jute_disease.training import (
     load_benchmark,
     open_workspace,
 )
-from jute_disease.training.workflow import tuning_selection
+from jute_disease.training.workflow import _training_fit_spec, tuning_selection
+
+
+def test_evaluation_test_view_translates_to_training_view_without_mutation() -> None:
+    evaluation_spec = {"training_view": "raw-test", "fit_id": "fit/test"}
+
+    training_spec = _training_fit_spec(evaluation_spec)
+
+    assert training_spec == {"training_view": "raw-training", "fit_id": "fit/test"}
+    assert evaluation_spec["training_view"] == "raw-test"
+    assert _training_fit_spec({"training_view": "background-only"}) == {
+        "training_view": "background-only"
+    }
 
 
 @pytest.fixture(scope="module")
@@ -316,6 +328,90 @@ def test_workspace_carries_hash_valid_evaluation_selection(tmp_path) -> None:
     loaded = Workspace.load(workspace_path)
     assert loaded.evaluation_fit_specs == workspace.evaluation_fit_specs
     assert loaded.evaluation_selection_sha256 == digest
+
+
+def test_selection_probe_fits_enter_the_training_queue(tmp_path) -> None:
+    benchmark = load_benchmark(BENCHMARK_CONFIG)
+    fit_specs = {
+        "probe/background/classical/lr-raw/pool-A/view-0/policy/split-0/seed-42": {
+            "kind": "classical",
+            "estimator": "lr",
+            "features": "raw",
+            "pool": "A",
+            "view": 0,
+            "policy": "policy",
+            "split": 0,
+            "seed": 42,
+            "selected_parameters": {"C": 1.0},
+        },
+        "probe/background/mobilenet/pool-A/view-0/policy/split-0/seed-42": {
+            "kind": "cnn",
+            "system": "mobilenet_v2_direct",
+            "model": "mobilenetv2_100.ra_in1k",
+            "pool": "A",
+            "view": 0,
+            "policy": "policy",
+            "split": 0,
+            "seed": 42,
+            "selected_learning_rate": benchmark.recipe.learning_rate,
+        },
+        "probe/border/pad-fraction/pool-A/view-0/policy/split-0/seed-42": {
+            "kind": "cue",
+            "cue": "pad-fraction",
+            "pool": "A",
+            "view": 0,
+            "policy": "policy",
+            "split": 0,
+            "seed": 42,
+        },
+    }
+    record = {"issue": 139, "selection": {"model_specs": fit_specs}}
+    digest = hashlib.sha256(
+        (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+    selection_path = tmp_path / "selection.json"
+    selection_path.write_text(
+        json.dumps(
+            {
+                "format": "jute-evaluation-selection-v1",
+                "record": record,
+                "sha256": digest,
+            }
+        ),
+        encoding="utf-8",
+    )
+    workspace = open_workspace(
+        benchmark_path=BENCHMARK_CONFIG,
+        data=DataInputs(
+            image_root=tmp_path,
+            target_dir=tmp_path / "target",
+            sources={},
+            policy_dir=tmp_path / "policies",
+        ),
+        runs_dir=tmp_path / "runs",
+        cache_dir=tmp_path / "cache",
+        pretrained=False,
+        require_cuda=False,
+        evaluation_selection_path=selection_path,
+    )
+
+    evaluation_fits = workspace.evaluation_fits
+    assert {fit.fit_id for fit in evaluation_fits} == set(fit_specs)
+    assert (
+        next(
+            fit
+            for fit in evaluation_fits
+            if fit.fit_id.endswith("seed-42") and fit.kind is FitKind.CLASSICAL
+        ).phase
+        == "probe"
+    )
+    assert any(fit.kind is FitKind.TARGET for fit in evaluation_fits)
+    cue = next(fit for fit in evaluation_fits if fit.estimator == "cue")
+    assert cue.features == "metadata"
+
+    plan = build_plan(benchmark, evaluation_fits)
+    assert plan[-1].name == "evaluation-probes"
+    assert {fit.fit_id for fit in plan[-1].fits} == set(fit_specs)
 
 
 @pytest.mark.parametrize(

@@ -35,6 +35,7 @@ _LAZY_EXPORTS = {
     "write_fixture_run_record": (".gated", "write_fixture_run_record"),
     "write_gated_run_record": (".gated", "write_run_record"),
     "write_matrix_freeze": (".gated", "write_matrix_freeze"),
+    "write_training_model_index": (".gated", "write_training_model_index"),
     "class_scene_cells": (".breakdowns", "class_scene_cells"),
     "scene_summaries": (".breakdowns", "scene_summaries"),
     "stratified_sample": (".breakdowns", "stratified_sample"),
@@ -121,5 +122,6 @@ __all__ = [
     "verify_freeze_record",
     "write_freeze_record",
     "write_run_record",
+    "write_training_model_index",
     "write_gated_run_record",
 ]

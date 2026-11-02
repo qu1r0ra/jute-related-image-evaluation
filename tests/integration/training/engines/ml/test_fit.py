@@ -15,6 +15,7 @@ from jute_disease.training import (
     FitSpec,
     Recipe,
     fit_classical,
+    fit_cue,
     load_benchmark,
     prepare_features,
 )
@@ -175,6 +176,42 @@ def test_classical_fits_never_open_the_test_partition(
         _fit("gnb", "raw"), recipe, data, tmp_path / "fit", tmp_path / "cache"
     )
     assert "test" not in opened
+
+
+def test_cue_probe_uses_only_train_and_validation_rows(
+    recipe: Recipe, data: DataInputs, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jute_disease.data import Manifest, ManifestEntry
+
+    opened: list[str] = []
+    original = Manifest.partition
+
+    def track_partition(self, name: str) -> tuple[ManifestEntry, ...]:
+        opened.append(name)
+        return original(self, name)
+
+    monkeypatch.setattr(Manifest, "partition", track_partition)
+    fit = FitSpec(
+        "probe/border/pad-fraction/pool-A/view-0/policy/split-0/seed-42",
+        FitKind.CLASSICAL,
+        42,
+        estimator="cue",
+        features="metadata",
+        pool="",
+        phase="probe",
+    )
+
+    result = fit_cue(
+        fit,
+        recipe,
+        data,
+        tmp_path / "fit",
+        cue="pad-fraction",
+    )
+
+    assert result.artifacts["model"].is_file()
+    assert result.results["test_accessed"] is False
+    assert set(opened) == {"train", "val"}
 
 
 def test_features_must_match_a_declared_extractor(

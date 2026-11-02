@@ -13,6 +13,7 @@ is a dependency of every cache.
 import hashlib
 import json
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -93,41 +94,109 @@ class ImagePipeline:
     """Per-dataset torchvision pipeline with independent worker random state."""
 
     def __init__(
-        self, size: int, is_train: bool, is_dl: bool, seed: int, include_mask: bool
+        self,
+        size: int,
+        is_train: bool,
+        is_dl: bool,
+        seed: int,
+        include_mask: bool,
+        *,
+        resize: str = "letterbox",
+        training_view: str = "raw-training",
+        mask_checkpoint: Path | None = None,
+        fixture_masks: bool = False,
+        border_frame_width_px: int = 0,
     ) -> None:
+        if resize not in {"letterbox", "resize-center-crop"}:
+            raise ValueError("resize must be letterbox or resize-center-crop")
+        if training_view not in {"raw-training", "background-only", "border-frame"}:
+            raise ValueError(f"unsupported training view {training_view!r}")
+        if training_view == "background-only" and not (
+            mask_checkpoint is not None or fixture_masks
+        ):
+            raise ValueError(
+                "background-only training requires a local mask checkpoint"
+            )
+        if training_view == "border-frame" and not (
+            1 <= border_frame_width_px < size / 2
+        ):
+            raise ValueError(
+                "border-frame width must be positive and smaller than half the image"
+            )
         self.size = size
         self.is_train = is_train
         self.is_dl = is_dl
         self.include_mask = include_mask
+        self.resize = resize
+        self.training_view = training_view
+        self.mask_checkpoint = mask_checkpoint
+        self.fixture_masks = fixture_masks
+        self.border_frame_width_px = border_frame_width_px
         self.seed = seed
         self.deterministic = not is_train
-        self.description = f"letterbox={size};train={is_train};dl={is_dl}"
+        self.description = (
+            f"resize={resize};size={size};view={training_view};"
+            f"frame={border_frame_width_px};train={is_train};dl={is_dl}"
+        )
         self._states: dict[int, torch.Tensor] = {}
+        self._mask_backend: Any = None
+        self._mask_cache: dict[str, np.ndarray] = {}
 
     def __call__(
         self, img: Image | np.ndarray
     ) -> torch.Tensor | np.ndarray | ImageWithMask:
         image = PILImage.fromarray(np.asarray(img)).convert("RGB")
+        if self.training_view == "background-only":
+            pixels = np.asarray(image)
+            key = hashlib.sha256(pixels.tobytes()).hexdigest()
+            mask = self._mask_cache.get(key)
+            if mask is None:
+                if self._mask_backend is None:
+                    from jute_disease.data.masks import (
+                        ColorThresholdBackend,
+                        Sam2Refiner,
+                    )
+
+                    self._mask_backend = (
+                        ColorThresholdBackend()
+                        if self.fixture_masks
+                        else Sam2Refiner(self.mask_checkpoint)
+                    )
+                mask = np.asarray(self._mask_backend.predict(image).mask, dtype=bool)
+                if mask.shape != pixels.shape[:2]:
+                    raise ValueError("leaf mask shape differs from training image")
+                if len(self._mask_cache) >= 256:
+                    self._mask_cache.pop(next(iter(self._mask_cache)))
+                self._mask_cache[key] = mask
+            mean = np.asarray(
+                [round(value * 255) for value in IMAGENET_MEAN], dtype=np.uint8
+            )
+            image = PILImage.fromarray(np.where(mask[..., None], mean, pixels))
         width, height = image.size
-        width, height = letterbox_dimensions(width, height, self.size)
-        image = F.resize(
-            image, [height, width], interpolation=InterpolationMode.BILINEAR
-        )
-        horizontal, vertical = self.size - width, self.size - height
-        image = F.pad(
-            image,
-            [
-                horizontal // 2,
-                vertical // 2,
-                horizontal - horizontal // 2,
-                vertical - vertical // 2,
-            ],
-            fill=tuple(round(value * 255) for value in IMAGENET_MEAN),
-        )
-        left, top = horizontal // 2, vertical // 2
-        valid_mask = np.zeros((self.size, self.size), dtype=bool)
-        valid_mask[top : top + height, left : left + width] = True
-        if self.is_train:
+        if self.resize == "letterbox":
+            width, height = letterbox_dimensions(width, height, self.size)
+            image = F.resize(
+                image, [height, width], interpolation=InterpolationMode.BILINEAR
+            )
+            horizontal, vertical = self.size - width, self.size - height
+            image = F.pad(
+                image,
+                [
+                    horizontal // 2,
+                    vertical // 2,
+                    horizontal - horizontal // 2,
+                    vertical - vertical // 2,
+                ],
+                fill=tuple(round(value * 255) for value in IMAGENET_MEAN),
+            )
+            left, top = horizontal // 2, vertical // 2
+            valid_mask = np.zeros((self.size, self.size), dtype=bool)
+            valid_mask[top : top + height, left : left + width] = True
+        else:
+            image = F.resize(image, self.size, interpolation=InterpolationMode.BILINEAR)
+            image = F.center_crop(image, [self.size, self.size])
+            valid_mask = np.ones((self.size, self.size), dtype=bool)
+        if self.is_train and self.training_view != "border-frame":
             worker = torch.utils.data.get_worker_info()
             worker_seed = worker.seed if worker else self.seed
             with torch.random.fork_rng(devices=[]):
@@ -137,6 +206,22 @@ class ImagePipeline:
                     torch.manual_seed(worker_seed)
                 image = self.augmentation(image)
                 self._states[worker_seed] = torch.get_rng_state()
+        if self.training_view == "border-frame":
+            pixels = np.asarray(image)
+            width = self.border_frame_width_px
+            frame = np.zeros((self.size, self.size), dtype=bool)
+            valid_y, valid_x = np.where(valid_mask)
+            top, bottom = int(valid_y.min()), int(valid_y.max()) + 1
+            left, right = int(valid_x.min()), int(valid_x.max()) + 1
+            frame[top : top + width, left:right] = True
+            frame[bottom - width : bottom, left:right] = True
+            frame[top:bottom, left : left + width] = True
+            frame[top:bottom, right - width : right] = True
+            frame &= valid_mask
+            mean = np.asarray(
+                [round(value * 255) for value in IMAGENET_MEAN], dtype=np.uint8
+            )
+            image = PILImage.fromarray(np.where(frame[..., None], pixels, mean))
         if not self.is_dl:
             pixels = np.asarray(image)
             return ImageWithMask(pixels, valid_mask) if self.include_mask else pixels
@@ -160,15 +245,48 @@ def create_pipeline(
     is_dl: bool = True,
     seed: int = DEFAULT_SEED,
     include_mask: bool = False,
+    *,
+    resize: str = "letterbox",
+    training_view: str = "raw-training",
+    mask_checkpoint: Path | None = None,
+    fixture_masks: bool = False,
+    border_frame_width_px: int = 0,
 ) -> ImagePipeline:
     """Build the fixed ADR 0002 preprocessing and optional training augmentation."""
     if size < 1:
         raise ValueError("Image size must be positive")
-    return ImagePipeline(size, is_train, is_dl, seed, include_mask)
+    return ImagePipeline(
+        size,
+        is_train,
+        is_dl,
+        seed,
+        include_mask,
+        resize=resize,
+        training_view=training_view,
+        mask_checkpoint=mask_checkpoint,
+        fixture_masks=fixture_masks,
+        border_frame_width_px=border_frame_width_px,
+    )
 
 
 def classical_pipeline(
-    size: int = IMAGE_SIZE, *, include_mask: bool = False
+    size: int = IMAGE_SIZE,
+    *,
+    include_mask: bool = False,
+    resize: str = "letterbox",
+    training_view: str = "raw-training",
+    mask_checkpoint: Path | None = None,
+    fixture_masks: bool = False,
+    border_frame_width_px: int = 0,
 ) -> ImagePipeline:
     """Return deterministic letterboxed RGB arrays for classical features."""
-    return create_pipeline(size, is_dl=False, include_mask=include_mask)
+    return create_pipeline(
+        size,
+        is_dl=False,
+        include_mask=include_mask,
+        resize=resize,
+        training_view=training_view,
+        mask_checkpoint=mask_checkpoint,
+        fixture_masks=fixture_masks,
+        border_frame_width_px=border_frame_width_px,
+    )

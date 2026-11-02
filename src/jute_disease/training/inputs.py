@@ -25,6 +25,8 @@ class DataInputs:
     sources: Mapping[str, tuple[Path, Path]]
     policy_dir: Path | None = None
     pool_roots: Mapping[str, Path] | None = None
+    mask_checkpoint: Path | None = None
+    fixture_masks: bool = False
 
     def target_root(self, pool: str) -> Path:
         """Resolve the image root for a policy pool, falling back to the target root."""

@@ -120,7 +120,9 @@ def _receipt_choice_matches(
         return isinstance(recipe, dict) and recipe.get(
             "learning_rate"
         ) == model_spec.get("selected_learning_rate")
-    return model_spec.get("kind") == "cue"
+    return model_spec.get("kind") == "cue" and results.get("cue") == model_spec.get(
+        "cue"
+    )
 
 
 def _pipeline_code_tree_sha256(root: Path | None = None) -> str:
@@ -755,7 +757,7 @@ def write_matrix_freeze(
     validation_hyperparameters_sha256 = _digest(hyperparameters)
     for fit_id, model_spec in plan["model_specs"].items():
         model_spec["preprocessing"] = preprocessing
-        model_spec["fit_manifest_digest"] = full_manifest_digest
+        model_spec["fit_manifest_digest"] = manifest.digest()
         if policy_dir is not None and all(
             key in model_spec for key in ("pool", "view", "policy", "split")
         ):
@@ -859,6 +861,59 @@ def write_fixture_run_record(
     }
     output = Path(output_path)
     return output, _write_immutable(output, RUN_FORMAT, record)
+
+
+def write_training_model_index(
+    selection_path: Path | str,
+    training_run_root: Path | str,
+    output_path: Path | str,
+) -> tuple[Path, str]:
+    """Build the evaluator artifact index from completed queue receipts."""
+    selection = _read_selection(Path(selection_path))
+    selection_body = selection["selection"]
+    expected = set(selection_body["planned_fit_ids"])
+    extra = set(selection_body["analysis_ids"]) - expected
+    if extra != {"gradcam/test-pass"}:
+        raise GatedEvaluationError("selection has unsupported non-fit analyses")
+    run_root = Path(training_run_root).expanduser().resolve()
+    store = RunStore(run_root)
+    models: dict[str, dict[str, Any]] = {}
+    for fit_id in sorted(expected):
+        receipt = store.receipt(fit_id, missing_ok=True)
+        if receipt is None or store.state(fit_id) is not RunState.COMPLETED:
+            raise GatedEvaluationError(
+                f"completed run receipt is required for {fit_id}"
+            )
+        spec = selection_body["model_specs"][fit_id]
+        artifact_name = "checkpoint" if spec["kind"] == "cnn" else "model"
+        artifact = receipt.get("artifacts", {}).get(artifact_name)
+        if not isinstance(artifact, dict) or not isinstance(artifact.get("path"), str):
+            raise GatedEvaluationError(f"model artifact is missing for {fit_id}")
+        artifact_path = Path(artifact["path"])
+        if not artifact_path.is_absolute():
+            artifact_path = store.run_dir(fit_id) / artifact_path
+        artifact_path = artifact_path.resolve()
+        try:
+            observed = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+        except OSError as error:
+            raise GatedEvaluationError(
+                f"model artifact is missing for {fit_id}"
+            ) from error
+        if observed != artifact.get("sha256"):
+            raise GatedEvaluationError(f"model artifact changed for {fit_id}")
+        models[fit_id] = {
+            "fit_spec": spec,
+            "path": str(artifact_path),
+            "sha256": observed,
+        }
+    payload = {
+        "run_root": str(run_root),
+        "models": models,
+        "analyses": {},
+    }
+    output = Path(output_path)
+    _write_json_atomic(output, payload)
+    return output, hashlib.sha256(output.read_bytes()).hexdigest()
 
 
 def _runtime_observations_valid(runtime: Any, precision: str) -> bool:
@@ -1024,8 +1079,8 @@ def _verified_training_receipt(
         or not isinstance(identity_inputs.get("recipe"), dict)
         or identity_inputs.get("recipe") != recipe
         or not isinstance(input_manifests, dict)
-        or input_manifests.get("target")
-        != model_spec.get("fit_manifest_digest", selection.get("manifest_digest"))
+        or input_manifests.get("target") != selection.get("manifest_digest")
+        or input_manifests.get("fit") != model_spec.get("fit_manifest_digest")
         or not input_manifests
         or any(not _is_sha256(value) for value in input_manifests.values())
         or identity_inputs.get("config_sha256") != selection["benchmark_sha256"]
@@ -1072,6 +1127,11 @@ def _verified_training_receipt(
         or run_options.get("pretrained") is not True
         or run_options.get("require_cuda") is not True
         or run_options.get("accelerator") != "cuda"
+        or run_options.get("fixture_masks") is not False
+        or (
+            model_spec.get("training_view") == "background-only"
+            and not _is_sha256(run_options.get("mask_checkpoint_sha256"))
+        )
         or not isinstance(input_environment, dict)
         or any(
             input_environment.get(key) != run_options.get(key) for key in run_options

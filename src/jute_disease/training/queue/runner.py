@@ -328,6 +328,7 @@ class _Queue:
         execute: Executor,
         identity_for: IdentityFor,
         report_path: Path,
+        evaluation_fits: tuple[FitSpec, ...] = (),
     ) -> None:
         self.benchmark = benchmark
         self.store = store
@@ -335,7 +336,7 @@ class _Queue:
         self.execute = execute
         self.identity_for = identity_for
         self.report_path = report_path
-        self.plan: tuple[Stage, ...] = build_plan(benchmark)
+        self.plan: tuple[Stage, ...] = build_plan(benchmark, evaluation_fits)
         self.report = QueueReport()
         self.unavailable_stages: set[str] = set()
         self.report.planned_fits = [
@@ -506,6 +507,7 @@ def run_queue(
     execute: Executor,
     identity_for: IdentityFor,
     report_path: Path | str,
+    evaluation_fits: tuple[FitSpec, ...] = (),
 ) -> QueueReport:
     """Run the whole benchmark serially and resumably.
 
@@ -520,5 +522,13 @@ def run_queue(
         ValueError: ``identity_for`` found inputs that no longer match their
             frozen record; nothing more is run.
     """
-    queue = _Queue(benchmark, store, clock, execute, identity_for, Path(report_path))
+    queue = _Queue(
+        benchmark,
+        store,
+        clock,
+        execute,
+        identity_for,
+        Path(report_path),
+        evaluation_fits,
+    )
     return queue.run()

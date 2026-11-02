@@ -73,6 +73,7 @@ _ENGINE_EXPORTS = {
     "training_callbacks": "jute_disease.training.engines.dl.fit",
     "ProgressRecord": "jute_disease.training.engines.dl.fit",
     "fit_classical": "jute_disease.training.engines.ml.fit",
+    "fit_cue": "jute_disease.training.engines.ml.fit",
     "prepare_features": "jute_disease.training.engines.ml.fit",
 }
 
@@ -116,6 +117,7 @@ __all__ = [
     "build_plan",
     "run_queue",
     "fit_classical",
+    "fit_cue",
     "fit_cnn",
     "tune_cnn",
     "prepare_features",

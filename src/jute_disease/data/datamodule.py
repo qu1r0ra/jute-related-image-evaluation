@@ -57,6 +57,11 @@ class DataModule(LightningDataModule):
         k_fold: int = 1,
         fold_index: int = 0,
         image_size: int = IMAGE_SIZE,
+        resize: str = "letterbox",
+        training_view: str = "raw-training",
+        mask_checkpoint: Path | str | None = None,
+        fixture_masks: bool = False,
+        border_frame_width_px: int = 0,
     ) -> None:
         super().__init__()
         if (
@@ -83,6 +88,13 @@ class DataModule(LightningDataModule):
             None if target_manifest_dir is None else Path(target_manifest_dir)
         )
         self.cache_root = None if cache_root is None else Path(cache_root)
+        self.resize = resize
+        self.training_view = training_view
+        self.mask_checkpoint = (
+            None if mask_checkpoint is None else Path(mask_checkpoint)
+        )
+        self.fixture_masks = fixture_masks
+        self.border_frame_width_px = border_frame_width_px
 
         self.jute_train: Dataset | None = None
         self.jute_val: Dataset | None = None
@@ -99,12 +111,28 @@ class DataModule(LightningDataModule):
 
     def _train_transform(self) -> Callable:
         return create_pipeline(
-            self.hparams.image_size, True, True, seed=self.hparams.seed
+            self.hparams.image_size,
+            True,
+            True,
+            seed=self.hparams.seed,
+            resize=self.resize,
+            training_view=self.training_view,
+            mask_checkpoint=self.mask_checkpoint,
+            fixture_masks=self.fixture_masks,
+            border_frame_width_px=self.border_frame_width_px,
         )
 
     def _eval_transform(self) -> Callable:
         return create_pipeline(
-            self.hparams.image_size, False, True, seed=self.hparams.seed
+            self.hparams.image_size,
+            False,
+            True,
+            seed=self.hparams.seed,
+            resize=self.resize,
+            training_view=self.training_view,
+            mask_checkpoint=self.mask_checkpoint,
+            fixture_masks=self.fixture_masks,
+            border_frame_width_px=self.border_frame_width_px,
         )
 
     @property
@@ -117,7 +145,7 @@ class DataModule(LightningDataModule):
 
     @property
     def preprocessing(self) -> PreprocessingSpec:
-        return PreprocessingSpec(size=self.hparams.image_size)
+        return PreprocessingSpec(size=self.hparams.image_size, resize=self.resize)
 
     def _manifest_dataset(self, partition: str, train: bool) -> ManifestDataset:
         assert self.manifest is not None and self.image_root is not None

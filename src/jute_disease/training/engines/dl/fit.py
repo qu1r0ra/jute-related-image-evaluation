@@ -118,7 +118,12 @@ def training_callbacks(
 
 
 def _data_module(
-    fit: FitSpec, recipe: Recipe, data: DataInputs, pin_memory: bool
+    fit: FitSpec,
+    recipe: Recipe,
+    data: DataInputs,
+    pin_memory: bool,
+    evaluation_fit_spec: dict[str, Any] | None = None,
+    border_frame_width_px: int = 0,
 ) -> tuple[DataModule, dict[str, str]]:
     if fit.kind is FitKind.SOURCE:
         from jute_disease.data import find_source_root
@@ -134,6 +139,11 @@ def _data_module(
             data.target_root(fit.pool) if fit.pool else data.image_root,
             None,
         )
+    preprocessing = (
+        evaluation_fit_spec.get("preprocessing", {})
+        if evaluation_fit_spec is not None
+        else {}
+    )
     module = DataModule(
         manifest_dir=manifest_dir,
         frozen_manifest=frozen_manifest,
@@ -145,6 +155,15 @@ def _data_module(
         num_workers=recipe.num_workers,
         pin_memory=pin_memory,
         image_size=recipe.image_size,
+        resize=preprocessing.get("resize", "letterbox"),
+        training_view=(
+            evaluation_fit_spec.get("training_view", "raw-training")
+            if evaluation_fit_spec is not None
+            else "raw-training"
+        ),
+        mask_checkpoint=data.mask_checkpoint,
+        fixture_masks=data.fixture_masks,
+        border_frame_width_px=border_frame_width_px,
         cache_root=None,
     )
     module.setup("fit")
@@ -198,6 +217,8 @@ def fit_cnn(
     limit_val_batches: int | None = None,
     checkpoint_dir: Path | str | None = None,
     resume_from: Path | str | None = None,
+    evaluation_fit_spec: dict[str, Any] | None = None,
+    border_frame_width_px: int = 0,
 ) -> FitResult:
     """Train one source or target CNN stage and describe exactly what happened.
 
@@ -237,7 +258,14 @@ def fit_cnn(
     seed_everything(fit.seed)
 
     cuda = _uses_cuda(accelerator)
-    module, manifests = _data_module(fit, recipe, data, cuda)
+    module, manifests = _data_module(
+        fit,
+        recipe,
+        data,
+        cuda,
+        evaluation_fit_spec,
+        border_frame_width_px,
+    )
     backbone = TimmBackbone(
         fit.model,
         pretrained=pretrained and upstream_checkpoint is None,

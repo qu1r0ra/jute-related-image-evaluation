@@ -62,12 +62,25 @@ def _matrix(
     cache_dir: Path,
     require_cache: bool = False,
     pool: str = "",
+    training_view: str = "raw-training",
+    resize: str = "letterbox",
+    mask_checkpoint: Path | None = None,
+    fixture_masks: bool = False,
+    border_frame_width_px: int = 0,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     dataset = ManifestDataset(
         manifest,
         partition,
         data.target_root(pool) if pool else data.image_root,
-        transform=classical_pipeline(recipe.image_size, include_mask=True),
+        transform=classical_pipeline(
+            recipe.image_size,
+            include_mask=True,
+            resize=resize,
+            training_view=training_view,
+            mask_checkpoint=mask_checkpoint,
+            fixture_masks=fixture_masks,
+            border_frame_width_px=border_frame_width_px,
+        ),
     )
     extractor = _extractor(features, recipe)
     x, y = extract_features(
@@ -128,6 +141,11 @@ def fit_classical(
     *,
     require_cache: bool = False,
     selected_parameters: dict[str, object] | None = None,
+    training_view: str = "raw-training",
+    resize: str = "letterbox",
+    mask_checkpoint: Path | None = None,
+    fixture_masks: bool = False,
+    border_frame_width_px: int = 0,
 ) -> FitResult:
     """Fit one estimator on one feature set and describe exactly what happened.
 
@@ -154,6 +172,11 @@ def fit_classical(
         cache,
         require_cache,
         pool=fit.pool,
+        training_view=training_view,
+        resize=resize,
+        mask_checkpoint=mask_checkpoint,
+        fixture_masks=fixture_masks,
+        border_frame_width_px=border_frame_width_px,
     )
     x_val, y_val, val_info = _matrix(
         manifest,
@@ -164,6 +187,11 @@ def fit_classical(
         cache,
         require_cache,
         pool=fit.pool,
+        training_view=training_view,
+        resize=resize,
+        mask_checkpoint=mask_checkpoint,
+        fixture_masks=fixture_masks,
+        border_frame_width_px=border_frame_width_px,
     )
 
     if fit.phase == "tune":
@@ -242,6 +270,77 @@ def fit_classical(
             ).hexdigest(),
             "fit_seconds": fit_seconds,
             "model": {"path": MODEL_FILE, "sha256": file_sha256(path)},
+            "test_accessed": False,
+        },
+        {"model": path},
+    )
+
+
+def fit_cue(
+    fit: FitSpec,
+    recipe: Recipe,
+    data: DataInputs,
+    attempt_dir: Path | str,
+    *,
+    cue: str,
+) -> FitResult:
+    """Fit a metadata-only border cue from training rows and score validation."""
+    import joblib
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import accuracy_score, f1_score
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    if cue not in {"pad-fraction", "aspect-ratio"}:
+        raise ValueError(f"unsupported metadata cue {cue!r}")
+    manifest = target_manifest_for_fit(fit, recipe, data)
+
+    def matrix(partition: str) -> tuple[np.ndarray, np.ndarray]:
+        entries = manifest.partition(partition)
+        values = [
+            entry.pad_fraction if cue == "pad-fraction" else entry.width / entry.height
+            for entry in entries
+        ]
+        if any(value is None for value in values):
+            raise ValueError(f"{cue} requires recorded image dimensions")
+        labels = {label: index for index, label in enumerate(manifest.labels)}
+        return (
+            np.asarray(values, dtype=np.float64).reshape(-1, 1),
+            np.asarray([labels[entry.label] for entry in entries], dtype=np.int64),
+        )
+
+    x_train, y_train = matrix("train")
+    x_val, y_val = matrix("val")
+    model = make_pipeline(
+        StandardScaler(),
+        LogisticRegression(
+            class_weight="balanced", max_iter=1000, random_state=fit.seed
+        ),
+    )
+    model.fit(x_train, y_train)
+    predicted = model.predict(x_val)
+    attempt = Path(attempt_dir)
+    attempt.mkdir(parents=True, exist_ok=True)
+    path = attempt / MODEL_FILE
+    joblib.dump(model, path)
+    return FitResult(
+        {
+            "fit": fit.fit_id,
+            "cue": cue,
+            "seed": fit.seed,
+            "pool": fit.pool,
+            "view": fit.view,
+            "policy": fit.policy,
+            "split": fit.split,
+            "manifest": manifest.digest(),
+            "rows": {"train": int(len(y_train)), "val": int(len(y_val))},
+            "metrics": {
+                "val_accuracy": float(accuracy_score(y_val, predicted)),
+                "val_macro_f1": float(
+                    f1_score(y_val, predicted, average="macro", zero_division=0)
+                ),
+            },
+            "selected_parameters": None,
             "test_accessed": False,
         },
         {"model": path},

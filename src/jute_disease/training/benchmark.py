@@ -97,7 +97,7 @@ class Benchmark:
 
     def tuning_dependency(self, fit: FitSpec) -> str | None:
         """The tuning fit whose frozen selection a final ``fit`` reuses."""
-        if fit.phase == "tune" or fit.kind is FitKind.PREPARE:
+        if fit.phase in {"tune", "probe"} or fit.kind is FitKind.PREPARE:
             return None
         if fit.kind is FitKind.CLASSICAL:
             return f"classical/tune/{fit.pool}/{fit.estimator}-{fit.features}"

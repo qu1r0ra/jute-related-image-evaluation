@@ -2,7 +2,7 @@
 
 from jute_disease.training.engines.ml.predict import predict_ml
 
-_FIT_EXPORTS = {"fit_classical", "prepare_features"}
+_FIT_EXPORTS = {"fit_classical", "fit_cue", "prepare_features"}
 
 
 def __getattr__(name: str) -> object:

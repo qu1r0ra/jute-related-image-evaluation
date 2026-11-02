@@ -170,6 +170,12 @@ class Workspace:
                     key: str(value)
                     for key, value in (self.data.pool_roots or {}).items()
                 },
+                "mask_checkpoint": (
+                    None
+                    if self.data.mask_checkpoint is None
+                    else str(self.data.mask_checkpoint)
+                ),
+                "fixture_masks": self.data.fixture_masks,
                 "sources": sources,
                 "runs_dir": str(self.runs_dir),
                 "cache_dir": str(self.cache_dir),
@@ -180,6 +186,58 @@ class Workspace:
                 "evaluation_selection_sha256": self.evaluation_selection_sha256,
             },
         )
+
+    @property
+    def evaluation_fits(self) -> tuple[FitSpec, ...]:
+        """Executable #139 probe fits not already declared by the benchmark."""
+        declared = {fit.fit_id for fit in self.benchmark.fits()}
+        fits: list[FitSpec] = []
+        for fit_id, spec in self.evaluation_fit_specs.items():
+            if fit_id in declared:
+                continue
+            kind_name = spec.get("kind")
+            if kind_name == "cnn":
+                kind = FitKind.TARGET
+                system = spec.get("system")
+                definition = self.benchmark.systems.get(system)
+                if not isinstance(definition, dict):
+                    raise ValueError(f"{fit_id} names an unknown CNN system")
+                model = spec.get("model")
+                if model != definition.get("model"):
+                    raise ValueError(f"{fit_id} model differs from its CNN system")
+                micro_batch = definition["micro_batch"]
+                accumulation = self.benchmark.recipe.effective_batch // micro_batch
+            elif kind_name in {"classical", "cue"}:
+                kind = FitKind.CLASSICAL
+                system = ""
+                model = ""
+                micro_batch = 0
+                accumulation = 1
+            else:
+                raise ValueError(f"{fit_id} has an unsupported evaluation fit kind")
+            fits.append(
+                FitSpec(
+                    fit_id=fit_id,
+                    kind=kind,
+                    seed=spec["seed"],
+                    system=system,
+                    model=model,
+                    micro_batch=micro_batch,
+                    accumulation=accumulation,
+                    estimator=spec.get(
+                        "estimator", "cue" if kind_name == "cue" else ""
+                    ),
+                    features=spec.get(
+                        "features", "metadata" if kind_name == "cue" else ""
+                    ),
+                    pool=spec["pool"],
+                    view=spec.get("view", 0),
+                    policy=spec["policy"],
+                    split=spec["split"],
+                    phase="probe",
+                )
+            )
+        return tuple(fits)
 
     @classmethod
     def load(cls, path: Path | str) -> Workspace:
@@ -199,6 +257,12 @@ class Workspace:
                 pool_roots={
                     key: Path(value) for key, value in raw.get("pool_roots", {}).items()
                 },
+                mask_checkpoint=(
+                    None
+                    if raw.get("mask_checkpoint") is None
+                    else Path(raw["mask_checkpoint"])
+                ),
+                fixture_masks=raw.get("fixture_masks", False),
             ),
             runs_dir=Path(raw["runs_dir"]),
             cache_dir=Path(raw["cache_dir"]),
@@ -263,6 +327,12 @@ def open_workspace(
                 key: Path(root).resolve()
                 for key, root in (data.pool_roots or {}).items()
             },
+            mask_checkpoint=(
+                None
+                if data.mask_checkpoint is None
+                else Path(data.mask_checkpoint).expanduser().resolve()
+            ),
+            fixture_masks=data.fixture_masks,
         ),
         runs_dir=runs,
         cache_dir=cache,
@@ -343,7 +413,22 @@ def find_fit(workspace: Workspace, fit_id: str) -> FitSpec:
     for fit in workspace.benchmark.fits():
         if fit.fit_id == fit_id:
             return fit
+    for fit in workspace.evaluation_fits:
+        if fit.fit_id == fit_id:
+            return fit
     raise KeyError(f"No declared fit {fit_id!r}")
+
+
+def _training_fit_spec(
+    evaluation_fit_spec: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Translate the final model's raw test view to its raw training view."""
+    if (
+        evaluation_fit_spec is not None
+        and evaluation_fit_spec.get("training_view") == "raw-test"
+    ):
+        return evaluation_fit_spec | {"training_view": "raw-training"}
+    return evaluation_fit_spec
 
 
 def run_job(workspace: Workspace, job: Job) -> None:
@@ -354,11 +439,17 @@ def run_job(workspace: Workspace, job: Job) -> None:
         ValueError: the fit is chained but the job has no upstream checkpoint.
     """
     from jute_disease.training.engines.dl import fit_cnn, tune_cnn
-    from jute_disease.training.engines.ml import fit_classical, prepare_features
+    from jute_disease.training.engines.ml import (
+        fit_classical,
+        fit_cue,
+        prepare_features,
+    )
 
     fit = find_fit(workspace, job.fit_id)
     recipe = workspace.benchmark.recipe
     data = workspace.data
+    evaluation_fit_spec = workspace.evaluation_fit_specs.get(job.fit_id)
+    training_fit_spec = _training_fit_spec(evaluation_fit_spec)
     stack = verify_stack(
         require_cuda=workspace.require_cuda,
         precision=workspace.benchmark.recipe.precision,
@@ -368,23 +459,54 @@ def run_job(workspace: Workspace, job: Job) -> None:
     if fit.kind is FitKind.PREPARE:
         result = prepare_features(fit, recipe, data, workspace.cache_dir)
     elif fit.kind is FitKind.CLASSICAL:
-        store = RunStore(workspace.runs_dir)
-        prepare = find_fit(workspace, "classical/prepare")
-        if (
-            store.resolve(prepare.fit_id, make_identity(workspace, store)(prepare))
-            is not Resume.SKIP
-        ):
-            raise ValueError("Prepared feature cache has no valid compatible receipt")
-        selected_parameters = tuning_selection(workspace, store, fit)
-        result = fit_classical(
-            fit,
-            recipe,
-            data,
-            job.attempt_dir,
-            workspace.cache_dir,
-            require_cache=data.policy_dir is None and fit.phase != "tune",
-            selected_parameters=selected_parameters,
-        )
+        if evaluation_fit_spec is not None and evaluation_fit_spec.get("kind") == "cue":
+            result = fit_cue(
+                fit,
+                recipe,
+                data,
+                job.attempt_dir,
+                cue=evaluation_fit_spec["cue"],
+            )
+        else:
+            store = RunStore(workspace.runs_dir)
+            prepare = find_fit(workspace, "classical/prepare")
+            if (
+                fit.phase != "probe"
+                and store.resolve(prepare.fit_id, make_identity(workspace, store))
+                is not Resume.SKIP
+            ):
+                raise ValueError(
+                    "Prepared feature cache has no valid compatible receipt"
+                )
+            selected_parameters = tuning_selection(workspace, store, fit)
+            preprocessing = (
+                evaluation_fit_spec.get("preprocessing", {})
+                if evaluation_fit_spec is not None
+                else {}
+            )
+            result = fit_classical(
+                fit,
+                recipe,
+                data,
+                job.attempt_dir,
+                workspace.cache_dir,
+                require_cache=(
+                    data.policy_dir is None and fit.phase not in {"tune", "probe"}
+                ),
+                selected_parameters=selected_parameters,
+                training_view=(
+                    training_fit_spec.get("training_view", "raw-training")
+                    if training_fit_spec is not None
+                    else "raw-training"
+                ),
+                resize=preprocessing.get("resize", "letterbox"),
+                border_frame_width_px=(
+                    evaluation_fit_spec.get("border_frame_width_px", 0)
+                    if evaluation_fit_spec is not None
+                    else 0
+                ),
+                fixture_masks=data.fixture_masks,
+            )
     else:
         bounded: dict[str, Any] = {}
         if job.bounds is not None:
@@ -422,10 +544,15 @@ def run_job(workspace: Workspace, job: Job) -> None:
                 accelerator=workspace.accelerator,
                 checkpoint_dir=job.checkpoint_dir,
                 resume_from=job.resume_from,
+                evaluation_fit_spec=training_fit_spec,
+                border_frame_width_px=(
+                    evaluation_fit_spec.get("border_frame_width_px", 0)
+                    if evaluation_fit_spec is not None
+                    else 0
+                ),
                 **bounded,
             )
     result_values = dict(result.results)
-    evaluation_fit_spec = workspace.evaluation_fit_specs.get(job.fit_id)
     if evaluation_fit_spec is not None:
         result_values["evaluation_fit_spec"] = evaluation_fit_spec
     write_json_atomic(
@@ -511,6 +638,7 @@ def _manifest_digests(
         "target": dict(target.dependencies).get(
             EVALUATOR_TEST_SOURCE_DIGEST, target.digest()
         ),
+        "fit": target.digest(),
         "target_content": verifier.verify(
             target,
             workspace.data.target_root(fit.pool)
@@ -679,7 +807,16 @@ def _receipt_context(
         raise FileNotFoundError("the locked environment file uv.lock is missing")
     provenance = _git_provenance()
     assignments = load_assignment_table(workspace)
-    preprocessing = PreprocessingSpec(size=workspace.benchmark.recipe.image_size)
+    evaluation_fit_spec = workspace.evaluation_fit_specs.get(fit.fit_id)
+    selected_preprocessing = (
+        evaluation_fit_spec.get("preprocessing", {})
+        if evaluation_fit_spec is not None
+        else {}
+    )
+    preprocessing = PreprocessingSpec(
+        size=workspace.benchmark.recipe.image_size,
+        resize=selected_preprocessing.get("resize", "letterbox"),
+    )
     preprocessing_payload = asdict(preprocessing)
     ancestry = _source_checkpoint_ancestry(store, fit)
     context = {
@@ -709,11 +846,32 @@ def _receipt_context(
             "pretrained": workspace.pretrained,
             "accelerator": workspace.accelerator,
             "require_cuda": workspace.require_cuda,
+            "mask_checkpoint_sha256": _mask_checkpoint_digest(
+                workspace.data.mask_checkpoint
+            ),
+            "fixture_masks": workspace.data.fixture_masks,
         },
     }
     if fit.kind is FitKind.PREPARE:
         context["run_options"]["cache_dir"] = str(workspace.cache_dir.resolve())
     return context
+
+
+def _mask_checkpoint_digest(checkpoint: Path | None) -> str | None:
+    """Hash local mask model files without loading the optional model stack."""
+    if checkpoint is None:
+        return None
+    root = checkpoint.resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"mask checkpoint directory is missing: {root}")
+    digest = hashlib.sha256()
+    files = sorted(path for path in root.rglob("*") if path.is_file())
+    if not files:
+        raise ValueError("mask checkpoint directory contains no files")
+    for path in files:
+        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+        digest.update(_sha256_file(path).encode("ascii"))
+    return digest.hexdigest()
 
 
 def _identity_inputs(
@@ -813,7 +971,16 @@ def make_executor(
     def execute(fit: FitSpec, timeout: float) -> Outcome:
         from jute_disease.data import ManifestContentVerifier
 
-        if fit.kind is FitKind.CLASSICAL:
+        evaluation_fit_spec = workspace.evaluation_fit_specs.get(fit.fit_id)
+        requires_feature_cache = (
+            fit.kind is FitKind.CLASSICAL
+            and fit.phase != "probe"
+            and not (
+                evaluation_fit_spec is not None
+                and evaluation_fit_spec.get("kind") == "cue"
+            )
+        )
+        if requires_feature_cache:
             prepare = find_fit(workspace, "classical/prepare")
             if store.resolve(prepare.fit_id, identity(prepare)) is not Resume.SKIP:
                 return Outcome(

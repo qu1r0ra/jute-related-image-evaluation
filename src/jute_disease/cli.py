@@ -75,6 +75,7 @@ from jute_disease.evaluation import (
     write_gated_run_record,
     write_matrix_freeze,
     write_run_record,
+    write_training_model_index,
 )
 from jute_disease.reporting import (
     export_manuscript,
@@ -401,6 +402,8 @@ def _workspace_from(args: argparse.Namespace) -> Workspace:
     freeze: Path = args.freeze_dir
     roots = {"plantvillage": args.plantvillage_root, "plantdoc": args.plantdoc_root}
     try:
+        if args.fixture_masks and not args.allow_cpu:
+            raise ValueError("fixture masks require --allow-cpu")
         return open_workspace(
             benchmark_path=args.benchmark,
             data=DataInputs(
@@ -420,6 +423,8 @@ def _workspace_from(args: argparse.Namespace) -> Workspace:
                     )
                     if root is not None
                 },
+                mask_checkpoint=args.mask_checkpoint,
+                fixture_masks=args.fixture_masks,
             ),
             runs_dir=args.runs_dir,
             cache_dir=args.cache_dir,
@@ -461,7 +466,7 @@ def _queue_plan(args: argparse.Namespace) -> None:
                     for fit in stage.fits
                 ],
             }
-            for stage in build_plan(workspace.benchmark)
+            for stage in build_plan(workspace.benchmark, workspace.evaluation_fits)
         ]
     )
 
@@ -475,7 +480,7 @@ def _queue_status(args: argparse.Namespace) -> None:
                 "state": store.state(fit.fit_id).value,
                 "reason": store.reason(fit.fit_id),
             }
-            for fit in workspace.benchmark.fits()
+            for fit in (*workspace.benchmark.fits(), *workspace.evaluation_fits)
         }
     )
 
@@ -506,6 +511,7 @@ def _queue_run(args: argparse.Namespace) -> None:
             execute=make_executor(workspace, store, identity, launcher),
             identity_for=identity,
             report_path=workspace.runs_dir / "queue.json",
+            evaluation_fits=workspace.evaluation_fits,
         )
     except QueueAbortedError as error:
         raise SystemExit(f"{error}; see queue.json") from error
@@ -643,6 +649,16 @@ def _evaluate_run_record(args: argparse.Namespace) -> None:
     _print_json({"run_record": str(path), "sha256": digest})
 
 
+def _evaluate_write_model_index(args: argparse.Namespace) -> None:
+    try:
+        path, digest = write_training_model_index(
+            args.selection, args.runs_dir, args.output
+        )
+    except (OSError, ValueError) as error:
+        raise SystemExit(f"model index blocked: {error}") from error
+    _print_json({"model_index": str(path), "sha256": digest})
+
+
 def _evaluate_gated(args: argparse.Namespace) -> None:
     try:
         path = evaluate_gated_test(
@@ -743,6 +759,16 @@ def _add_workspace_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--plantdoc-root", type=Path, default=PLANTDOC_DIR)
     parser.add_argument("--runs-dir", type=Path, default=RUNS_DIR)
     parser.add_argument("--cache-dir", type=Path, default=ML_FEATURES_DIR)
+    parser.add_argument(
+        "--mask-checkpoint",
+        type=Path,
+        help="Existing local SAM 2 checkpoint required for background-only training.",
+    )
+    parser.add_argument(
+        "--fixture-masks",
+        action="store_true",
+        help="Use the deterministic color mask in CPU-only synthetic runs.",
+    )
     parser.add_argument(
         "--evaluation-selection",
         type=Path,
@@ -1046,6 +1072,15 @@ def build_parser() -> argparse.ArgumentParser:
     run_record.add_argument("--model-index", type=Path, required=True)
     run_record.add_argument("--output", type=Path, required=True)
     run_record.set_defaults(run=_evaluate_run_record)
+
+    model_index = evaluate_actions.add_parser(
+        "write-model-index",
+        help="Build a model-artifact index from completed training receipts.",
+    )
+    model_index.add_argument("--selection", type=Path, required=True)
+    model_index.add_argument("--runs-dir", type=Path, required=True)
+    model_index.add_argument("--output", type=Path, required=True)
+    model_index.set_defaults(run=_evaluate_write_model_index)
 
     gated = evaluate_actions.add_parser(
         "score-test", help="Read the held-out partition through the gated evaluator."

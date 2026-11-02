@@ -17,7 +17,9 @@ class Stage:
     fits: tuple[FitSpec, ...]
 
 
-def build_plan(benchmark: Benchmark) -> tuple[Stage, ...]:
+def build_plan(
+    benchmark: Benchmark, evaluation_fits: tuple[FitSpec, ...] = ()
+) -> tuple[Stage, ...]:
     """Order: core CNN fits, classical fits, then each source chain and its arm."""
     fits = benchmark.fits()
     targets = [fit for fit in fits if fit.kind is FitKind.TARGET]
@@ -38,4 +40,9 @@ def build_plan(benchmark: Benchmark) -> tuple[Stage, ...]:
         source_ids = {fit.fit_id for fit in source_fits}
         arm = [fit for fit in targets if fit.upstream in source_ids]
         stages.append(Stage(stage_name, (*tune, *source_fits, *arm)))
+    if evaluation_fits:
+        known = {fit.fit_id for stage in stages for fit in stage.fits}
+        additional = tuple(fit for fit in evaluation_fits if fit.fit_id not in known)
+        if additional:
+            stages.append(Stage("evaluation-probes", additional))
     return tuple(stages)
