@@ -42,7 +42,7 @@ def _benchmark_json(path: Path, epochs: int = 1) -> Path:
         image_size=64,
         seeds=[42],
         max_epochs=epochs,
-        precision="32-true",
+        precision="bf16-mixed",
         effective_batch=16,
     )
     raw["cnn_systems"] = {
@@ -437,7 +437,13 @@ def test_benchmark_declares_the_fits_the_workspace_runs(workspace: Workspace) ->
         FitKind.SOURCE,
         FitKind.TARGET,
     }
-    assert load_benchmark(workspace.benchmark_path) == workspace.benchmark
+    # Without CUDA the workspace runs with num_workers=0 in memory; the file keeps the declared value.
+    on_disk = load_benchmark(workspace.benchmark_path)
+    workers = workspace.benchmark.recipe.num_workers
+    assert (
+        replace(on_disk, recipe=replace(on_disk.recipe, num_workers=workers))
+        == workspace.benchmark
+    )
 
 
 class _Killed(BaseException):
