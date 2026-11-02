@@ -303,7 +303,15 @@ def test_dirty_or_unbound_runs_block_confirmatory_analysis(
 
 @pytest.mark.parametrize(
     "tamper",
-    ["identity", "metadata", "attempt_number", "state", "runtime", "cpu_profile"],
+    [
+        "identity",
+        "metadata",
+        "attempt_number",
+        "state",
+        "runtime",
+        "attempt_runtime",
+        "cpu_profile",
+    ],
 )
 def test_confirmatory_gate_checks_every_attempt_binding(
     harness: Harness, tamper: str
@@ -329,6 +337,8 @@ def test_confirmatory_gate_checks_every_attempt_binding(
     elif tamper == "runtime":
         receipt["metadata"]["runtime"]["backend"]["tf32_matmul"] = False
         receipt["attempts"][-1]["metadata"]["runtime"]["backend"]["tf32_matmul"] = False
+    elif tamper == "attempt_runtime":
+        first_attempt["metadata"].pop("runtime")
     else:
         receipt["metadata"]["run_options"]["require_cuda"] = False
         for attempt in receipt["attempts"]:
@@ -363,8 +373,12 @@ def test_incompatible_identity_is_rerun_not_reused(harness: Harness) -> None:
     harness.run()
     harness.calls.clear()
     harness.identity_tag = "v2"
-    harness.run()
+    report = harness.run()
     assert len(harness.calls) == 25
+    assert report.confirmatory_ready is True
+    require_confirmatory_completion(
+        load_benchmark(BENCHMARK_CONFIG), harness.store, harness.identity
+    )
 
 
 def test_a_failed_fit_is_retried_once_with_the_same_seed(harness: Harness) -> None:

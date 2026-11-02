@@ -282,7 +282,13 @@ class RunStore:
             run = ActiveRun(
                 self, fit_id, str(payload.get("identity")), int(payload["attempt"])
             )
-            run.fail(RunState.INTERRUPTED, "process ended without a result")
+            runtime = read_json(run.attempt_dir / "runtime.json")
+            metadata = {"runtime": runtime} if isinstance(runtime, dict) else None
+            run.fail(
+                RunState.INTERRUPTED,
+                "process ended without a result",
+                metadata=metadata,
+            )
         return self.state(fit_id)
 
     def _attempts(self, fit_id: str) -> list[int]:

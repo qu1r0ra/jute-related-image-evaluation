@@ -106,6 +106,36 @@ class ConfirmatoryAnalysisBlockedError(RuntimeError):
         )
 
 
+def _runtime_is_compatible(runtime: object, precision: str) -> bool:
+    if not isinstance(runtime, dict):
+        return False
+    backend = runtime.get("backend")
+    return (
+        {
+            "python",
+            "torch",
+            "torch_cuda",
+            "cuda_driver",
+            "libraries",
+        }.issubset(runtime)
+        and runtime.get("cuda_available") is True
+        and runtime.get("precision") == precision
+        and isinstance(runtime.get("libraries"), dict)
+        and bool(runtime["libraries"])
+        and isinstance(backend, dict)
+        and backend
+        == {
+            "tf32_matmul": True,
+            "cudnn_tf32": True,
+            "cudnn_benchmark": False,
+        }
+        and runtime.get("compile_enabled") is False
+        and isinstance(runtime.get("deterministic_algorithms"), bool)
+        and isinstance(runtime.get("cudnn_deterministic"), bool)
+        and isinstance(runtime.get("float32_matmul_precision"), str)
+    )
+
+
 def confirmatory_blockers(
     benchmark: Benchmark, store: RunStore, identity_for: IdentityFor
 ) -> list[str]:
@@ -203,32 +233,7 @@ def confirmatory_blockers(
             if not isinstance(section, dict) or not section.get("sha256"):
                 blockers.append(f"{fit.fit_id}: receipt has no {field_name} digest")
         runtime = metadata.get("runtime")
-        backend = runtime.get("backend") if isinstance(runtime, dict) else None
-        if (
-            not isinstance(runtime, dict)
-            or not {
-                "python",
-                "torch",
-                "torch_cuda",
-                "cuda_driver",
-                "libraries",
-            }.issubset(runtime)
-            or runtime.get("cuda_available") is not True
-            or runtime.get("precision") != benchmark.recipe.precision
-            or not isinstance(runtime.get("libraries"), dict)
-            or not runtime["libraries"]
-            or not isinstance(backend, dict)
-            or backend
-            != {
-                "tf32_matmul": True,
-                "cudnn_tf32": True,
-                "cudnn_benchmark": False,
-            }
-            or runtime.get("compile_enabled") is not False
-            or not isinstance(runtime.get("deterministic_algorithms"), bool)
-            or not isinstance(runtime.get("cudnn_deterministic"), bool)
-            or not isinstance(runtime.get("float32_matmul_precision"), str)
-        ):
+        if not _runtime_is_compatible(runtime, benchmark.recipe.precision):
             blockers.append(f"{fit.fit_id}: receipt is missing runtime observations")
         attempts = receipt.get("attempts")
         if (
@@ -248,9 +253,12 @@ def confirmatory_blockers(
         ):
             blockers.append(f"{fit.fit_id}: attempt history is incomplete")
             continue
-        if [attempt.get("attempt") for attempt in attempts] != list(
-            range(1, len(attempts) + 1)
-        ):
+        durable_attempts = store.attempts(fit.fit_id, identity=expected_identity)
+        attempt_numbers = [attempt.get("attempt") for attempt in attempts]
+        durable_attempt_numbers = [
+            attempt.get("attempt") for attempt in durable_attempts
+        ]
+        if attempt_numbers != durable_attempt_numbers:
             blockers.append(f"{fit.fit_id}: attempt history has missing attempts")
         if any(attempt.get("identity") != expected_identity for attempt in attempts):
             blockers.append(f"{fit.fit_id}: an attempt has a different run identity")
@@ -268,6 +276,16 @@ def confirmatory_blockers(
             blockers.append(
                 f"{fit.fit_id}: completed attempt runtime does not match receipt"
             )
+        if any(
+            not _runtime_is_compatible(
+                attempt.get("metadata", {}).get("runtime")
+                if isinstance(attempt.get("metadata"), dict)
+                else None,
+                benchmark.recipe.precision,
+            )
+            for attempt in attempts
+        ):
+            blockers.append(f"{fit.fit_id}: an attempt is missing runtime observations")
         if any(
             attempt.get("metadata", {}).get("official") is not True
             or attempt.get("metadata", {})

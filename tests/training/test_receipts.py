@@ -126,6 +126,21 @@ def test_stale_running_state_is_reported_interrupted(tmp_path: Path) -> None:
     assert store.state("cnn/a") is RunState.INTERRUPTED
 
 
+def test_settling_an_interrupted_run_preserves_runtime_observations(
+    tmp_path: Path,
+) -> None:
+    store = RunStore(tmp_path)
+    run = store.start("cnn/a", "id-1", metadata={"official": True})
+    runtime = {"torch": "2.6.0", "cuda_driver": "570.0"}
+    write_json_atomic(run.attempt_dir / "runtime.json", runtime)
+
+    store.settle("cnn/a")
+
+    attempts = store.attempts("cnn/a")
+    assert attempts[0]["state"] == "interrupted"
+    assert attempts[0]["metadata"] == {"official": True, "runtime": runtime}
+
+
 def test_half_written_receipt_is_incomplete(tmp_path: Path) -> None:
     store = RunStore(tmp_path)
     _complete(store, "cnn/a", "id-1")
