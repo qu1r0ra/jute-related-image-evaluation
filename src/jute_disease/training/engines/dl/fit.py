@@ -146,7 +146,6 @@ def _data_module(
         pin_memory=pin_memory,
         image_size=recipe.image_size,
         cache_root=None,
-        allow_test=False,
     )
     module.setup("fit")
     assert module.manifest is not None

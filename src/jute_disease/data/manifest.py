@@ -37,7 +37,7 @@ class FreezeBlockedError(ValueError):
 
 
 class HeldOutPartitionError(PermissionError):
-    """A training-side caller asked for the held-out test partition."""
+    """A non-evaluator caller asked for the held-out test partition."""
 
 
 @dataclass(frozen=True)

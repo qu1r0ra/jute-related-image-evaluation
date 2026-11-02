@@ -37,7 +37,10 @@ def test_test_and_predict_stages_are_denied_by_default(
     assert module.jute_predict is None
 
 
-def test_evaluation_must_opt_in_to_the_test_partition(inputs: Inputs) -> None:
-    module = _module(inputs, allow_test=True)
-    module.setup("test")
-    assert module.jute_test is not None
+def test_test_partition_is_only_available_to_the_gated_evaluator(
+    inputs: Inputs,
+) -> None:
+    module = _module(inputs)
+    with pytest.raises(HeldOutPartitionError, match="gated evaluator"):
+        module.setup("test")
+    assert module.jute_test is None

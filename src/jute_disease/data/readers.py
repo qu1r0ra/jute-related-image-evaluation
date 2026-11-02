@@ -12,7 +12,12 @@ from torch.utils.data import Dataset
 from jute_disease.config import MANIFEST_DIR, SOURCE_INVENTORY_DIR
 from jute_disease.data.cache import cached_path
 from jute_disease.data.fingerprints import file_sha256
-from jute_disease.data.manifest import Manifest, ManifestEntry, load_manifest
+from jute_disease.data.manifest import (
+    HeldOutPartitionError,
+    Manifest,
+    ManifestEntry,
+    load_manifest,
+)
 from jute_disease.data.transforms import PreprocessingSpec
 
 
@@ -35,8 +40,13 @@ class ManifestContentVerifier:
 
         Raises:
             FileNotFoundError: a manifest file is missing.
+            HeldOutPartitionError: the test partition is requested.
             ValueError: a path escapes the image root or its content hash changed.
         """
+        if "test" in partitions:
+            raise HeldOutPartitionError(
+                "The test partition is only readable by the gated evaluator"
+            )
         root = Path(image_root).resolve()
         entries = sorted(
             (entry for name in partitions for entry in manifest.partition(name)),
@@ -108,6 +118,10 @@ class ManifestDataset(Dataset):
         cache_root: Path | None = None,
         spec: PreprocessingSpec | None = None,
     ) -> None:
+        if partition == "test":
+            raise HeldOutPartitionError(
+                "The frozen test partition is only readable by the gated evaluator"
+            )
         self.entries: tuple[ManifestEntry, ...] = manifest.partition(partition)
         if not self.entries:
             raise ValueError(f"Partition {partition!r} has no images")
@@ -162,7 +176,12 @@ def open_partition(
 
     Raises:
         FileNotFoundError: the freeze has no matching receipt (not completed).
+        HeldOutPartitionError: ``partition`` is the gated test partition.
     """
+    if partition == "test":
+        raise HeldOutPartitionError(
+            "The frozen test partition is only readable by the gated evaluator"
+        )
     return ManifestDataset(
         load_manifest(manifest_dir), partition, image_root, transform
     )

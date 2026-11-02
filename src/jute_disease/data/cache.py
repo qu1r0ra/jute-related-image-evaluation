@@ -22,7 +22,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from jute_disease.data.manifest import Manifest, ManifestEntry
+from jute_disease.data.manifest import HeldOutPartitionError, Manifest, ManifestEntry
 from jute_disease.data.transforms import PreprocessingSpec
 
 REPORT_FILE = "cache_report.json"
@@ -98,16 +98,17 @@ def build_image_cache(
     partitions: tuple[str, ...] = PROBE_PARTITIONS,
     budget_seconds: float = DEFAULT_BUDGET_SECONDS,
     workers: int = 4,
-    allow_test: bool = False,
     clock: Callable[[], float] = time.perf_counter,
 ) -> CacheReport:
     """Build the cache for the chosen partitions within a time budget.
 
     Raises:
-        ValueError: the test partition is requested without ``allow_test``.
+        HeldOutPartitionError: the test partition is requested.
     """
-    if "test" in partitions and not allow_test:
-        raise ValueError("The test partition is not read by the cache probe")
+    if "test" in partitions:
+        raise HeldOutPartitionError(
+            "The test partition is only readable by the gated evaluator"
+        )
     entries = [e for name in partitions for e in manifest.partition(name)]
     root = cache_root(cache_dir, spec)
     root.mkdir(parents=True, exist_ok=True)

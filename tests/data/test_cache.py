@@ -10,6 +10,7 @@ from PIL import Image
 from jute_disease.data import (
     DEFAULT_BUDGET_SECONDS,
     CacheReport,
+    HeldOutPartitionError,
     Manifest,
     PreprocessingSpec,
     SyntheticPlan,
@@ -50,10 +51,10 @@ def test_cache_holds_train_and_val_only_and_reports_completion(
     assert decide_cache(report)["decision"] == "adopt-cache"
 
 
-def test_the_test_partition_is_refused_unless_explicitly_allowed(
+def test_the_test_partition_is_not_cached_outside_the_evaluator(
     frozen: Manifest, synthetic: SyntheticPlan, tmp_path: Path
 ) -> None:
-    with pytest.raises(ValueError, match="test"):
+    with pytest.raises(HeldOutPartitionError, match="gated evaluator"):
         _cache(frozen, synthetic, tmp_path, partitions=("test",))
 
 

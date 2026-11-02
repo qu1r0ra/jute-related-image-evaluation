@@ -29,13 +29,12 @@ class DataModule(LightningDataModule):
 
     * ``manifest_dir`` (+ ``image_root``): the frozen manifest. Partitions come
       from the manifest only and cross-validation folds respect its groups.
-    * ``data_dir``: an ``ImageFolder`` tree, either with ``train/``/``val/``
-      (and optional ``test/``) folders, or flat with ``val_split`` for a seeded
-      split. Used for external pretraining data and historical configs.
+    * ``data_dir``: an ``ImageFolder`` tree with ``train/``/``val/`` folders,
+      or flat with ``val_split`` for a seeded split. Used for external
+      pretraining data and historical configs.
 
-    The held-out test partition is denied unless ``allow_test`` is set, which only
-    the separately gated evaluation does: training and the queue build the train
-    and validation datasets and nothing else.
+    The held-out test partition is available only through the separately gated
+    evaluator. Training and queue runs build train and validation datasets only.
 
     Every pipeline, sampler and loader is built from ``seed``; nothing random is
     shared between instances.
@@ -58,7 +57,6 @@ class DataModule(LightningDataModule):
         k_fold: int = 1,
         fold_index: int = 0,
         image_size: int = IMAGE_SIZE,
-        allow_test: bool = False,
     ) -> None:
         super().__init__()
         if (
@@ -133,9 +131,10 @@ class DataModule(LightningDataModule):
         )
 
     def setup(self, stage: str | None = None) -> None:
-        if stage in ("test", "predict") and not self.hparams.allow_test:
+        if stage in ("test", "predict"):
             raise HeldOutPartitionError(
-                f"Stage {stage!r} would open the held-out test partition"
+                f"Stage {stage!r} cannot read the held-out test partition; "
+                "use the gated evaluator"
             )
         if self.manifest_dir is not None or self._frozen_manifest is not None:
             self._setup_manifest(stage)
@@ -169,10 +168,6 @@ class DataModule(LightningDataModule):
                 self.jute_train = self._manifest_dataset("train", True)
                 self.jute_val = self._manifest_dataset("val", False)
                 self._make_sampler(self.jute_train.targets)
-        if stage == "test" or (stage is None and self.hparams.allow_test):
-            self.jute_test = self._manifest_dataset("test", False)
-        if stage == "predict":
-            self.jute_predict = self._manifest_dataset("test", False)
 
     def _setup_folds(self) -> None:
         augmented = [self._manifest_dataset(name, True) for name in ("train", "val")]
@@ -193,9 +188,7 @@ class DataModule(LightningDataModule):
 
     def _setup_folders(self, stage: str | None) -> None:
         assert self.data_dir is not None
-        train_dir, val_dir, test_dir = (
-            self.data_dir / name for name in ("train", "val", "test")
-        )
+        train_dir, val_dir = (self.data_dir / name for name in ("train", "val"))
         if stage in ("fit", None):
             if train_dir.exists() and val_dir.exists():
                 self.jute_train = ImageFolder(train_dir, self._train_transform())
@@ -220,14 +213,6 @@ class DataModule(LightningDataModule):
                     val_part.indices,
                 )
                 self._make_sampler([full.targets[i] for i in train_part.indices])
-        if (
-            stage == "test" or (stage is None and self.hparams.allow_test)
-        ) and test_dir.exists():
-            self.jute_test = ImageFolder(test_dir, self._eval_transform())
-            self._classes = self.jute_test.classes
-        if stage == "predict":
-            root = test_dir if test_dir.exists() else self.data_dir
-            self.jute_predict = ImageFolder(root, self._eval_transform())
 
     def _make_sampler(self, targets: list[int]) -> None:
         self.sampler = (
@@ -273,10 +258,14 @@ class DataModule(LightningDataModule):
         return self._loader(self.jute_val, "val", False)
 
     def test_dataloader(self) -> DataLoader:
-        return self._loader(self.jute_test, "test", False)
+        raise HeldOutPartitionError(
+            "The held-out test partition is only readable by the gated evaluator"
+        )
 
     def predict_dataloader(self) -> DataLoader:
-        return self._loader(self.jute_predict, "predict", False)
+        raise HeldOutPartitionError(
+            "The held-out test partition is only readable by the gated evaluator"
+        )
 
 
 class _Concat(Dataset):

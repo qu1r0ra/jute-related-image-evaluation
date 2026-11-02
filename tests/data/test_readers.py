@@ -6,6 +6,7 @@ import pytest
 from PIL import Image
 
 from jute_disease.data import (
+    HeldOutPartitionError,
     Manifest,
     ManifestDataset,
     PreprocessingSpec,
@@ -13,6 +14,7 @@ from jute_disease.data import (
     build_image_cache,
     cache_root,
     open_partition,
+    verify_manifest_content,
 )
 from jute_disease.data.manifest import write_manifest
 
@@ -83,3 +85,17 @@ def test_open_partition_requires_a_completed_freeze(
         "train", manifest_dir=tmp_path / "freeze", image_root=synthetic.root
     )
     assert len(dataset) == len(frozen.partition("train"))
+
+
+def test_manifest_readers_cannot_open_the_held_out_test_partition(
+    frozen: Manifest, synthetic: SyntheticPlan, tmp_path: Path
+) -> None:
+    with pytest.raises(HeldOutPartitionError, match="gated evaluator"):
+        ManifestDataset(frozen, "test", synthetic.root)
+    with pytest.raises(HeldOutPartitionError, match="gated evaluator"):
+        verify_manifest_content(frozen, synthetic.root, ("test",))
+
+    freeze_dir = tmp_path / "freeze"
+    write_manifest(frozen, freeze_dir)
+    with pytest.raises(HeldOutPartitionError, match="gated evaluator"):
+        open_partition("test", manifest_dir=freeze_dir, image_root=synthetic.root)

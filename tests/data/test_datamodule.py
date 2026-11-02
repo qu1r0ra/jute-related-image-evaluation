@@ -7,7 +7,12 @@ import pytest
 import torch
 from PIL import Image
 
-from jute_disease.data import DataModule, Manifest, SyntheticPlan
+from jute_disease.data import (
+    DataModule,
+    HeldOutPartitionError,
+    Manifest,
+    SyntheticPlan,
+)
 from jute_disease.data.manifest import RECEIPT_FILE, write_manifest
 
 
@@ -39,31 +44,32 @@ def test_datamodule_setup_fit(mock_dataset_root: Path) -> None:
     assert dm.num_classes == 2
 
 
-def test_datamodule_setup_test(mock_dataset_root: Path) -> None:
-    dm = DataModule(
-        data_dir=mock_dataset_root, batch_size=2, pin_memory=False, allow_test=True
-    )
-    dm.setup(stage="test")
-
-    assert dm.jute_test is not None
-    assert len(dm.jute_test) == 10
-    assert dm.classes == ["diseased", "healthy"]
+def test_datamodule_cannot_open_the_test_partition(mock_dataset_root: Path) -> None:
+    dm = DataModule(data_dir=mock_dataset_root, batch_size=2, pin_memory=False)
+    with pytest.raises(HeldOutPartitionError, match="gated evaluator"):
+        dm.setup(stage="test")
+    assert dm.jute_test is None
 
 
 def test_datamodule_dataloaders(mock_dataset_root: Path) -> None:
-    dm = DataModule(
-        data_dir=mock_dataset_root, batch_size=2, pin_memory=False, allow_test=True
-    )
+    dm = DataModule(data_dir=mock_dataset_root, batch_size=2, pin_memory=False)
     dm.setup()
-    dm.setup(stage="test")
 
     train_loader = dm.train_dataloader()
     val_loader = dm.val_dataloader()
-    test_loader = dm.test_dataloader()
 
     assert len(next(iter(train_loader))[0]) == 2
     assert len(next(iter(val_loader))[0]) == 4  # batch_size * 2 for val
-    assert len(next(iter(test_loader))[0]) == 4
+
+
+def test_datamodule_test_and_predict_loaders_are_denied(
+    mock_dataset_root: Path,
+) -> None:
+    dm = DataModule(data_dir=mock_dataset_root, batch_size=2, pin_memory=False)
+    with pytest.raises(HeldOutPartitionError, match="gated evaluator"):
+        dm.test_dataloader()
+    with pytest.raises(HeldOutPartitionError, match="gated evaluator"):
+        dm.predict_dataloader()
 
 
 def test_data_dir_rejects_kfold(mock_dataset_root: Path) -> None:
@@ -163,14 +169,16 @@ def _manifest_module(
 def test_manifest_mode_serves_exactly_the_frozen_partitions(
     frozen_dir: Path, synthetic: SyntheticPlan, frozen: Manifest
 ) -> None:
-    dm = _manifest_module(frozen_dir, synthetic, allow_test=True)
+    dm = _manifest_module(frozen_dir, synthetic)
     dm.setup()
     assert len(dm.jute_train) == len(frozen.partition("train"))
     assert len(dm.jute_val) == len(frozen.partition("val"))
-    assert len(dm.jute_test) == len(frozen.partition("test"))
+    assert dm.jute_test is None
     assert dm.classes == list(frozen.labels)
     images, _ = next(iter(dm.train_dataloader()))
     assert images.shape[1:] == (3, 32, 32)
+    with pytest.raises(HeldOutPartitionError, match="gated evaluator"):
+        dm.setup(stage="test")
 
 
 def test_manifest_mode_refuses_a_directory_without_receipt(
