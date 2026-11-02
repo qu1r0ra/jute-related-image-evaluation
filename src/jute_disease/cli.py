@@ -806,7 +806,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_record = evaluate_actions.add_parser(
         "write-run-record",
-        help="Bind every frozen evaluation to completed model artifacts.",
+        help="Bind frozen fits and analyses to completed receipts and artifacts.",
     )
     run_record.add_argument("--selection", type=Path, required=True)
     run_record.add_argument("--model-index", type=Path, required=True)

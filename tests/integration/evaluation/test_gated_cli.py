@@ -22,6 +22,7 @@ from jute_disease.evaluation import (
     write_matrix_freeze,
     write_run_record,
 )
+from jute_disease.training import RunStore
 
 
 @dataclass(frozen=True)
@@ -107,6 +108,53 @@ def _outcomes(
     )
 
 
+def _complete_fit_receipt(
+    store: RunStore,
+    fit_id: str,
+    artifact_path: Path,
+    model_spec: dict[str, object],
+    selection_record: dict[str, object],
+) -> None:
+    training_recipe = selection_record["training_recipe"]
+    assert isinstance(training_recipe, dict)
+    metadata = {
+        "official": True,
+        "provenance": {"commit": "fixture-commit", "working_tree_clean": True},
+        "configuration": {"sha256": selection_record["benchmark_sha256"]},
+        "environment_lock": {"sha256": selection_record["environment_lock_sha256"]},
+        "preprocessing": {
+            "spec": selection_record["preprocessing"],
+            "sha256": "fixture",
+        },
+        "assignment_table": {
+            "validated": True,
+            "sha256": hashlib.sha256(b"fixture assignments").hexdigest(),
+        },
+        "source_checkpoint_ancestry": [],
+        "seed": model_spec["seed"],
+        "runtime_contract": {
+            "precision": training_recipe["precision"],
+            "tf32_matmul": True,
+            "cudnn_tf32": True,
+            "cudnn_benchmark": False,
+            "torch_compile": False,
+            "num_workers": training_recipe["num_workers"],
+        },
+        "run_options": {
+            "pretrained": True,
+            "accelerator": "cuda",
+            "require_cuda": True,
+        },
+    }
+    identity = hashlib.sha256(f"receipt:{fit_id}".encode()).hexdigest()
+    run = store.start(fit_id, identity, metadata=metadata)
+    run.complete(
+        results={"fit": {"fit_id": fit_id}},
+        artifacts={"model": artifact_path},
+        metadata=metadata,
+    )
+
+
 def test_cli_refuses_test_read_without_both_records_then_evaluates_fixture(
     inputs: Inputs, tmp_path: Path
 ) -> None:
@@ -182,6 +230,28 @@ def test_cli_refuses_test_read_without_both_records_then_evaluates_fixture(
     history_path = inputs.target_dir / "evaluator" / "test-read-history.jsonl"
     history = [json.loads(line) for line in history_path.read_text().splitlines()]
     assert [row["status"] for row in history] == ["started", "completed"]
+    original_run_record = run_record.read_bytes()
+    malformed_envelope = json.loads(original_run_record)
+    malformed_envelope["record"]["completed_analysis_ids"].append([])
+    canonical = (
+        json.dumps(malformed_envelope["record"], sort_keys=True, separators=(",", ":"))
+        + "\n"
+    )
+    malformed_envelope["sha256"] = hashlib.sha256(canonical.encode()).hexdigest()
+    run_record.write_text(
+        json.dumps(malformed_envelope, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        SystemExit,
+        match="evaluation blocked: run record does not cover every frozen analysis",
+    ):
+        main(args)
+    assert [
+        json.loads(line)["status"] for line in history_path.read_text().splitlines()
+    ] == ["started", "completed"]
+    run_record.write_bytes(original_run_record)
+
     test_rows = json.loads(
         (inputs.target_dir / "evaluator" / "test-manifest.json").read_text()
     )["record"]["entries"]
@@ -374,16 +444,37 @@ def test_gated_api_runs_hash_bound_artifacts_on_masked_views(
     torch.save({"state_dict": classifier.state_dict()}, cnn_path)
     paths = {"classical": classical_path, "cue": cue_path, "cnn": cnn_path}
     selection_record = json.loads(selection.read_text(encoding="utf-8"))["record"]
-    model_index = {
-        fit_id: {
-            "path": str(paths[spec["kind"]]),
-            "sha256": hashlib.sha256(paths[spec["kind"]].read_bytes()).hexdigest(),
+    run_store = RunStore(tmp_path / "training-runs")
+    model_index = {}
+    for fit_id, spec in selection_record["selection"]["model_specs"].items():
+        artifact_path = paths[spec["kind"]]
+        model_index[fit_id] = {
+            "path": str(artifact_path),
+            "sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
             "fit_spec": spec,
         }
-        for fit_id, spec in selection_record["selection"]["model_specs"].items()
-    }
+        _complete_fit_receipt(run_store, fit_id, artifact_path, spec, selection_record)
+    gradcam_receipt_path = tmp_path / "gradcam-test-pass.json"
+    gradcam_receipt = {"analysis_id": "gradcam/test-pass", "status": "passed"}
+    gradcam_receipt_path.write_text(json.dumps(gradcam_receipt), encoding="utf-8")
     index_path = tmp_path / "model-index.json"
-    index_path.write_text(json.dumps({"models": model_index}), encoding="utf-8")
+    index_path.write_text(
+        json.dumps(
+            {
+                "run_root": str(run_store.root),
+                "models": model_index,
+                "analyses": {
+                    "gradcam/test-pass": {
+                        "path": str(gradcam_receipt_path),
+                        "sha256": hashlib.sha256(
+                            gradcam_receipt_path.read_bytes()
+                        ).hexdigest(),
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     run_record = tmp_path / "run.json"
     invalid_index = json.loads(index_path.read_text(encoding="utf-8"))
     first_fit_id = next(iter(invalid_index["models"]))
@@ -394,6 +485,28 @@ def test_gated_api_runs_hash_bound_artifacts_on_masked_views(
     invalid_index_path.write_text(json.dumps(invalid_index), encoding="utf-8")
     with pytest.raises(GatedEvaluationError, match="model fit spec differs"):
         write_run_record(selection, invalid_index_path, tmp_path / "invalid-run.json")
+
+    first_receipt_path = run_store.run_dir(first_fit_id) / "receipt.json"
+    original_receipt = first_receipt_path.read_bytes()
+    invalid_receipt = json.loads(original_receipt)
+    invalid_receipt["metadata"]["official"] = False
+    invalid_receipt["attempts"][-1]["metadata"]["official"] = False
+    first_receipt_path.write_text(json.dumps(invalid_receipt), encoding="utf-8")
+    try:
+        with pytest.raises(GatedEvaluationError, match="does not satisfy #107"):
+            write_run_record(selection, index_path, tmp_path / "unofficial-run.json")
+    finally:
+        first_receipt_path.write_bytes(original_receipt)
+
+    missing_analysis = json.loads(index_path.read_text(encoding="utf-8"))
+    missing_analysis["analyses"] = {}
+    missing_analysis_path = tmp_path / "missing-analysis-index.json"
+    missing_analysis_path.write_text(json.dumps(missing_analysis), encoding="utf-8")
+    with pytest.raises(GatedEvaluationError, match="analysis index must cover"):
+        write_run_record(
+            selection, missing_analysis_path, tmp_path / "invalid-run.json"
+        )
+
     write_run_record(selection, index_path, run_record)
 
     with pytest.raises(
@@ -419,6 +532,7 @@ def test_gated_api_runs_hash_bound_artifacts_on_masked_views(
     specs = selection_record["selection"]["model_specs"]
     cue_id = next(fit_id for fit_id, spec in specs.items() if spec["kind"] == "cue")
     final_id = selection_record["selection"]["final_fit_ids"][0]
+    assert report["completed_analysis_ids"] == selection_record["analysis_ids"]
     assert report["prediction_views"][cue_id] in {"pad-fraction", "aspect-ratio"}
     assert report["prediction_views"][final_id] == "raw-test"
     assert report["preprocessing"]["resize"] == "resize-center-crop"

@@ -10,6 +10,7 @@ import tempfile
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,7 +20,7 @@ from uuid import uuid4
 import numpy as np
 from PIL import Image
 
-from jute_disease.training import load_benchmark
+from jute_disease.training import RunState, RunStore, load_benchmark
 
 SELECTION_FORMAT = "jute-evaluation-selection-v1"
 RUN_FORMAT = "jute-evaluation-run-v1"
@@ -62,6 +63,7 @@ def _read_selection(path: Path) -> dict[str, Any]:
     try:
         matrix = selection["selection"]
         planned_fit_ids = matrix["planned_fit_ids"]
+        analysis_ids = matrix["analysis_ids"]
         final_fit_ids = matrix["final_fit_ids"]
         background_fit_ids = matrix["background_only"]["fit_ids"]
         leaf_only = matrix["leaf_only"]
@@ -79,6 +81,7 @@ def _read_selection(path: Path) -> dict[str, Any]:
         leaf_sample_size = leaf_only["sample_size"]
         border_seeds = border["seeds"]
         null_permutations = border["null_permutations"]
+        training_recipe = selection["training_recipe"]
     except (KeyError, TypeError) as error:
         raise GatedEvaluationError(
             "selection record has an invalid matrix schema"
@@ -101,6 +104,10 @@ def _read_selection(path: Path) -> dict[str, Any]:
     if (
         not isinstance(matrix, dict)
         or not valid_ids(planned_fit_ids)
+        or not valid_ids(analysis_ids)
+        or set(analysis_ids) != set(planned_fit_ids) | {"gradcam/test-pass"}
+        or selection.get("planned_fit_ids") != planned_fit_ids
+        or selection.get("analysis_ids") != analysis_ids
         or not valid_ids(final_fit_ids)
         or not valid_ids(background_fit_ids)
         or not valid_ids(leaf_fit_ids)
@@ -124,6 +131,10 @@ def _read_selection(path: Path) -> dict[str, Any]:
         or preprocessing.get("resize") != letterbox
         or type(preprocessing.get("size")) is not int
         or preprocessing["size"] < 1
+        or not isinstance(training_recipe, dict)
+        or not isinstance(training_recipe.get("precision"), str)
+        or type(training_recipe.get("num_workers")) is not int
+        or training_recipe["num_workers"] < 0
         or not isinstance(scene_thresholds, dict)
         or any(
             not isinstance(scene_thresholds.get(name), (int, float))
@@ -372,6 +383,7 @@ def probe_plan(benchmark_path: Path | str) -> dict[str, Any]:
         "primary_split": primary,
         "pools": pools,
         "policies": policies,
+        "training_recipe": asdict(benchmark.recipe),
         "background_only": {
             "fit_ids": background,
             "classical_estimators": list(benchmark.estimators),
@@ -497,6 +509,7 @@ def write_matrix_freeze(
         "selection": plan,
         "planned_fit_ids": plan["planned_fit_ids"],
         "analysis_ids": plan["analysis_ids"],
+        "training_recipe": plan["training_recipe"],
         "validation_selected_hyperparameters": hyperparameters,
         "letterbox_decision": letterbox,
         "preprocessing": preprocessing,
@@ -536,16 +549,110 @@ def write_fixture_run_record(
 ) -> tuple[Path, str]:
     """Write a completion record for the synthetic CLI gate fixture."""
     selection = _read_selection(Path(selection_path))
-    fit_ids = selection["selection"]["planned_fit_ids"]
+    analysis_ids = selection["selection"]["analysis_ids"]
     record = {
         "issue": 139,
         "selection_sha256": _digest(selection),
         "status": "completed",
-        "completed_analysis_ids": fit_ids,
+        "completed_analysis_ids": analysis_ids,
         "fixture_predictions": True,
     }
     output = Path(output_path)
     return output, _write_immutable(output, RUN_FORMAT, record)
+
+
+def _verified_training_receipt(
+    fit_id: str,
+    model_spec: dict[str, Any],
+    selection: dict[str, Any],
+    store: RunStore,
+) -> dict[str, Any]:
+    """Require a clean, official, complete #107 receipt for one frozen fit."""
+    receipt = store.receipt(fit_id, missing_ok=True)
+    if receipt is None or store.state(fit_id) is not RunState.COMPLETED:
+        raise GatedEvaluationError(f"completed run receipt is required for {fit_id}")
+    metadata = receipt.get("metadata")
+    if not isinstance(metadata, dict):
+        raise GatedEvaluationError(f"run receipt metadata is missing for {fit_id}")
+    attempts = receipt.get("attempts")
+    preprocessing = metadata.get("preprocessing")
+    provenance = metadata.get("provenance")
+    configuration = metadata.get("configuration")
+    environment_lock = metadata.get("environment_lock")
+    assignment_table = metadata.get("assignment_table")
+    ancestry = metadata.get("source_checkpoint_ancestry")
+    runtime_contract = metadata.get("runtime_contract")
+    run_options = metadata.get("run_options")
+    recipe = selection["training_recipe"]
+    expected_runtime_contract = {
+        "precision": recipe["precision"],
+        "tf32_matmul": True,
+        "cudnn_tf32": True,
+        "cudnn_benchmark": False,
+        "torch_compile": False,
+        "num_workers": recipe["num_workers"],
+    }
+    if (
+        metadata.get("official") is not True
+        or not isinstance(receipt.get("identity"), str)
+        or not receipt["identity"]
+        or not isinstance(attempts, list)
+        or not attempts
+        or attempts[-1].get("metadata") != metadata
+        or not isinstance(preprocessing, dict)
+        or not isinstance(preprocessing.get("spec"), dict)
+        or preprocessing["spec"].get("size") != selection["preprocessing"]["size"]
+        or not isinstance(preprocessing.get("sha256"), str)
+        or not isinstance(provenance, dict)
+        or provenance.get("working_tree_clean") is not True
+        or not isinstance(provenance.get("commit"), str)
+        or not provenance["commit"]
+        or not isinstance(configuration, dict)
+        or configuration.get("sha256") != selection["benchmark_sha256"]
+        or not isinstance(environment_lock, dict)
+        or environment_lock.get("sha256") != selection["environment_lock_sha256"]
+        or metadata.get("seed") != model_spec.get("seed")
+        or not isinstance(assignment_table, dict)
+        or assignment_table.get("validated") is not True
+        or not isinstance(assignment_table.get("sha256"), str)
+        or not assignment_table["sha256"]
+        or not isinstance(ancestry, list)
+        or runtime_contract != expected_runtime_contract
+        or not isinstance(run_options, dict)
+        or run_options.get("require_cuda") is not True
+        or run_options.get("accelerator") != "cuda"
+    ):
+        raise GatedEvaluationError(f"run receipt does not satisfy #107 for {fit_id}")
+    return receipt
+
+
+def _verify_analysis_receipt(
+    analysis_id: str, row: Any, index_path: Path
+) -> dict[str, str]:
+    if not isinstance(row, dict) or not isinstance(row.get("path"), str):
+        raise GatedEvaluationError(
+            f"analysis receipt path is missing for {analysis_id}"
+        )
+    path = Path(row["path"])
+    if not path.is_absolute():
+        path = index_path.parent / path
+    path = path.resolve()
+    try:
+        receipt_bytes = path.read_bytes()
+        receipt = json.loads(receipt_bytes)
+    except (OSError, ValueError) as error:
+        raise GatedEvaluationError(
+            f"completed analysis receipt is required for {analysis_id}"
+        ) from error
+    digest = hashlib.sha256(receipt_bytes).hexdigest()
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("analysis_id") != analysis_id
+        or receipt.get("status") != "passed"
+        or row.get("sha256") != digest
+    ):
+        raise GatedEvaluationError(f"analysis receipt is invalid for {analysis_id}")
+    return {"path": str(path), "sha256": digest}
 
 
 def write_run_record(
@@ -553,7 +660,7 @@ def write_run_record(
     model_index_path: Path | str,
     output_path: Path | str,
 ) -> tuple[Path, str]:
-    """Bind every frozen analysis ID to an already completed model artifact."""
+    """Bind every frozen analysis ID to completed receipts and model artifacts."""
     selection_file = Path(selection_path)
     selection = _read_selection(selection_file)
     index_file = Path(model_index_path)
@@ -565,14 +672,25 @@ def write_run_record(
         ) from error
     models = index.get("models") if isinstance(index, dict) else None
     expected = set(selection["selection"]["planned_fit_ids"])
+    analysis_ids = selection["selection"]["analysis_ids"]
+    extra_analysis_ids = set(analysis_ids) - expected
     model_specs = selection["selection"].get("model_specs")
     if not isinstance(model_specs, dict) or set(model_specs) != expected:
         raise GatedEvaluationError("selection lacks a model spec for every analysis")
     if not isinstance(models, dict) or set(models) != expected:
         raise GatedEvaluationError(
-            "model-artifact index must cover every frozen analysis exactly once"
+            "model-artifact index must cover every frozen fit exactly once"
         )
+    run_root_value = index.get("run_root") if isinstance(index, dict) else None
+    if not isinstance(run_root_value, str):
+        raise GatedEvaluationError("a completed training run root is required")
+    run_root = Path(run_root_value)
+    if not run_root.is_absolute():
+        run_root = index_file.parent / run_root
+    run_root = run_root.resolve()
+    store = RunStore(run_root)
     artifacts: dict[str, dict[str, str]] = {}
+    training_receipts: dict[str, dict[str, str]] = {}
     for fit_id in sorted(expected):
         row = models[fit_id]
         if not isinstance(row, dict) or not isinstance(row.get("path"), str):
@@ -591,17 +709,56 @@ def write_run_record(
             ) from error
         if row.get("sha256") != digest:
             raise GatedEvaluationError(f"model artifact hash differs for {fit_id}")
+        receipt = _verified_training_receipt(
+            fit_id, model_specs[fit_id], selection, store
+        )
+        run_artifacts = receipt["artifacts"]
+        receipt_contains_model = any(
+            isinstance(receipt_artifact, dict)
+            and isinstance(receipt_artifact.get("path"), str)
+            and receipt_artifact.get("sha256") == digest
+            and (
+                Path(receipt_artifact["path"])
+                if Path(receipt_artifact["path"]).is_absolute()
+                else store.run_dir(fit_id) / receipt_artifact["path"]
+            ).resolve()
+            == path
+            for receipt_artifact in run_artifacts.values()
+        )
+        if not receipt_contains_model:
+            raise GatedEvaluationError(
+                f"model artifact is not bound by the training receipt for {fit_id}"
+            )
+        receipt_path = store.run_dir(fit_id) / "receipt.json"
+        training_receipts[fit_id] = {
+            "sha256": hashlib.sha256(receipt_path.read_bytes()).hexdigest(),
+            "identity": receipt["identity"],
+        }
         artifacts[fit_id] = {
             "path": str(path),
             "sha256": digest,
             "fit_spec_sha256": _digest(model_specs[fit_id]),
         }
+    analysis_rows = index.get("analyses") if isinstance(index, dict) else None
+    if not isinstance(analysis_rows, dict) or set(analysis_rows) != extra_analysis_ids:
+        raise GatedEvaluationError(
+            "analysis index must cover every non-fit analysis exactly once"
+        )
+    analysis_receipts = {
+        analysis_id: _verify_analysis_receipt(
+            analysis_id, analysis_rows[analysis_id], index_file
+        )
+        for analysis_id in sorted(extra_analysis_ids)
+    }
     record = {
         "issue": 139,
         "selection_sha256": _digest(selection),
         "status": "completed",
-        "completed_analysis_ids": sorted(expected),
+        "completed_analysis_ids": analysis_ids,
         "model_artifacts": artifacts,
+        "training_run_root": str(run_root),
+        "training_receipts": training_receipts,
+        "analysis_receipts": analysis_receipts,
         "model_index_sha256": hashlib.sha256(index_file.read_bytes()).hexdigest(),
         "fixture_predictions": False,
     }
@@ -652,11 +809,13 @@ def _test_access_records(
     if run_record.get("status") != "completed":
         raise GatedEvaluationError("run record is not complete")
     expected = set(selection["selection"]["planned_fit_ids"])
+    expected_analysis_ids = set(selection["selection"]["analysis_ids"])
     completed = run_record.get("completed_analysis_ids")
     if (
         not isinstance(completed, list)
+        or not all(isinstance(item, str) and item for item in completed)
         or len(completed) != len(set(completed))
-        or set(completed) != expected
+        or set(completed) != expected_analysis_ids
     ):
         raise GatedEvaluationError("run record does not cover every frozen analysis")
     model_specs = selection["selection"].get("model_specs")
@@ -669,8 +828,19 @@ def _test_access_records(
         artifacts = run_record.get("model_artifacts")
         if not isinstance(artifacts, dict) or set(artifacts) != expected:
             raise GatedEvaluationError(
-                "run record must bind every analysis to a model artifact"
+                "run record must bind every frozen fit to a model artifact"
             )
+        run_root_value = run_record.get("training_run_root")
+        training_receipts = run_record.get("training_receipts")
+        if (
+            not isinstance(run_root_value, str)
+            or not isinstance(training_receipts, dict)
+            or set(training_receipts) != expected
+        ):
+            raise GatedEvaluationError(
+                "run record must bind every frozen fit to its training receipt"
+            )
+        store = RunStore(run_root_value)
         for fit_id, artifact in artifacts.items():
             if (
                 not isinstance(artifact, dict)
@@ -687,6 +857,63 @@ def _test_access_records(
             ).hexdigest() != artifact.get("sha256"):
                 raise GatedEvaluationError(
                     f"model artifact is missing or changed for {fit_id}"
+                )
+            receipt_path = store.run_dir(fit_id) / "receipt.json"
+            receipt_record = training_receipts[fit_id]
+            if (
+                not isinstance(receipt_record, dict)
+                or not receipt_path.is_file()
+                or hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+                != receipt_record.get("sha256")
+            ):
+                raise GatedEvaluationError(
+                    f"training receipt is missing or changed for {fit_id}"
+                )
+            receipt = _verified_training_receipt(
+                fit_id, model_specs[fit_id], selection, store
+            )
+            if receipt.get("identity") != receipt_record.get("identity"):
+                raise GatedEvaluationError(
+                    f"training receipt identity changed for {fit_id}"
+                )
+        expected_extra_analyses = expected_analysis_ids - expected
+        analysis_receipts = run_record.get("analysis_receipts")
+        if (
+            not isinstance(analysis_receipts, dict)
+            or set(analysis_receipts) != expected_extra_analyses
+        ):
+            raise GatedEvaluationError(
+                "run record must bind every non-fit analysis to its result receipt"
+            )
+        for analysis_id, receipt_record in analysis_receipts.items():
+            if (
+                not isinstance(receipt_record, dict)
+                or not isinstance(receipt_record.get("path"), str)
+                or not isinstance(receipt_record.get("sha256"), str)
+            ):
+                raise GatedEvaluationError(
+                    f"analysis receipt is invalid for {analysis_id}"
+                )
+            receipt_path = Path(receipt_record["path"])
+            if not receipt_path.is_file():
+                raise GatedEvaluationError(
+                    f"analysis receipt is missing for {analysis_id}"
+                )
+            receipt_bytes = receipt_path.read_bytes()
+            try:
+                analysis_receipt = json.loads(receipt_bytes)
+            except ValueError as error:
+                raise GatedEvaluationError(
+                    f"analysis receipt is invalid for {analysis_id}"
+                ) from error
+            if (
+                hashlib.sha256(receipt_bytes).hexdigest() != receipt_record["sha256"]
+                or not isinstance(analysis_receipt, dict)
+                or analysis_receipt.get("analysis_id") != analysis_id
+                or analysis_receipt.get("status") != "passed"
+            ):
+                raise GatedEvaluationError(
+                    f"analysis receipt is invalid for {analysis_id}"
                 )
     return selection, run_record
 
@@ -1266,6 +1493,12 @@ def evaluate_gated_test(
         dtype=np.uint8,
         shape=(len(entries), packed_width),
     )
+    frame_cache = np.memmap(
+        temporary_dir / "border-frame.dat",
+        mode="w+",
+        dtype=np.uint8,
+        shape=(len(entries), packed_width),
+    )
     entry_indices = {entry.image_id: index for index, entry in enumerate(entries)}
     prepared: dict[str, tuple[tuple[int, int, int, int], float, float, str]] = {}
 
@@ -1319,6 +1552,7 @@ def evaluate_gated_test(
             leaf_share = float(np.logical_and(frame, resized_mask).sum() / frame.sum())
             pixels_cache[cache_index] = pixels
             mask_cache[cache_index] = np.packbits(resized_mask.ravel())
+            frame_cache[cache_index] = np.packbits(frame.ravel())
             prepared[entry.image_id] = (
                 (top, bottom, left, right),
                 leaf_share,
@@ -1335,11 +1569,11 @@ def evaluate_gated_test(
             .reshape((image_size, image_size))
             .astype(bool)
         )
-        frame = np.zeros_like(valid)
-        frame[top : min(bottom, top + frame_width), left:right] = True
-        frame[max(top, bottom - frame_width) : bottom, left:right] = True
-        frame[top:bottom, left : min(right, left + frame_width)] = True
-        frame[top:bottom, max(left, right - frame_width) : right] = True
+        frame = (
+            np.unpackbits(frame_cache[cache_index], count=image_size * image_size)
+            .reshape((image_size, image_size))
+            .astype(bool)
+        )
         views = {
             "raw-test": pixels,
             "background-only": np.where(resized_mask[..., None], pad_rgb, pixels),
@@ -1366,7 +1600,7 @@ def evaluate_gated_test(
                 np.asarray(view_pixels, dtype=np.uint8).tobytes()
             )
 
-    expected_ids = run_record["completed_analysis_ids"]
+    expected_ids = selection["selection"]["planned_fit_ids"]
 
     def predictions_for(
         fit_id: str, selected: list[Any], *, leaf: bool = False
@@ -1658,6 +1892,7 @@ def evaluate_gated_test(
         "selection_sha256": _digest(selection),
         "run_record_sha256": _digest(run_record),
         "border_leaf_share_cutoff": selection["border_leaf_share_cutoff"]["final"],
+        "completed_analysis_ids": run_record["completed_analysis_ids"],
         "manifest_digest": manifest.digest(),
         "post_hoc": selection["created_after_test_reads"],
         "test_images": len(entries),
