@@ -3,6 +3,7 @@ import pytest
 from PIL import Image
 
 from jute_disease.config import IMAGE_SIZE
+from jute_disease.data import ImageWithMask
 from jute_disease.models.ml import CraftedFeatureExtractor, RawPixelFeatureExtractor
 
 
@@ -55,6 +56,38 @@ def test_crafted_extractor_pil(sample_pil_image: Image.Image) -> None:
 
     assert isinstance(features, np.ndarray)
     assert features.shape[0] > 0
+
+
+def test_handcrafted_features_match_the_fixed_descriptor_contract() -> None:
+    image = np.full((32, 32, 3), (35, 120, 210), dtype=np.uint8)
+    mask = np.ones((32, 32), dtype=bool)
+
+    features = CraftedFeatureExtractor().extract(ImageWithMask(image, mask))
+
+    assert features.shape == (548,)
+    assert np.isclose(features[:512].sum(), 1.0)
+    assert np.isclose(features[512:522].sum(), 1.0)
+    assert np.isclose(features[522:540].sum(), 1.0)
+
+
+def test_handcrafted_features_ignore_letterbox_padding() -> None:
+    valid = np.zeros((48, 48), dtype=bool)
+    valid[12:36, 8:40] = True
+    content = np.zeros((48, 48, 3), dtype=np.uint8)
+    yy, xx = np.indices(valid.shape)
+    content[valid] = np.stack(
+        (xx[valid] * 7, yy[valid] * 5, (xx[valid] + yy[valid]) * 3), axis=1
+    ).astype(np.uint8)
+    first = content.copy()
+    second = content.copy()
+    first[~valid] = (0, 0, 0)
+    second[~valid] = (255, 17, 93)
+
+    extractor = CraftedFeatureExtractor()
+    first_features = extractor.extract(ImageWithMask(first, valid))
+    second_features = extractor.extract(ImageWithMask(second, valid))
+
+    np.testing.assert_allclose(first_features, second_features)
 
 
 class _Dataset:

@@ -9,11 +9,14 @@ import pytest
 
 from jute_disease.config import DEFAULT_SEED
 from jute_disease.models.ml import (
+    FeatureBlockWeights,
     GaussianNaiveBayes,
     KNearestNeighbors,
     LogisticRegression,
     RandomForest,
     SupportVectorMachine,
+    build_classical_classifier,
+    classical_configurations,
 )
 
 
@@ -170,3 +173,51 @@ def test_classifiers_unsupported_random_state_ignored() -> None:
 
     assert knn is not None
     assert gnb is not None
+
+
+def test_prespecified_classical_grids_have_nine_configurations() -> None:
+    assert tuple(item["n_neighbors"] for item in classical_configurations("knn")) == (
+        1,
+        3,
+        5,
+        7,
+        11,
+        15,
+        21,
+        31,
+        51,
+    )
+    assert tuple(item["C"] for item in classical_configurations("lr")) == tuple(
+        10.0**power for power in range(-4, 5)
+    )
+    assert len(classical_configurations("svm")) == 9
+    assert len(classical_configurations("rf")) == 9
+    assert len(classical_configurations("gnb")) == 9
+
+
+def test_classical_feature_blocks_are_weighted_after_training_scaling(
+    xy: tuple[np.ndarray, np.ndarray],
+) -> None:
+    X, y = xy
+    crafted = build_classical_classifier("lr", DEFAULT_SEED, "crafted", dimensions=548)
+    assert isinstance(crafted.model.named_steps["block_weights"], FeatureBlockWeights)
+    assert crafted.model.named_steps["block_weights"].block_sizes == (512, 28, 8)
+    weighted = crafted.model.named_steps["block_weights"].transform(np.ones((1, 548)))
+    assert np.isclose(np.linalg.norm(weighted[:, :512]), 1.0)
+    assert np.isclose(np.linalg.norm(weighted[:, 512:540]), 1.0)
+    assert np.isclose(np.linalg.norm(weighted[:, 540:]), 1.0)
+    crafted.fit(np.tile(X, (1, 69))[:, :548], y)
+    assert crafted.model.named_steps["scaler"].n_features_in_ == 548
+
+
+def test_rbf_gamma_is_a_multiple_of_training_scale(
+    xy: tuple[np.ndarray, np.ndarray],
+) -> None:
+    X, y = xy
+    params = {"C": 10, "gamma_scale_multiplier": 0.1}
+    model = build_classical_classifier("svm", DEFAULT_SEED, "raw", params)
+    model.fit(X, y)
+    scaled = model.model.named_steps["scaler"].transform(X)
+    expected = 0.1 / (scaled.shape[1] * float(np.var(scaled)))
+    assert np.isclose(model.model.named_steps["clf"].gamma_, expected)
+    assert model.model.named_steps["clf"].estimator_.probability is False

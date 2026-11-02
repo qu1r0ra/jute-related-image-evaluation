@@ -7,11 +7,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 from PIL import Image
-from skimage.feature import graycomatrix, graycoprops, hog, local_binary_pattern
+from skimage.feature import local_binary_pattern
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
 from jute_disease.config import IMAGE_SIZE, ML_FEATURES_DIR
+from jute_disease.data.transforms import ImageWithMask
 from jute_disease.training.logger import get_logger
 
 logger = get_logger(__name__)
@@ -21,100 +22,120 @@ class BaseFeatureExtractor(ABC):
     """Abstract base class for feature extractors."""
 
     @abstractmethod
-    def extract(self, img: Image.Image | np.ndarray) -> np.ndarray:
+    def extract(self, img: Image.Image | np.ndarray | ImageWithMask) -> np.ndarray:
         """Extract features from an image."""
         pass
 
 
 class CraftedFeatureExtractor(BaseFeatureExtractor):
-    """Extracts Color (HSV), Texture (LBP, GLCM), and Shape (HOG) features."""
+    """Extract the fixed HSV, multi-scale LBP and GLCM descriptors."""
+
+    block_sizes = (512, 28, 8)
 
     def __init__(self) -> None:
-        self.lbp_radius = 3
-        self.lbp_n_points = 8 * self.lbp_radius
-        self.lbp_method = "uniform"
-
-        self.glcm_distances = [1, 3]
-        self.glcm_angles = [0, np.pi / 4, np.pi / 2, 3 * np.pi / 4]
-        self.glcm_props = [
-            "contrast",
-            "dissimilarity",
-            "homogeneity",
-            "energy",
-            "correlation",
-            "ASM",
-        ]
-
-        self.hog_orientations = 9
-        self.hog_pixels_per_cell = (16, 16)
-        self.hog_cells_per_block = (2, 2)
-
-        self.gabor_kernels = []
-        # Orientations: 0, 45, 90, 135 degrees
-        for theta in [0, np.pi / 4, np.pi / 2, 3 * np.pi / 4]:
-            kernel = cv2.getGaborKernel(
-                (21, 21), 5.0, theta, 10.0, 0.5, 0, ktype=cv2.CV_32F
-            )
-            self.gabor_kernels.append(kernel)
+        self.lbp_scales = ((8, 1), (16, 2))
+        self.glcm_levels = 32
+        self.glcm_distances = (1, 2)
+        self.glcm_offsets = ((0, 1), (-1, 1), (-1, 0), (-1, -1))
+        self.glcm_properties = ("contrast", "correlation", "energy", "homogeneity")
 
     def extract(self, img: Image.Image | np.ndarray) -> np.ndarray:
-        """Extract combined color and texture feature vector."""
-        if isinstance(img, Image.Image):
-            img = np.array(img)
+        """Extract descriptors while excluding padded pixels and pixel pairs."""
+        if isinstance(img, ImageWithMask):
+            pixels, valid = img.pixels, img.valid_mask
+        else:
+            if isinstance(img, Image.Image):
+                pixels = np.asarray(img.convert("RGB"))
+            else:
+                pixels = np.asarray(img)
+            valid = np.ones(pixels.shape[:2], dtype=bool)
+        if pixels.ndim != 3 or pixels.shape[2] != 3 or valid.shape != pixels.shape[:2]:
+            raise ValueError("Expected RGB pixels and a matching two-dimensional mask")
 
-        img_cv = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-        hsv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2HSV)
-        # Color Moments
-        h_mean, h_std = np.mean(hsv[:, :, 0]), np.std(hsv[:, :, 0])
-        s_mean, s_std = np.mean(hsv[:, :, 1]), np.std(hsv[:, :, 1])
-        v_mean, v_std = np.mean(hsv[:, :, 2]), np.std(hsv[:, :, 2])
-        color_moments = np.array([h_mean, h_std, s_mean, s_std, v_mean, v_std])
+        hsv = cv2.cvtColor(pixels.astype(np.uint8), cv2.COLOR_RGB2HSV)
+        color_histogram = np.histogramdd(
+            hsv[valid], bins=(8, 8, 8), range=((0, 180), (0, 256), (0, 256))
+        )[0].ravel()
+        color_histogram = self._l1(color_histogram)
 
-        # Color Histogram (8 bins per channel)
-        hist = cv2.calcHist([hsv], [0, 1, 2], None, [8, 8, 8], [0, 180, 0, 256, 0, 256])
-        cv2.normalize(hist, hist)
-        color_hist = hist.flatten()
-
-        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-        lbp = local_binary_pattern(
-            gray, self.lbp_n_points, self.lbp_radius, self.lbp_method
-        )
-        # Number of bins for 'uniform' LBP is points + 2
-        n_bins = self.lbp_n_points + 2
-        lbp_hist, _ = np.histogram(
-            lbp.ravel(), bins=n_bins, range=(0, n_bins), density=True
-        )
-
-        glcm = graycomatrix(
-            gray,
-            distances=self.glcm_distances,
-            angles=self.glcm_angles,
-            levels=256,
-            symmetric=True,
-            normed=True,
+        gray = cv2.cvtColor(pixels.astype(np.uint8), cv2.COLOR_RGB2GRAY)
+        lbp_features: list[np.ndarray] = []
+        for points, radius in self.lbp_scales:
+            lbp = local_binary_pattern(gray, points, radius, method="uniform")
+            usable = self._erode(valid, radius)
+            histogram = np.histogram(
+                lbp[usable], bins=points + 2, range=(0, points + 2)
+            )[0]
+            lbp_features.append(self._l1(histogram))
+        lbp_histogram = np.concatenate(lbp_features)
+        gray_levels = gray.astype(np.uint16) * self.glcm_levels // 256
+        glcm_features = self._glcm_features(gray_levels, valid)
+        return np.concatenate((color_histogram, lbp_histogram, glcm_features)).astype(
+            np.float32
         )
 
-        glcm_features = []
-        for prop in self.glcm_props:
-            val = graycoprops(glcm, prop).flatten()
-            glcm_features.extend(val)
-        glcm_features = np.array(glcm_features)
+    @staticmethod
+    def _l1(values: np.ndarray) -> np.ndarray:
+        total = float(values.sum())
+        return values.astype(np.float64) / total if total else values.astype(np.float64)
 
-        hog_features = hog(
-            gray,
-            orientations=self.hog_orientations,
-            pixels_per_cell=self.hog_pixels_per_cell,
-            cells_per_block=self.hog_cells_per_block,
-            block_norm="L2-Hys",
-            transform_sqrt=True,
-            feature_vector=True,
+    @staticmethod
+    def _erode(mask: np.ndarray, radius: int) -> np.ndarray:
+        kernel = np.ones((2 * radius + 1, 2 * radius + 1), dtype=np.uint8)
+        return cv2.erode(
+            mask.astype(np.uint8),
+            kernel,
+            borderType=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        ).astype(bool)
+
+    def _glcm_features(self, gray: np.ndarray, valid: np.ndarray) -> np.ndarray:
+        by_distance: list[list[float]] = []
+        for distance in self.glcm_distances:
+            by_angle: list[list[float]] = []
+            for dy_unit, dx_unit in self.glcm_offsets:
+                dy, dx = dy_unit * distance, dx_unit * distance
+                cooccurrence = self._cooccurrence(gray, valid, dy, dx)
+                by_angle.append(self._properties(cooccurrence))
+            by_distance.append(np.mean(by_angle, axis=0).tolist())
+        return np.asarray(by_distance, dtype=np.float64).ravel()
+
+    def _cooccurrence(
+        self, gray: np.ndarray, valid: np.ndarray, dy: int, dx: int
+    ) -> np.ndarray:
+        height, width = gray.shape
+        y0, y1 = max(0, -dy), min(height, height - dy)
+        x0, x1 = max(0, -dx), min(width, width - dx)
+        left = gray[y0:y1, x0:x1]
+        right = gray[y0 + dy : y1 + dy, x0 + dx : x1 + dx]
+        pair_mask = valid[y0:y1, x0:x1] & valid[y0 + dy : y1 + dy, x0 + dx : x1 + dx]
+        pairs = np.bincount(
+            (left[pair_mask] * self.glcm_levels + right[pair_mask]).astype(np.int64),
+            minlength=self.glcm_levels**2,
+        ).reshape(self.glcm_levels, self.glcm_levels)
+        symmetric = pairs + pairs.T
+        total = symmetric.sum()
+        return symmetric / total if total else symmetric.astype(np.float64)
+
+    def _properties(self, matrix: np.ndarray) -> list[float]:
+        levels = np.arange(self.glcm_levels, dtype=np.float64)
+        difference = levels[:, None] - levels[None, :]
+        contrast = float(np.sum(matrix * difference**2))
+        energy = float(np.sqrt(np.sum(matrix**2)))
+        homogeneity = float(np.sum(matrix / (1 + difference**2)))
+        mean_i = float(np.sum(matrix * levels[:, None]))
+        mean_j = float(np.sum(matrix * levels[None, :]))
+        std_i = float(np.sqrt(np.sum(matrix * (levels[:, None] - mean_i) ** 2)))
+        std_j = float(np.sqrt(np.sum(matrix * (levels[None, :] - mean_j) ** 2)))
+        correlation = (
+            float(
+                np.sum(matrix * (levels[:, None] - mean_i) * (levels[None, :] - mean_j))
+                / (std_i * std_j)
+            )
+            if std_i and std_j
+            else 1.0
         )
-
-        combined = np.hstack(
-            [color_moments, color_hist, lbp_hist, glcm_features, hog_features]
-        )
-
-        return combined.astype(np.float32)
+        return [contrast, correlation, energy, homogeneity]
 
 
 class RawPixelFeatureExtractor(BaseFeatureExtractor):
@@ -123,8 +144,10 @@ class RawPixelFeatureExtractor(BaseFeatureExtractor):
     def __init__(self, img_size: int = IMAGE_SIZE) -> None:
         self.img_size = img_size
 
-    def extract(self, img: Image.Image | np.ndarray) -> np.ndarray:
+    def extract(self, img: Image.Image | np.ndarray | ImageWithMask) -> np.ndarray:
         """Resize image and flatten pixel values."""
+        if isinstance(img, ImageWithMask):
+            img = img.pixels
         if isinstance(img, np.ndarray):
             img = Image.fromarray(img)
 
