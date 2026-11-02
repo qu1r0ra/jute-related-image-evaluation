@@ -1,3 +1,10 @@
+from jute_disease.evaluation.gated import (
+    GatedEvaluationError,
+    evaluate_gated_test,
+    probe_plan,
+    write_fixture_run_record,
+    write_matrix_freeze,
+)
 from jute_disease.evaluation.metrics import EVAL_METRICS, TRAIN_METRICS, format_metrics
 from jute_disease.evaluation.resampling import (
     CONFIDENCE_LEVEL,
@@ -34,6 +41,7 @@ __all__ = [
     "Agreement",
     "ClassScore",
     "Evaluation",
+    "GatedEvaluationError",
     "Interval",
     "PredictionSet",
     "Resampling",
@@ -41,11 +49,15 @@ __all__ = [
     "SeedSummary",
     "agreement_gate",
     "evaluate_predictions",
+    "evaluate_gated_test",
     "format_metrics",
     "kendall_tau",
     "one_image_per_family",
+    "probe_plan",
     "resample_metrics",
     "score_run",
     "summarize_seeds",
     "wilson_interval",
+    "write_fixture_run_record",
+    "write_matrix_freeze",
 ]

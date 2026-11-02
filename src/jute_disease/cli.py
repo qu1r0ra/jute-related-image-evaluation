@@ -59,6 +59,12 @@ from jute_disease.data import (
     write_policy_manifests,
     write_thresholds,
 )
+from jute_disease.evaluation import (
+    GatedEvaluationError,
+    evaluate_gated_test,
+    write_fixture_run_record,
+    write_matrix_freeze,
+)
 from jute_disease.reporting.tables import aggregate_metrics
 from jute_disease.training import (
     WORKSPACE_FILE,
@@ -495,6 +501,42 @@ def _evaluate_aggregate(args: argparse.Namespace) -> None:
     aggregate_metrics(args.fit_ids, args.output, args.runs_dir)
 
 
+def _evaluate_matrix_freeze(args: argparse.Namespace) -> None:
+    try:
+        path, digest = write_matrix_freeze(
+            validation_outcomes=args.validation_outcomes,
+            benchmark_path=args.benchmark,
+            target_dir=args.target_dir,
+            output_path=args.output,
+        )
+    except GatedEvaluationError as error:
+        raise SystemExit(f"matrix freeze blocked: {error}") from error
+    _print_json({"selection": str(path), "sha256": digest})
+
+
+def _evaluate_fixture_run_record(args: argparse.Namespace) -> None:
+    try:
+        path, digest = write_fixture_run_record(args.selection, args.output)
+    except GatedEvaluationError as error:
+        raise SystemExit(f"fixture run record blocked: {error}") from error
+    _print_json({"run_record": str(path), "sha256": digest})
+
+
+def _evaluate_gated(args: argparse.Namespace) -> None:
+    try:
+        path = evaluate_gated_test(
+            selection_path=args.selection,
+            run_record_path=args.run_record,
+            target_dir=args.target_dir,
+            image_root=args.image_root,
+            output_dir=args.output_dir,
+            fixture=args.fixture,
+        )
+    except GatedEvaluationError as error:
+        raise SystemExit(f"evaluation blocked: {error}") from error
+    _print_json({"evaluation": str(path)})
+
+
 def _bounds(text: str) -> tuple[int, int]:
     try:
         train, val = (int(part) for part in text.split(","))
@@ -734,6 +776,39 @@ def build_parser() -> argparse.ArgumentParser:
     )
     aggregate.set_defaults(run=_evaluate_aggregate)
     evaluate_actions.add_parser("predict", help="Classify one image (forwarded).")
+
+    matrix_freeze = evaluate_actions.add_parser(
+        "matrix-freeze",
+        help="Freeze the confirmatory test selection after #114 outcomes.",
+    )
+    matrix_freeze.add_argument("--validation-outcomes", type=Path, required=True)
+    matrix_freeze.add_argument("--benchmark", type=Path, default=BENCHMARK_CONFIG)
+    matrix_freeze.add_argument("--target-dir", type=Path, required=True)
+    matrix_freeze.add_argument("--output", type=Path, required=True)
+    matrix_freeze.set_defaults(run=_evaluate_matrix_freeze)
+
+    fixture_record = evaluate_actions.add_parser(
+        "fixture-run-record",
+        help="Write a completed synthetic evaluator fixture record.",
+    )
+    fixture_record.add_argument("--selection", type=Path, required=True)
+    fixture_record.add_argument("--output", type=Path, required=True)
+    fixture_record.set_defaults(run=_evaluate_fixture_run_record)
+
+    gated = evaluate_actions.add_parser(
+        "gated", help="Read the held-out partition through the gated evaluator."
+    )
+    gated.add_argument("--selection", type=Path, required=True)
+    gated.add_argument("--run-record", type=Path, required=True)
+    gated.add_argument("--target-dir", type=Path, required=True)
+    gated.add_argument("--image-root", type=Path, required=True)
+    gated.add_argument("--output-dir", type=Path, required=True)
+    gated.add_argument(
+        "--fixture",
+        action="store_true",
+        help="Use deterministic synthetic predictions only.",
+    )
+    gated.set_defaults(run=_evaluate_gated)
 
     # planned commands owned by open tickets
     _add_freeze(commands)

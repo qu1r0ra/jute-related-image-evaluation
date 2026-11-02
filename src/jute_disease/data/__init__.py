@@ -73,6 +73,7 @@ from jute_disease.data.inventory import (
     write_inventory,
 )
 from jute_disease.data.manifest import (
+    EVALUATOR_TEST_MANIFEST,
     FreezeBlockedError,
     HeldOutPartitionError,
     Manifest,
@@ -81,6 +82,7 @@ from jute_disease.data.manifest import (
     load_manifest,
     receipt_for,
     validate_manifest,
+    write_evaluator_test_manifest,
     write_manifest,
 )
 from jute_disease.data.masks import (
@@ -179,6 +181,7 @@ __all__ = [
     "ManifestContentVerifier",
     "ManifestDataset",
     "ManifestEntry",
+    "EVALUATOR_TEST_MANIFEST",
     "OverlapReport",
     "PreprocessingSpec",
     "SourceMismatchError",
@@ -235,6 +238,7 @@ __all__ = [
     "verify_counts",
     "write_decision",
     "write_inventory",
+    "write_evaluator_test_manifest",
     "write_manifest",
     "write_policy_manifests",
     "load_policy_manifest",

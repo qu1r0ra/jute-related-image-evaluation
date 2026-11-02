@@ -65,6 +65,7 @@ from jute_disease.data.manifest import (
     receipt_for,
     summarize_pad_fractions,
     validate_manifest,
+    write_evaluator_test_manifest,
     write_manifest,
 )
 from jute_disease.data.sources import (
@@ -326,6 +327,7 @@ def freeze_target(
         target.mkdir(parents=True, exist_ok=True)
         _write_json(target / "grouping.json", grouping)
     write_manifest(manifest, target)
+    write_evaluator_test_manifest(manifest, target)
     report = {
         "image_root": str(image_root),
         "receipt": receipt_for(manifest),

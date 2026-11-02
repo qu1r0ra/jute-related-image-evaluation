@@ -6,6 +6,14 @@ This page records cross-cutting behavior that is easy to break during changes. S
 
 An explicit target freeze inventories image bytes and decoded pixels, applies the tracked curation and identity rules, and writes grouped partitions with a receipt binding the manifest to its inputs. Existing freeze outputs are not silently replaced. Cache identity includes the preprocessing specification, so changing it invalidates matching image caches.
 
+## Test evaluation
+
+The freeze writes a source-bound test-only manifest under `target/evaluator/`. The evaluator is its only reader; the static training guard and held-out data-module check protect test-image access. `evaluate matrix-freeze` requires recorded #114 validation outcomes and writes an immutable, hash-bound selection containing planned fit and analysis IDs, every validation-selected hyperparameter, the letterbox and mask-audit outcomes, border settings, post-pilot budget, pipeline-code tree hash and environment-lock hash. Commit this selection before any test read. A later selection is a new record. A selection created after a test read is post-hoc and its results must be reported as such.
+
+`evaluate gated` verifies the selection and completed run record before loading the frozen test partition or opening test images. It scores background-only predictions for the primary split, all pools and policies, classical feature/model routes and MobileNetV2 ImageNet route over five seeds; every final checkpoint is scored on a deterministic class-and-scene stratified leaf-only sample up to 2,000 images. It reports class-by-scene support and accuracy with Wilson intervals, and includes scene macro-F1 only when every class has at least 30 test images.
+
+The border probe uses the frozen width (32 px starting value) inside resized image content and masks letterbox padding. It reports accuracy and macro-F1 intervals, a family-level 1,000-permutation null, majority-class accuracy, pad-fraction and aspect-ratio baselines, and frame leaf share. The symptom-survival headline is limited to images with at most 5% leaf in the frame, requires at least 50 retained test images per class and a passed mask audit, and reports class and scene support. It states that the 32 px strip is more sensitive to mask-edge error than whole-leaf mask quality. No Grad-CAM leaf score is implemented.
+
 ## Training queue
 
 `configs/benchmark.json` declares the fits, shared recipe, per-fit seeds, and step timeouts. The queue runs one child process per fit and can resume when invoked again. The official CUDA profile uses `bf16-mixed`, TF32 matmul and cuDNN, `cudnn.benchmark` off, and eight DataLoader workers. CPU smoke work uses zero workers. `torch.compile` stays off, and the CLI entry point keeps its `__main__` guard so forkserver workers can safely re-import it.
@@ -30,5 +38,3 @@ Closing the browser terminal does not stop a detached process. The 72-hour Jupyt
 ## Decided, not yet implemented
 
 These items are decided but are not current behavior. Each bullet states the target. When its issue lands, move the rule into the section above it belongs to and delete the bullet.
-
-- Test separation ([issue 139](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/139)): the freeze writes the test manifest where only the evaluator reads it, and the trainer never receives it. The evaluator runs only with an immutable selection record committed with its hash. The static test-name guard stays as a second check.

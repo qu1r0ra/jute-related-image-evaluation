@@ -28,6 +28,8 @@ MANIFEST_VERSION = 2
 MANIFEST_FILE = "manifest.json"
 RECEIPT_FILE = "receipt.json"
 PARTITIONS = ("train", "val", "test")
+EVALUATOR_TEST_MANIFEST_FORMAT = "jute-evaluator-test-manifest-v1"
+EVALUATOR_TEST_MANIFEST = "evaluator/test-manifest.json"
 
 
 class FreezeBlockedError(ValueError):
@@ -436,6 +438,30 @@ def write_manifest(manifest: Manifest, directory: Path) -> Path:
     )
     _write_atomic(receipt, json.dumps(receipt_for(manifest), indent=2) + "\n")
     return receipt
+
+
+def write_evaluator_test_manifest(manifest: Manifest, directory: Path) -> Path:
+    """Write the held-out entries to a separate, source-bound evaluator file."""
+    path = Path(directory) / EVALUATOR_TEST_MANIFEST
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "source_manifest_digest": manifest.digest(),
+        "partition": "test",
+        "version": manifest.version,
+        "entries": [
+            entry.to_json(manifest.version) for entry in manifest.partition("test")
+        ],
+    }
+    digest = hashlib.sha256(
+        (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+    envelope = {
+        "format": EVALUATOR_TEST_MANIFEST_FORMAT,
+        "record": record,
+        "sha256": digest,
+    }
+    _write_atomic(path, json.dumps(envelope, indent=2, sort_keys=True) + "\n")
+    return path
 
 
 def load_manifest(directory: Path, min_support: int | None = None) -> Manifest:

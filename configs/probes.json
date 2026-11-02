@@ -1,0 +1,17 @@
+{
+  "background_only": {
+    "seed_count": 5,
+    "leaf_mask": "excess-green-otsu-largest-component"
+  },
+  "leaf_only": {
+    "sample_size": 2000,
+    "sampling": "deterministic stratified by class and scene"
+  },
+  "border": {
+    "seed_count": 3,
+    "frame_width_px_start": 32,
+    "leaf_share_cutoff_start": 0.05,
+    "null_permutations": 1000,
+    "family_level_permutation": true
+  }
+}
