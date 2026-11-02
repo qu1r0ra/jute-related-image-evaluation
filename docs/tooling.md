@@ -23,7 +23,7 @@ Preprocessing identity revision 2 covers the shared 256-pixel letterbox, bilinea
 
 ## Benchmark queue
 
-`jute-disease queue plan` and `queue status` list every declared fit and need no policy directory. `queue run` over the full matrix requires `--policy-dir`, the directory of receipted policy manifests (with `assignments.json`), and one `--pool-a-root`, `--pool-b-root` and `--pool-c-root` for each pool's images. The same options reach `just queue-run`. Tuning fits (`classical/tune/...`, `cnn/tune/...`, `source/tune/...`) run before the finals that reuse their selection and write a `tuning.json` that records `test_accessed: false`.
+`jute-disease queue plan` and `queue status` list every declared fit and need no policy directory. `queue run` over the full matrix requires `--policy-dir`, the directory of receipted policy manifests (with `assignments.json`), and one `--pool-a-root`, `--pool-b-root` and `--pool-c-root` for each pool's images. The same options reach `just queue-run` and `just queue-unattended` (an optional leading timeout in seconds, then the options). Tuning fits (`classical/tune/...`, `cnn/tune/...`, `source/tune/...`) run before the finals that reuse their selection and write a `tuning.json` that records `test_accessed: false`.
 
 Classical estimators and their nine-configuration grids: k-NN with k in {1, 3, 5, 7, 11, 15, 21, 31, 51}; L2 logistic regression with C from 1e-4 to 1e4 in nine log-spaced values; RBF-SVC with C in {1, 10, 100} and gamma in {0.1, 1, 10} times scale; random forest with 500 trees, max_features in {sqrt, 0.1, 0.3} and min_samples_leaf in {1, 3, 10}. Gaussian naive Bayes searches `var_smoothing` over 1e-12 to 1e-4 in nine decades. The crafted feature vector has 548 values; z-scores are fitted on the training fold only.
 
@@ -31,9 +31,19 @@ Classical estimators and their nine-configuration grids: k-NN with k in {1, 3, 5
 
 The scripts in `scripts/` are Linux-only command-line helpers for lab runs:
 
-- `notify_run.py` sends start, hourly heartbeat and completion messages to an `ntfy` topic. `NTFY_TOPIC` and `NTFY_TOKEN` come from the environment. The token is sent only in the HTTPS Authorization header, never in process arguments; transport errors do not print credentials.
+- `notify_run.py` sends start, hourly heartbeat, success and failure messages to an `ntfy` topic. `NTFY_TOPIC` and `NTFY_TOKEN` come from the environment. The token is sent only in the HTTPS Authorization header, never in process arguments; transport errors do not print credentials. A cull or other abrupt kill can prevent a final failure message; a missed heartbeat signals interruption.
 - `lab_run.sh` holds a `flock` lock for the full process lifetime, applies a timeout to the process group, and can detach a run while recording its PID and log path. Example: `scripts/lab_run.sh /path/to/run.lock 7200 uv run jute-disease queue run`.
+- `queue_unattended.sh` (through `just queue-unattended`) checks notification connectivity, launches a detached locked queue, and records a transfer manifest after each invocation. Re-run it after a JupyterLab cull or host restart; the queue reuses only fits whose receipts still match.
+- `queue_batch.py` runs one queue command and records the full `artifacts/runs/` tree after it exits, including a failed invocation, so completed receipts and partial-run evidence can be copied together.
 - `verify_transfer.py record ROOT MANIFEST` writes a SHA-256 inventory outside the batch. Run `verify_transfer.py verify ROOT MANIFEST` after copy-back; missing, changed, unexpected, unsafe, hard-linked, non-regular and colliding paths reject the batch.
+
+On the lab, run `just queue-unattended --policy-dir <dir> --pool-a-root <dir> --pool-b-root <dir> --pool-c-root <dir>` from the checkout. The ntfy topic and token must already be supplied through the host's environment secret mechanism. After the detached invocation ends, copy `artifacts/runs/` and the newly written manifest from `artifacts/transfer-manifests/` to the PC. Verify the PC copy, for example:
+
+```powershell
+uv run --locked python scripts/verify_transfer.py verify artifacts/runs artifacts/transfer-manifests/queue-<batch-id>.json
+```
+
+Repeat the copy and verification after every queue invocation. Keep the lab copy until verification succeeds; the manifest snapshots the full run store so earlier receipts needed for resume remain included.
 
 These helpers do not run real lab sessions or experiments as part of tooling CI. Lab validation and A100 readiness are tracked separately in [issue 114](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/114).
 

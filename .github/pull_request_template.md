@@ -1,4 +1,4 @@
-Closes #
+Refs #<!-- issue number; omit the line when no ticket applies -->
 
 ## Summary
 

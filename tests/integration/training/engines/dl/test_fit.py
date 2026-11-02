@@ -31,6 +31,7 @@ def recipe() -> Recipe:
         image_size=64,
         max_epochs=2,
         precision="32-true",
+        num_workers=0,
     )
 
 

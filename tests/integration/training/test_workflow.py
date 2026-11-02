@@ -43,6 +43,7 @@ def _benchmark_json(path: Path, epochs: int = 1) -> Path:
         seeds=[42],
         source_seeds=[42],
         max_epochs=epochs,
+        precision="bf16-mixed",
         effective_batch=16,
     )
     raw["cnn_systems"] = {
@@ -445,12 +446,14 @@ def test_benchmark_declares_the_fits_the_workspace_runs(workspace: Workspace) ->
         FitKind.SOURCE,
         FitKind.TARGET,
     }
-    declared = load_benchmark(workspace.benchmark_path)
-    # A CPU workspace runs without loader workers, and the frozen assignment
-    # table replaces the one declared in the configuration.
+    # Without CUDA the workspace runs with num_workers=0 in memory, and the frozen
+    # assignment table replaces the one declared in the configuration.
+    on_disk = load_benchmark(workspace.benchmark_path)
     assert workspace.benchmark == replace(
-        declared,
-        recipe=replace(declared.recipe, num_workers=0),
+        on_disk,
+        recipe=replace(
+            on_disk.recipe, num_workers=workspace.benchmark.recipe.num_workers
+        ),
         assignments=workspace.benchmark.assignments,
     )
 

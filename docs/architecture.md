@@ -21,9 +21,14 @@ An explicit target freeze inventories image bytes and decoded pixels, applies th
 - Handcrafted features are an HSV 8x8x8 histogram, riu2 LBP at (8,1) and (16,2), and a four-angle GLCM at distances 1 and 2 on 32 gray levels. Letterbox padding is excluded from every descriptor, and each block is weighted by 1/sqrt(block size). The single transform choice lives in `ImagePipeline`, so a different #114 outcome changes only that choice.
 - Training code never names the test partition. `tests/training/test_held_out_guard.py` checks this boundary statically and at the command line.
 
+## Artifact recovery
+
+Runtime artifacts stay under the gitignored `artifacts/` directory inside the checkout on both machines. Never run `git clean -x` on the lab. `just queue-unattended` detaches the queue behind the lab lock and timeout wrapper, checks ntfy before launch, and sends start, hourly heartbeat, success or failure notifications using `NTFY_TOPIC` and `NTFY_TOKEN` from the environment. Each invocation writes a SHA-256 inventory of the full `artifacts/runs/` store to `artifacts/transfer-manifests/`, including when the queue exits with an error. A batch is all work since the last accepted copy-back; the full-store manifest includes earlier receipts and checkpoints needed for recovery.
+
+Closing the browser terminal does not stop a detached process. The 72-hour JupyterLab cull or a host restart can stop it without a final failure notification; a missed heartbeat signals interruption. After relaunch, run `just queue-unattended` again to resume from compatible receipts. After every completed invocation, copy `artifacts/runs/` and its new transfer manifest to the PC, then run `uv run --locked python scripts/verify_transfer.py verify artifacts/runs artifacts/transfer-manifests/queue-<batch-id>.json` there. Accept the batch only when every hash matches. Delete nothing on the lab until the PC copy is verified.
+
 ## Decided, not yet implemented
 
 These items are decided but are not current behavior. Each bullet states the target. When its issue lands, move the rule into the section above it belongs to and delete the bullet.
 
 - Test separation ([issue 139](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/139)): the freeze writes the test manifest where only the evaluator reads it, and the trainer never receives it. The evaluator runs only with an immutable selection record committed with its hash. The static test-name guard stays as a second check.
-- Artifact transfer ([issue 107](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/107), owner-confirmed 2026-11-02): keep artifacts under `artifacts/` inside the checkout on both machines, gitignored. Never run `git clean -x` on the lab. A batch is everything finished since the last accepted copy-back. Copy it back after every completed queue invocation, and accept it only after `scripts/verify_transfer.py` matches every hash. Delete nothing on the lab until its PC copy is verified.
