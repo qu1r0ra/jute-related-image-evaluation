@@ -382,31 +382,36 @@ def _freeze_source(args: argparse.Namespace) -> None:
 def _workspace_from(args: argparse.Namespace) -> Workspace:
     freeze: Path = args.freeze_dir
     roots = {"plantvillage": args.plantvillage_root, "plantdoc": args.plantdoc_root}
-    return open_workspace(
-        benchmark_path=args.benchmark,
-        data=DataInputs(
-            image_root=args.image_root,
-            target_dir=freeze / TARGET_DIR,
-            sources={
-                name: (freeze / f"source_{name}", root) for name, root in roots.items()
-            },
-            policy_dir=args.policy_dir,
-            pool_roots={
-                pool: root
-                for pool, root in (
-                    ("A", args.pool_a_root),
-                    ("B", args.pool_b_root),
-                    ("C", args.pool_c_root),
-                )
-                if root is not None
-            },
-        ),
-        runs_dir=args.runs_dir,
-        cache_dir=args.cache_dir,
-        pretrained=args.pretrained,
-        require_cuda=not args.allow_cpu,
-        accelerator=args.accelerator,
-    )
+    try:
+        return open_workspace(
+            benchmark_path=args.benchmark,
+            data=DataInputs(
+                image_root=args.image_root,
+                target_dir=freeze / TARGET_DIR,
+                sources={
+                    name: (freeze / f"source_{name}", root)
+                    for name, root in roots.items()
+                },
+                policy_dir=args.policy_dir,
+                pool_roots={
+                    pool: root
+                    for pool, root in (
+                        ("A", args.pool_a_root),
+                        ("B", args.pool_b_root),
+                        ("C", args.pool_c_root),
+                    )
+                    if root is not None
+                },
+            ),
+            runs_dir=args.runs_dir,
+            cache_dir=args.cache_dir,
+            pretrained=args.pretrained,
+            require_cuda=not args.allow_cpu,
+            accelerator=args.accelerator,
+            evaluation_selection_path=args.evaluation_selection,
+        )
+    except (OSError, ValueError) as error:
+        raise SystemExit(f"workspace blocked: {error}") from error
 
 
 def _train_fit(args: argparse.Namespace) -> None:
@@ -573,6 +578,12 @@ def _add_workspace_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--plantdoc-root", type=Path, default=PLANTDOC_DIR)
     parser.add_argument("--runs-dir", type=Path, default=RUNS_DIR)
     parser.add_argument("--cache-dir", type=Path, default=ML_FEATURES_DIR)
+    parser.add_argument(
+        "--evaluation-selection",
+        type=Path,
+        default=None,
+        help="Bind planned final fits to a hash-valid #139 selection record.",
+    )
     parser.add_argument("--accelerator", default="auto")
     parser.add_argument(
         "--allow-cpu",

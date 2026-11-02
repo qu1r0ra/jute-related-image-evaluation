@@ -419,6 +419,7 @@ def fit_identity(
     assignment_table_sha256: str | None = None,
     source_checkpoint_ancestry: list[dict[str, str]] | None = None,
     evaluation_fit_spec: dict[str, Any] | None = None,
+    evaluation_selection_sha256: str | None = None,
 ) -> str:
     """Digest of everything that makes two runs of ``fit`` interchangeable.
 
@@ -440,6 +441,7 @@ def fit_identity(
         assignment_table_sha256=assignment_table_sha256,
         source_checkpoint_ancestry=source_checkpoint_ancestry,
         evaluation_fit_spec=evaluation_fit_spec,
+        evaluation_selection_sha256=evaluation_selection_sha256,
     )
     return fit_identity_digest(payload)
 
@@ -458,6 +460,7 @@ def fit_identity_payload(
     assignment_table_sha256: str | None = None,
     source_checkpoint_ancestry: list[dict[str, str]] | None = None,
     evaluation_fit_spec: dict[str, Any] | None = None,
+    evaluation_selection_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Return the complete identity inputs for one fit receipt.
 
@@ -479,6 +482,7 @@ def fit_identity_payload(
     }
     if evaluation_fit_spec is not None:
         payload["evaluation_fit_spec"] = evaluation_fit_spec
+        payload["evaluation_selection_sha256"] = evaluation_selection_sha256
     return payload
 
 

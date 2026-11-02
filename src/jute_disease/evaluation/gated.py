@@ -54,6 +54,27 @@ def _is_sha256(value: Any) -> bool:
     )
 
 
+def _pipeline_code_tree_sha256(root: Path | None = None) -> str:
+    """Hash source and configuration files that define the evaluator pipeline."""
+    project_root = root or Path(__file__).resolve().parents[3]
+    digest = hashlib.sha256()
+    for relative in ("src", "configs"):
+        for file in sorted((project_root / relative).rglob("*")):
+            if file.is_file() and (
+                (relative == "src" and file.suffix == ".py")
+                or (relative == "configs" and file.suffix in {".json", ".yaml", ".yml"})
+            ):
+                digest.update(file.relative_to(project_root).as_posix().encode())
+                digest.update(hashlib.sha256(file.read_bytes()).digest())
+    return digest.hexdigest()
+
+
+def _environment_lock_sha256(root: Path | None = None) -> str:
+    """Hash the dependency lock file committed with the evaluator code."""
+    project_root = root or Path(__file__).resolve().parents[3]
+    return hashlib.sha256((project_root / "uv.lock").read_bytes()).hexdigest()
+
+
 def _valid_assignment_rows(value: Any) -> bool:
     return (
         isinstance(value, list)
@@ -118,6 +139,8 @@ def _read_selection(path: Path) -> dict[str, Any]:
             "validation_selected_hyperparameters_sha256"
         ]
         assignment_table = selection["assignment_table"]
+        pipeline_code_tree_sha256 = selection["pipeline_code_tree_sha256"]
+        environment_lock_sha256 = selection["environment_lock_sha256"]
     except (KeyError, TypeError) as error:
         raise GatedEvaluationError(
             "selection record has an invalid matrix schema"
@@ -160,6 +183,8 @@ def _read_selection(path: Path) -> dict[str, Any]:
         or not selected_hyperparameters
         or selected_hyperparameters_sha256 != _digest(selected_hyperparameters)
         or not _valid_assignment_rows(assignment_table)
+        or not _is_sha256(pipeline_code_tree_sha256)
+        or not _is_sha256(environment_lock_sha256)
         or type(leaf_sample_size) is not int
         or leaf_sample_size < 1
         or not valid_seeds(border_seeds)
@@ -524,17 +549,8 @@ def write_matrix_freeze(
     if not _is_sha256(full_manifest_digest):
         raise GatedEvaluationError("public target manifest has no held-out commitment")
     benchmark_bytes = Path(benchmark_path).read_bytes()
-    root = Path(__file__).resolve().parents[3]
-    tree_hash = hashlib.sha256()
-    for relative in ("src", "configs"):
-        for file in sorted((root / relative).rglob("*")):
-            if file.is_file() and (
-                (relative == "src" and file.suffix == ".py")
-                or (relative == "configs" and file.suffix in {".json", ".yaml", ".yml"})
-            ):
-                tree_hash.update(file.relative_to(root).as_posix().encode())
-                tree_hash.update(hashlib.sha256(file.read_bytes()).digest())
-    lock_hash = hashlib.sha256((root / "uv.lock").read_bytes()).hexdigest()
+    pipeline_code_tree_sha256 = _pipeline_code_tree_sha256()
+    lock_hash = _environment_lock_sha256()
     plan = probe_plan(benchmark_path)
     benchmark = load_benchmark(benchmark_path)
     image_size = benchmark.recipe.image_size
@@ -582,7 +598,7 @@ def write_matrix_freeze(
             "final": float(leaf_cutoff),
         },
         "post_pilot_budget_hours": float(budget),
-        "pipeline_code_tree_sha256": tree_hash.hexdigest(),
+        "pipeline_code_tree_sha256": pipeline_code_tree_sha256,
         "environment_lock_sha256": lock_hash,
         "created_after_test_reads": False,
     }
@@ -757,6 +773,7 @@ def _verified_training_receipt(
         or identity_digest != identity
         or not isinstance(identity_inputs, dict)
         or identity_inputs.get("evaluation_fit_spec") != model_spec
+        or identity_inputs.get("evaluation_selection_sha256") != _digest(selection)
         or not isinstance(fit_inputs, dict)
         or fit_inputs.get("fit_id") != fit_id
         or not fit_matches_spec
@@ -1678,6 +1695,17 @@ def evaluate_gated_test(
         or current.get("selection_sha256") != _digest(selection)
     ):
         raise GatedEvaluationError("selection was superseded by a later matrix freeze")
+    try:
+        pipeline_code_tree_sha256 = _pipeline_code_tree_sha256()
+        environment_lock_sha256 = _environment_lock_sha256()
+    except OSError as error:
+        raise GatedEvaluationError(
+            "frozen evaluator code or environment is unavailable"
+        ) from error
+    if pipeline_code_tree_sha256 != selection["pipeline_code_tree_sha256"]:
+        raise GatedEvaluationError("evaluator code differs from the frozen pipeline")
+    if environment_lock_sha256 != selection["environment_lock_sha256"]:
+        raise GatedEvaluationError("environment lock differs from the frozen pipeline")
     if not fixture and mask_checkpoint is None:
         raise GatedEvaluationError(
             "production evaluation requires a local SAM 2 mask checkpoint"

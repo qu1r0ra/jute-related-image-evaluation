@@ -1,5 +1,6 @@
 """The declared benchmark matrix, recipe, plan order and run identities."""
 
+import hashlib
 import json
 from dataclasses import replace
 
@@ -14,6 +15,7 @@ from jute_disease.training import (
     build_plan,
     fit_identity,
     load_benchmark,
+    open_workspace,
 )
 
 
@@ -256,6 +258,61 @@ def test_identity_binds_configuration_and_code_commit(benchmark) -> None:
         **(arguments | {"assignment_table_sha256": "assignment-b"})
     )
     assert base != fit_identity(**(arguments | {"source_checkpoint_ancestry": []}))
+    model_spec = {"input_view": "raw-test", "selected_parameters": {"c": 1.0}}
+    bound = fit_identity(
+        **arguments,
+        evaluation_fit_spec=model_spec,
+        evaluation_selection_sha256="a" * 64,
+    )
+    assert bound != base
+    assert bound != fit_identity(
+        **arguments,
+        evaluation_fit_spec=model_spec,
+        evaluation_selection_sha256="b" * 64,
+    )
+
+
+def test_workspace_carries_hash_valid_evaluation_selection(tmp_path) -> None:
+    record = {
+        "issue": 139,
+        "selection": {"model_specs": {"final-fit": {"input_view": "raw-test"}}},
+    }
+    digest = hashlib.sha256(
+        (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+    selection_path = tmp_path / "selection.json"
+    selection_path.write_text(
+        json.dumps(
+            {
+                "format": "jute-evaluation-selection-v1",
+                "record": record,
+                "sha256": digest,
+            }
+        ),
+        encoding="utf-8",
+    )
+    workspace = open_workspace(
+        benchmark_path=BENCHMARK_CONFIG,
+        data=DataInputs(
+            image_root=tmp_path,
+            target_dir=tmp_path / "target",
+            sources={},
+            policy_dir=tmp_path / "policies",
+        ),
+        runs_dir=tmp_path / "runs",
+        cache_dir=tmp_path / "cache",
+        pretrained=False,
+        require_cuda=False,
+        evaluation_selection_path=selection_path,
+    )
+
+    assert workspace.evaluation_fit_specs == record["selection"]["model_specs"]
+    assert workspace.evaluation_selection_sha256 == digest
+    workspace_path = tmp_path / "workspace.json"
+    workspace.save(workspace_path)
+    loaded = Workspace.load(workspace_path)
+    assert loaded.evaluation_fit_specs == workspace.evaluation_fit_specs
+    assert loaded.evaluation_selection_sha256 == digest
 
 
 def test_unknown_configuration_keys_are_rejected(tmp_path) -> None:

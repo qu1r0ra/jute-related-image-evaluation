@@ -53,11 +53,44 @@ from jute_disease.training.stack import verify_stack
 RESULT_FILE = "result.json"
 LOG_FILE = "child.log"
 WORKSPACE_FILE = "workspace.json"
+EVALUATION_SELECTION_FORMAT = "jute-evaluation-selection-v1"
 CNN_KINDS = (FitKind.SOURCE, FitKind.TARGET)
 
 
 class UpstreamError(RuntimeError):
     """The checkpoint a chained fit starts from is missing or no longer verifies."""
+
+
+def _read_evaluation_selection(
+    path: Path | str,
+) -> tuple[dict[str, dict[str, Any]], str]:
+    """Read fit specifications from a hash-valid #139 selection record."""
+    try:
+        envelope = json.loads(Path(path).read_text(encoding="utf-8"))
+        record = envelope["record"]
+        model_specs = record["selection"]["model_specs"]
+        canonical = (
+            json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode()
+        selection_sha256 = hashlib.sha256(canonical).hexdigest()
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise ValueError("evaluation selection is missing or malformed") from error
+    if (
+        not isinstance(envelope, dict)
+        or envelope.get("format") != EVALUATION_SELECTION_FORMAT
+        or record.get("issue") != 139
+        or envelope.get("sha256") != selection_sha256
+        or not isinstance(model_specs, dict)
+        or not model_specs
+        or any(
+            not isinstance(fit_id, str)
+            or not fit_id
+            or not isinstance(model_spec, dict)
+            for fit_id, model_spec in model_specs.items()
+        )
+    ):
+        raise ValueError("evaluation selection is missing or has an invalid hash")
+    return model_specs, selection_sha256
 
 
 @dataclass(frozen=True)
@@ -71,6 +104,8 @@ class Workspace:
     pretrained: bool
     require_cuda: bool
     accelerator: str
+    evaluation_fit_specs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    evaluation_selection_sha256: str | None = None
     benchmark: Benchmark = field(init=False, compare=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -106,6 +141,15 @@ class Workspace:
                 benchmark,
                 recipe=replace(benchmark.recipe, num_workers=0),
             )
+        if self.evaluation_fit_specs and (
+            self.evaluation_selection_sha256 is None
+            or len(self.evaluation_selection_sha256) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.evaluation_selection_sha256
+            )
+        ):
+            raise ValueError("evaluation fit specs need a hash-bound selection")
         object.__setattr__(self, "benchmark", benchmark)
 
     def save(self, path: Path | str) -> None:
@@ -132,6 +176,8 @@ class Workspace:
                 "pretrained": self.pretrained,
                 "require_cuda": self.require_cuda,
                 "accelerator": self.accelerator,
+                "evaluation_fit_specs": self.evaluation_fit_specs,
+                "evaluation_selection_sha256": self.evaluation_selection_sha256,
             },
         )
 
@@ -159,6 +205,8 @@ class Workspace:
             pretrained=raw["pretrained"],
             require_cuda=raw["require_cuda"],
             accelerator=raw["accelerator"],
+            evaluation_fit_specs=raw.get("evaluation_fit_specs", {}),
+            evaluation_selection_sha256=raw.get("evaluation_selection_sha256"),
         )
 
 
@@ -171,6 +219,7 @@ def open_workspace(
     pretrained: bool = True,
     require_cuda: bool = True,
     accelerator: str = "auto",
+    evaluation_selection_path: Path | str | None = None,
 ) -> Workspace:
     """Resolve paths to absolute and create the output roots.
 
@@ -192,6 +241,12 @@ def open_workspace(
     cache = Path(cache_dir).resolve()
     runs.mkdir(parents=True, exist_ok=True)
     cache.mkdir(parents=True, exist_ok=True)
+    evaluation_fit_specs: dict[str, dict[str, Any]] = {}
+    evaluation_selection_sha256 = None
+    if evaluation_selection_path is not None:
+        evaluation_fit_specs, evaluation_selection_sha256 = _read_evaluation_selection(
+            evaluation_selection_path
+        )
     return Workspace(
         benchmark_path=Path(benchmark_path).resolve(),
         data=DataInputs(
@@ -214,6 +269,8 @@ def open_workspace(
         pretrained=pretrained,
         require_cuda=require_cuda,
         accelerator=accelerator,
+        evaluation_fit_specs=evaluation_fit_specs,
+        evaluation_selection_sha256=evaluation_selection_sha256,
     )
 
 
@@ -667,6 +724,12 @@ def _identity_inputs(
         preprocessing_sha256=context["preprocessing"]["sha256"],
         assignment_table_sha256=context["assignment_table"]["sha256"],
         source_checkpoint_ancestry=context["source_checkpoint_ancestry"],
+        evaluation_fit_spec=workspace.evaluation_fit_specs.get(fit.fit_id),
+        evaluation_selection_sha256=(
+            workspace.evaluation_selection_sha256
+            if fit.fit_id in workspace.evaluation_fit_specs
+            else None
+        ),
     )
 
 

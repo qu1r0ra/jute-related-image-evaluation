@@ -172,6 +172,12 @@ def _complete_fit_receipt(
         "assignment_table_sha256": assignment_raw_sha256,
         "source_checkpoint_ancestry": [],
         "evaluation_fit_spec": model_spec,
+        "evaluation_selection_sha256": hashlib.sha256(
+            (
+                json.dumps(selection_record, sort_keys=True, separators=(",", ":"))
+                + "\n"
+            ).encode()
+        ).hexdigest(),
     }
     metadata = {
         "identity_inputs": identity_inputs,
@@ -245,7 +251,7 @@ def _complete_fit_receipt(
 
 
 def test_cli_refuses_test_read_without_both_records_then_evaluates_fixture(
-    inputs: Inputs, tmp_path: Path
+    inputs: Inputs, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     benchmark = _mini_benchmark(tmp_path)
     selection = tmp_path / "selection.json"
@@ -302,6 +308,37 @@ def test_cli_refuses_test_read_without_both_records_then_evaluates_fixture(
     )
     main(args)
 
+    test_rows = json.loads(
+        (inputs.target_dir / "evaluator" / "test-manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )["record"]["entries"]
+    test_image = inputs.image_root / test_rows[0]["path"]
+    with pytest.raises(SystemExit, match="target test images can only be read"):
+        main(
+            [
+                "evaluate",
+                "predict",
+                str(test_image),
+                "--target-dir",
+                str(inputs.target_dir),
+                "--image-root",
+                str(inputs.image_root),
+            ]
+        )
+    with pytest.raises(SystemExit, match="image root differs from the freeze report"):
+        main(
+            [
+                "evaluate",
+                "predict",
+                str(test_image),
+                "--target-dir",
+                str(inputs.target_dir),
+                "--image-root",
+                str(tmp_path / "other-image-root"),
+            ]
+        )
+
     report = json.loads((output / "evaluation.json").read_text(encoding="utf-8"))
     assert report["border_leaf_share_cutoff"] == 0.05
     assert report["leaf_only"]["sample_size"] <= 2_000
@@ -319,6 +356,24 @@ def test_cli_refuses_test_read_without_both_records_then_evaluates_fixture(
     history_path = inputs.target_dir / "evaluator" / "test-read-history.jsonl"
     history = [json.loads(line) for line in history_path.read_text().splitlines()]
     assert [row["status"] for row in history] == ["started", "completed"]
+    import jute_disease.evaluation.gated as gated
+
+    with monkeypatch.context() as patch:
+        patch.setattr(gated, "_pipeline_code_tree_sha256", lambda root=None: "0" * 64)
+        with pytest.raises(
+            SystemExit, match="evaluator code differs from the frozen pipeline"
+        ):
+            main(args)
+    with monkeypatch.context() as patch:
+        patch.setattr(gated, "_environment_lock_sha256", lambda root=None: "0" * 64)
+        with pytest.raises(
+            SystemExit, match="environment lock differs from the frozen pipeline"
+        ):
+            main(args)
+    assert [
+        json.loads(line) for line in history_path.read_text().splitlines()
+    ] == history
+
     original_run_record = run_record.read_bytes()
     malformed_envelope = json.loads(original_run_record)
     malformed_envelope["record"]["completed_analysis_ids"].append([])
