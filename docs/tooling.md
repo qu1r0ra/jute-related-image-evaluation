@@ -21,6 +21,12 @@ Update dependencies deliberately, regenerate `uv.lock`, and review the full plat
 
 Preprocessing identity revision 2 covers the shared 256-pixel letterbox, bilinear resampling, rounded uint8 ImageNet-mean padding, tensor normalization and cache encoding. The classical route uses the same geometry and pad values without tensor normalization. Freeze manifest version 2 records each image's letterbox pad fraction and summarizes it by source and class. Version 1 manifests remain readable, but new freezes use version 2. A preprocessing identity change invalidates matching image caches; it does not rewrite or delete existing freeze artifacts. Re-freeze explicitly when the source, curation policy or split must change.
 
+## Benchmark queue
+
+`jute-disease queue plan` and `queue status` list every declared fit and need no policy directory. `queue run` over the full matrix requires `--policy-dir`, the directory of receipted policy manifests (with `assignments.json`), and one `--pool-a-root`, `--pool-b-root` and `--pool-c-root` for each pool's images. The same options reach `just queue-run`. Tuning fits (`classical/tune/...`, `cnn/tune/...`, `source/tune/...`) run before the finals that reuse their selection and write a `tuning.json` that records `test_accessed: false`.
+
+Classical estimators and their nine-configuration grids: k-NN with k in {1, 3, 5, 7, 11, 15, 21, 31, 51}; L2 logistic regression with C from 1e-4 to 1e4 in nine log-spaced values; RBF-SVC with C in {1, 10, 100} and gamma in {0.1, 1, 10} times scale; random forest with 500 trees, max_features in {sqrt, 0.1, 0.3} and min_samples_leaf in {1, 3, 10}. Gaussian naive Bayes searches `var_smoothing` over 1e-12 to 1e-4 in nine decades. The crafted feature vector has 548 values; z-scores are fitted on the training fold only.
+
 ## Lab helpers
 
 The scripts in `scripts/` are Linux-only command-line helpers for lab runs:
