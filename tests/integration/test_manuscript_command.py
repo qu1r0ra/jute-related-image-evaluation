@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from jute_disease.models.ml import classical_configurations
 from jute_disease.reporting import export_manuscript, validate_figure_sources
@@ -159,6 +160,63 @@ def _write_evaluation_bundles(
     return evaluation_dir, statistics_dir
 
 
+def _complete_synthetic_audit(
+    audit: dict[str, Any], macro_values: dict[str, int | float], manuscript: Path
+) -> dict[str, Any]:
+    completed = json.loads(json.dumps(audit))
+    completed["status"] = "complete"
+    completed["reviewer"] = {
+        "name": "synthetic independent reviewer",
+        "provider": "synthetic provider",
+        "fresh_context": True,
+        "reviewed_at": "synthetic fixture",
+        "record": "synthetic fixture audit record",
+    }
+    completed["manuscript_sha256"] = hashlib.sha256(manuscript.read_bytes()).hexdigest()
+    for row in completed["macro_rows"]:
+        row["status"] = "pass"
+        row["evidence"] = f"synthetic artifact evidence for {row['key']}"
+    completed["claim_rows"] = [
+        {
+            "claim": "No flagged claims identified in the fixture manuscript.",
+            "source_location": "Complete synthetic fixture manuscript.",
+            "may_report_basis": "Checked against every accepted may-report item.",
+            "may_not_claim_review": "Checked against every accepted may-not-claim item.",
+            "status": "pass",
+            "evidence": "Synthetic fixture review record.",
+        }
+    ]
+    completed["unflagged_numeric_statements"] = [
+        {
+            "statement": "No unflagged numeric statements remain.",
+            "source_location": "Complete synthetic fixture manuscript.",
+            "evidence": "Synthetic fixture numeric scan record.",
+            "status": "pass",
+        }
+    ]
+    completed["claim_inventory_complete"] = True
+    completed["numeric_scan_complete"] = True
+    row_ids = [
+        *(f"macro:{key}" for key in macro_values),
+        "claim:1",
+        "numeric:1",
+    ]
+    checked_count = (len(row_ids) + 9) // 10
+    completed["owner_spot_check"] = {
+        "status": "pass",
+        "fraction": 0.1,
+        "selection_method": "random",
+        "selection_record": "synthetic fixture random selection record",
+        "checked_rows": row_ids[:checked_count],
+    }
+    completed["owner_signoff"] = {
+        "status": "signed",
+        "signed_by": "synthetic fixture owner",
+        "signed_at": "synthetic fixture",
+    }
+    return completed
+
+
 def test_fixture_freezes_exports_rebuilds_and_checks_macros(tmp_path: Path) -> None:
     output = tmp_path / "manuscript-fixture"
     result = _run("manuscript", "fixture", "--output", str(output))
@@ -170,6 +228,15 @@ def test_fixture_freezes_exports_rebuilds_and_checks_macros(tmp_path: Path) -> N
     assert report["rebuild"]["verified_images"] > 0
 
     export_dir = output / "export"
+    export_metadata_path = export_dir / "export.json"
+    export_metadata_bytes = export_metadata_path.read_bytes()
+    export_metadata_path.write_text("[]", encoding="utf-8")
+    malformed_export_check = _run("manuscript", "check", str(export_dir))
+    assert malformed_export_check.returncode != 0
+    assert "export metadata must be a JSON object" in malformed_export_check.stderr
+    assert "Traceback" not in malformed_export_check.stderr
+    export_metadata_path.write_bytes(export_metadata_bytes)
+
     metadata = json.loads((export_dir / "export.json").read_text(encoding="utf-8"))
     macros = json.loads((export_dir / "macros.json").read_text(encoding="utf-8"))
     audit = json.loads((export_dir / "claim-audit.json").read_text(encoding="utf-8"))
@@ -246,6 +313,53 @@ def test_fixture_freezes_exports_rebuilds_and_checks_macros(tmp_path: Path) -> N
     assert malformed_audit_check.returncode != 0
     assert "must record the reviewed manuscript SHA-256" in malformed_audit_check.stderr
     assert "Traceback" not in malformed_audit_check.stderr
+
+    completed_audit = _complete_synthetic_audit(
+        audit, macros[report["export"]["export_id"]], manuscript
+    )
+    (export_dir / "claim-audit.json").write_text(
+        json.dumps(completed_audit), encoding="utf-8"
+    )
+    complete_audit_check = _run(
+        "manuscript",
+        "audit-check",
+        str(export_dir),
+        "--manuscript",
+        str(manuscript),
+    )
+    assert complete_audit_check.returncode == 0, complete_audit_check.stderr
+    assert json.loads(complete_audit_check.stdout)["pass"] is True
+
+    empty_inventory_audit = json.loads(json.dumps(completed_audit))
+    empty_inventory_audit["claim_rows"] = []
+    empty_inventory_audit["unflagged_numeric_statements"] = []
+    (export_dir / "claim-audit.json").write_text(
+        json.dumps(empty_inventory_audit), encoding="utf-8"
+    )
+    empty_inventory_check = _run(
+        "manuscript",
+        "audit-check",
+        str(export_dir),
+        "--manuscript",
+        str(manuscript),
+    )
+    assert empty_inventory_check.returncode != 0
+    assert "explicit no-flags result" in empty_inventory_check.stderr
+
+    changed_lists_audit = json.loads(json.dumps(completed_audit))
+    changed_lists_audit["claim_lists"]["may_report"][0] = "Altered claim rule."
+    (export_dir / "claim-audit.json").write_text(
+        json.dumps(changed_lists_audit), encoding="utf-8"
+    )
+    changed_lists_check = _run(
+        "manuscript",
+        "audit-check",
+        str(export_dir),
+        "--manuscript",
+        str(manuscript),
+    )
+    assert changed_lists_check.returncode != 0
+    assert "differ from the accepted #108 lists" in changed_lists_check.stderr
 
     runs_root = tmp_path / "synthetic-runs"
     fit_id = "cnn/mobilenet_v2_direct/seed-42"

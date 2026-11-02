@@ -82,10 +82,11 @@ receipts use schema version 1 and are rechecked by `manuscript check`.
 and the [#108 independent audit decision](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/108#issuecomment-6572818142).
 A reviewer in a fresh context from a different provider than the writer records
 pass, fail or unsupported for every macro and flagged claim, plus any unflagged
-numeric statements. Any fail or unsupported row blocks submission; changed
-manuscript claims require a re-audit. The owner records a random 10% spot check
-and final sign-off in that record. The synthetic fixture does not perform or
-imply either review.
+numeric statements. The audit record must explicitly report when the manuscript
+has no flagged claims or no unflagged numeric statements. Any fail or unsupported
+row blocks submission; changed manuscript claims require a re-audit. The owner
+records a random 10% spot check and final sign-off in that record. The synthetic
+fixture does not perform or imply either review.
 `jute-disease manuscript audit-check EXPORT_DIR --manuscript PATH` is the
 separate submission gate: it binds the review to the current manuscript SHA-256
 and blocks until each macro and claim row passes, the numeric scan and claim

@@ -28,6 +28,30 @@ CLAIM_AUDIT_DECISION_URL = (
     "https://github.com/qu1r0ra/jute-related-image-evaluation/issues/108"
     "#issuecomment-6572818142"
 )
+_CLAIM_LISTS = {
+    "may_report": (
+        "The grouping rule, its threshold and the leakage risk that remains.",
+        "Macro-F1 differences between policies for this pool and this rule, "
+        "with hierarchical bootstrap intervals.",
+        "Route rankings, conditional on MobileNetV2, its fixed source "
+        "checkpoints and this pool.",
+        "Grad-CAM as a prespecified qualitative diagnostic.",
+        "Descriptive t-SNE/UMAP plots at fixed, recorded settings.",
+        "Background probes, bounded to how much label information the "
+        "background carries in this pool (see #106).",
+    ),
+    "may_not_claim": (
+        "Leakage-free or zero leakage. The manuscript says 'we did not identify' "
+        "instead.",
+        "Plant- or session-independent splits.",
+        "Field, deployment or new-acquisition generalization.",
+        "Rankings that extend beyond MobileNetV2.",
+        '"The model attends to the lesion."',
+        "Meaning from t-SNE/UMAP cluster sizes or distances, or their use "
+        "as evidence of performance or leakage.",
+        "Family-disjoint scores presented as the true field estimate.",
+    ),
+}
 ALLOWED_FIGURE_LICENSES = {"CC0", "CC BY", "CC BY-SA"}
 _EXPORT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 
@@ -1053,8 +1077,9 @@ def export_manuscript(
         "auditor_requirements": (
             "Fresh context; reviewer provider differs from the writing agent; "
             "review only the manuscript, generated macros, #108 claim lists and "
-            "authoritative artifacts. Record the manuscript SHA-256 and one row "
-            "for every flagged claim; list every unflagged numeric statement."
+            "authoritative artifacts. Record the manuscript SHA-256, one row "
+            "for every flagged claim (or an explicit no-flags result), and every "
+            "unflagged numeric statement (or an explicit no-statements result)."
         ),
         "writer_provider": "Codex",
         "reviewer": {
@@ -1073,29 +1098,7 @@ def export_manuscript(
         ],
         "claim_inventory_complete": False,
         "numeric_scan_complete": False,
-        "claim_lists": {
-            "may_report": [
-                "The grouping rule, its threshold and the leakage risk that remains.",
-                "Macro-F1 differences between policies for this pool and this rule, "
-                "with hierarchical bootstrap intervals.",
-                "Route rankings, conditional on MobileNetV2, its fixed source "
-                "checkpoints and this pool.",
-                "Grad-CAM as a prespecified qualitative diagnostic.",
-                "Descriptive t-SNE/UMAP plots at fixed, recorded settings.",
-                "Background probes, bounded to how much label information the "
-                "background carries in this pool.",
-            ],
-            "may_not_claim": [
-                "Leakage-free or zero leakage; use 'we did not identify' instead.",
-                "Plant- or session-independent splits.",
-                "Field, deployment or new-acquisition generalization.",
-                "Rankings that extend beyond MobileNetV2.",
-                "The model attends to the lesion.",
-                "Meaning from t-SNE/UMAP cluster sizes or distances, or their use "
-                "as evidence of performance or leakage.",
-                "Family-disjoint scores presented as the true field estimate.",
-            ],
-        },
+        "claim_lists": {name: list(items) for name, items in _CLAIM_LISTS.items()},
         "macro_rows": [
             {"key": key, "value": value, "status": "pending", "evidence": ""}
             for key, value in sorted(values.items())
@@ -1110,6 +1113,12 @@ def export_manuscript(
             "evidence": "",
         },
         "unflagged_numeric_statements": [],
+        "numeric_statement_template": {
+            "statement": "",
+            "source_location": "",
+            "evidence": "",
+            "status": "pending",
+        },
         "blocking_rule": "Any fail or unsupported row blocks submission; no waiver.",
         "owner_spot_check": {
             "status": "pending",
@@ -1219,20 +1228,34 @@ def validate_export(output_dir: Path) -> dict[str, Any]:
     """Check macros, table, rebuild kit and outputs against frozen artifacts."""
     output_dir = Path(output_dir)
     metadata = json.loads((output_dir / "export.json").read_text(encoding="utf-8"))
-    artifacts = metadata["artifacts"]
-    manifest_path = (output_dir / artifacts["manifest"]["path"]).resolve()
-    receipt_path = (output_dir / artifacts["receipt"]["path"]).resolve()
-    if _sha256_file(manifest_path) != artifacts["manifest"]["sha256"]:
+    if not isinstance(metadata, dict):
+        raise ValueError("export metadata must be a JSON object")
+    artifacts = metadata.get("artifacts")
+    if not isinstance(artifacts, dict):
+        raise ValueError("export artifacts metadata must be a JSON object")
+    manifest_artifact = artifacts.get("manifest")
+    receipt_artifact = artifacts.get("receipt")
+    if not isinstance(manifest_artifact, dict) or not isinstance(
+        receipt_artifact, dict
+    ):
+        raise ValueError("export manifest and receipt metadata must be objects")
+    manifest_ref = manifest_artifact.get("path")
+    receipt_ref = receipt_artifact.get("path")
+    if not isinstance(manifest_ref, str) or not isinstance(receipt_ref, str):
+        raise ValueError("export manifest and receipt paths must be strings")
+    manifest_path = (output_dir / manifest_ref).resolve()
+    receipt_path = (output_dir / receipt_ref).resolve()
+    if _sha256_file(manifest_path) != manifest_artifact.get("sha256"):
         raise ValueError("authoritative manifest bytes changed after export")
-    if _sha256_file(receipt_path) != artifacts["receipt"]["sha256"]:
+    if _sha256_file(receipt_path) != receipt_artifact.get("sha256"):
         raise ValueError("authoritative receipt bytes changed after export")
     manifest = load_manifest(manifest_path.parent)
-    if manifest.digest() != artifacts["manifest"]["manifest_digest"]:
+    if manifest.digest() != manifest_artifact.get("manifest_digest"):
         raise ValueError("export lineage manifest digest mismatch")
-    if (
-        _sha256_file(output_dir / "configuration.json")
-        != metadata["configuration_sha256"]
-    ):
+    configuration_sha256 = metadata.get("configuration_sha256")
+    if not isinstance(configuration_sha256, str):
+        raise ValueError("export configuration SHA-256 is malformed")
+    if _sha256_file(output_dir / "configuration.json") != configuration_sha256:
         raise ValueError("export configuration changed after export")
 
     evaluation_values: dict[str, int | float] = {}
@@ -1269,7 +1292,7 @@ def validate_export(output_dir: Path) -> dict[str, Any]:
             evaluation_artifact_outputs,
         ) = _evaluation_artifacts(
             Path(evaluation_artifact_source["path"]),
-            metadata["configuration_sha256"],
+            configuration_sha256,
             manifest.digest(),
         )
         if current_evaluation_source != evaluation_artifact_source:
@@ -1289,7 +1312,7 @@ def validate_export(output_dir: Path) -> dict[str, Any]:
         statistics_values, current_statistics_source, statistics_outputs = (
             _statistics_artifacts(
                 Path(statistics_source["path"]),
-                metadata["configuration_sha256"],
+                configuration_sha256,
                 manifest.digest(),
                 evaluation_artifact_source,
             )
@@ -1300,10 +1323,14 @@ def validate_export(output_dir: Path) -> dict[str, Any]:
             if (output_dir / name).read_bytes() != content:
                 raise ValueError(f"exported statistics artifact differs: {name}")
 
-    export_id = metadata["export_id"]
+    export_id = metadata.get("export_id")
+    if not isinstance(export_id, str) or not _EXPORT_ID.fullmatch(export_id):
+        raise ValueError("export ID metadata is malformed")
     compute_report = json.loads(
         (output_dir / "compute-report.json").read_text(encoding="utf-8")
     )
+    if not isinstance(compute_report, dict):
+        raise ValueError("compute report must be a JSON object")
     if compute_report.get("status") == "measured":
         runs_root = compute_report.get("runs_root")
         if not isinstance(runs_root, str) or not runs_root:
@@ -1393,7 +1420,15 @@ def validate_export(output_dir: Path) -> dict[str, Any]:
     validate_figure_sources(
         json.loads((output_dir / "figure-sources.json").read_text(encoding="utf-8"))
     )
-    for name, record in metadata["outputs"].items():
+    outputs = metadata.get("outputs")
+    if not isinstance(outputs, dict) or any(
+        not isinstance(name, str)
+        or not isinstance(record, dict)
+        or not isinstance(record.get("sha256"), str)
+        for name, record in outputs.items()
+    ):
+        raise ValueError("export output metadata is malformed")
+    for name, record in outputs.items():
         if _sha256_file(output_dir / name) != record["sha256"]:
             raise ValueError(f"export output changed after export: {name}")
     return {
@@ -1419,15 +1454,19 @@ def validate_claim_audit(
         raise ValueError("claim audit must reference the accepted #108 claim lists")
     if audit.get("claim_audit_decision_url") != CLAIM_AUDIT_DECISION_URL:
         raise ValueError("claim audit must reference the accepted #108 audit decision")
+    expected_claim_lists = {name: list(items) for name, items in _CLAIM_LISTS.items()}
+    if audit.get("claim_lists") != expected_claim_lists:
+        raise ValueError("claim audit claim lists differ from the accepted #108 lists")
     reviewer = audit.get("reviewer")
     if (
         not isinstance(reviewer, dict)
-        or not reviewer.get("name")
-        or not reviewer.get("provider")
+        or any(
+            not isinstance(reviewer.get(field), str) or not reviewer[field].strip()
+            for field in ("name", "provider", "reviewed_at", "record")
+        )
         or reviewer.get("fresh_context") is not True
+        or not isinstance(audit.get("writer_provider"), str)
         or reviewer["provider"] == audit.get("writer_provider")
-        or not reviewer.get("reviewed_at")
-        or not reviewer.get("record")
     ):
         raise ValueError(
             "claim audit requires a different-provider fresh-context reviewer"
@@ -1458,7 +1497,10 @@ def validate_claim_audit(
         (Path(output_dir) / "macros.json").read_text(encoding="utf-8")
     )[export_check["export_id"]]
     if not isinstance(macro_rows, list) or any(
-        not isinstance(row, dict) for row in macro_rows
+        not isinstance(row, dict)
+        or not isinstance(row.get("key"), str)
+        or not row["key"]
+        for row in macro_rows
     ):
         raise ValueError("claim audit must contain one row for every generated macro")
     rows = macro_rows
@@ -1486,6 +1528,10 @@ def validate_claim_audit(
         for row in claim_rows
     ):
         raise ValueError("claim audit contains an invalid claim row")
+    if not claim_rows:
+        raise ValueError(
+            "claim audit must record flagged claims or an explicit no-flags result"
+        )
     unflagged_rows = audit.get("unflagged_numeric_statements")
     if not isinstance(unflagged_rows, list) or any(
         not isinstance(row, dict)
@@ -1496,6 +1542,11 @@ def validate_claim_audit(
         for row in unflagged_rows
     ):
         raise ValueError("numeric scan contains an invalid statement row")
+    if not unflagged_rows:
+        raise ValueError(
+            "numeric scan must record unflagged statements or an explicit "
+            "no-statements result"
+        )
     statuses = [row.get("status") for row in [*rows, *claim_rows, *unflagged_rows]]
     if any(status in {"fail", "unsupported"} for status in statuses):
         raise ValueError("failed or unsupported claim rows block submission")
