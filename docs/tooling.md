@@ -32,12 +32,45 @@ synthetic freeze, support table and figure export, export-ID keyed TeX/JSON
 macros, rebuild kit, split reconstruction and macro-to-artifact check. The
 fixture makes no real-data training or scoring claims. For a real frozen
 manifest, run `jute-disease manuscript export --freeze-dir artifacts/freeze/target
---config CONFIG.json --output EXPORT_DIR --source-url URL --source-version VERSION`,
+--config CONFIG.json --output EXPORT_DIR --source-metadata SOURCE_METADATA.json
+--training-runs artifacts/runs`,
 then `jute-disease manuscript check EXPORT_DIR`. Use
 `just rebuild-splits EXPORT_DIR/rebuild-kit.json IMAGE_ROOT rebuilt-splits.json`
-to validate source bytes and reproduce the split assignment. The export's
+to validate train and validation source bytes and reproduce the split
+assignment. It records the test entries from the kit but does not open test
+image files. The export's
 `claim-audit.json` is a pending record: the independent claim review, owner
-spot check and owner sign-off remain human gates.
+spot check and owner sign-off remain human gates. Complete the final gate with
+`jute-disease manuscript audit-check EXPORT_DIR --manuscript PATH`; it checks
+the manuscript SHA-256 recorded in the review. Compute tables report measured
+A100 GPU-hours per stage from verified training receipts and nine classical
+tuning configurations per family. They include no latency or edge-device
+benchmarks. The synthetic fixture leaves its compute report pending because it
+does not run training.
+
+To include an existing validation summary, pass
+`--evaluation-metrics artifacts/experiment_summary.csv` to the export command.
+It reads the aggregate CSV only; it does not run evaluation or access partition
+images. Each row must reproduce from metrics covered by a completed, verified
+training receipt, including its configuration digest. Numeric validation and
+training cells become export-ID macros, and `manuscript check` revalidates the
+receipts and recomputes the aggregate before accepting the copied source CSV.
+
+To import an already-produced evaluation and bootstrap summary, pass
+`--evaluation-artifacts BUNDLE_DIR --statistics-artifacts STATS_DIR`. The
+evaluation bundle has `receipt.json`, `metrics.json`, `predictions.json` and the
+run receipt files referenced by `receipt.json`. Its version 1 receipt records
+the configuration SHA-256, frozen manifest digest, partition, and hashes for
+each artifact and run receipt. The metrics and predictions JSON repeat the
+configuration and manifest digests, and predictions list the same run
+identities as the receipts. The statistics bundle has `receipt.json` and a
+report JSON containing `config_digest`, `manifest_digest`,
+`evaluation_receipt_sha256` and a `statistics` object. Its receipt records the
+report hash and must bind to the evaluation receipt hash. Every finite numeric
+leaf under `metrics` or `statistics` is emitted as an export-ID macro;
+`manuscript check` verifies the receipts, lineage and copied files again.
+These options import existing results only; they do not score data or open
+partition images.
 
 Classical estimators and their nine-configuration grids: k-NN with k in {1, 3, 5, 7, 11, 15, 21, 31, 51}; L2 logistic regression with C from 1e-4 to 1e4 in nine log-spaced values; RBF-SVC with C in {1, 10, 100} and gamma in {0.1, 1, 10} times scale; random forest with 500 trees, max_features in {sqrt, 0.1, 0.3} and min_samples_leaf in {1, 3, 10}. Gaussian naive Bayes searches `var_smoothing` over 1e-12 to 1e-4 in nine decades. The crafted feature vector has 548 values; z-scores are fitted on the training fold only.
 

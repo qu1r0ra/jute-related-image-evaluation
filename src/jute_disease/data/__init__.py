@@ -73,6 +73,7 @@ from jute_disease.data.inventory import (
     write_inventory,
 )
 from jute_disease.data.manifest import (
+    PARTITIONS,
     FreezeBlockedError,
     HeldOutPartitionError,
     Manifest,
@@ -180,6 +181,7 @@ __all__ = [
     "ManifestContentVerifier",
     "ManifestDataset",
     "ManifestEntry",
+    "PARTITIONS",
     "OverlapReport",
     "PreprocessingSpec",
     "SourceMismatchError",

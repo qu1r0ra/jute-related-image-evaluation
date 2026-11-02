@@ -8,6 +8,7 @@ so a directory that exists without a matching receipt is never trusted.
 
 import hashlib
 import json
+import math
 import os
 from collections import Counter
 from dataclasses import dataclass
@@ -255,8 +256,22 @@ def rebuild_partition_assignments(
     ``entries`` must provide stable ``image_id``, ``family_id`` and ``label``
     strings. The output maps each image ID to its newly derived partition.
     """
-    if set(fractions) != set(PARTITIONS) or abs(sum(fractions.values()) - 1) > 1e-9:
-        raise ValueError(f"fractions must cover {PARTITIONS} and sum to 1")
+    if (
+        set(fractions) != set(PARTITIONS)
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or (isinstance(value, float) and not math.isfinite(value))
+            or value <= 0
+            or value > 1
+            for value in fractions.values()
+        )
+        or abs(sum(fractions.values()) - 1) > 1e-9
+    ):
+        raise ValueError(
+            f"fractions must cover {PARTITIONS}, be positive finite numbers, "
+            "and sum to 1"
+        )
     ids = [entry["image_id"] for entry in entries]
     if len(ids) != len(set(ids)):
         raise ValueError("rebuild kit contains duplicate image IDs")

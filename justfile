@@ -46,6 +46,9 @@ manuscript-fixture output:
 manuscript-check export_dir:
     uv run jute-disease manuscript check {{export_dir}}
 
+manuscript-audit-check export_dir manuscript:
+    uv run jute-disease manuscript audit-check {{export_dir}} --manuscript {{manuscript}}
+
 rebuild-splits kit_manifest image_root output:
     uv run --locked python scripts/rebuild_splits.py --kit-manifest {{kit_manifest}} --image-root {{image_root}} --output {{output}}
 

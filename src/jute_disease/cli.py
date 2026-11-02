@@ -59,9 +59,10 @@ from jute_disease.data import (
     write_policy_manifests,
     write_thresholds,
 )
-from jute_disease.reporting.manuscript import (
+from jute_disease.reporting import (
     export_manuscript,
     run_manuscript_fixture,
+    validate_claim_audit,
     validate_export,
 )
 from jute_disease.reporting.tables import aggregate_metrics
@@ -513,8 +514,13 @@ def _manuscript_export(args: argparse.Namespace) -> None:
             args.freeze_dir,
             args.config,
             args.output,
-            source_url=args.source_url,
-            source_version=args.source_version,
+            source_metadata=json.loads(
+                args.source_metadata.read_text(encoding="utf-8")
+            ),
+            training_runs_dir=args.training_runs,
+            evaluation_metrics_path=args.evaluation_metrics,
+            evaluation_artifacts_path=args.evaluation_artifacts,
+            statistics_artifacts_path=args.statistics_artifacts,
             figure_sources_path=args.figure_sources,
             export_id=args.export_id,
             command="jute-disease " + " ".join(sys.argv[1:]),
@@ -529,6 +535,13 @@ def _manuscript_check(args: argparse.Namespace) -> None:
         _print_json(validate_export(args.export_dir))
     except (ValueError, OSError, KeyError) as error:
         raise SystemExit(f"manuscript check blocked: {error}") from error
+
+
+def _manuscript_audit_check(args: argparse.Namespace) -> None:
+    try:
+        _print_json(validate_claim_audit(args.export_dir, args.manuscript))
+    except (ValueError, OSError, KeyError) as error:
+        raise SystemExit(f"manuscript audit blocked: {error}") from error
 
 
 def _bounds(text: str) -> tuple[int, int]:
@@ -788,8 +801,26 @@ def build_parser() -> argparse.ArgumentParser:
     manuscript_export.add_argument("--freeze-dir", type=Path, required=True)
     manuscript_export.add_argument("--config", type=Path, required=True)
     manuscript_export.add_argument("--output", type=Path, required=True)
-    manuscript_export.add_argument("--source-url", required=True)
-    manuscript_export.add_argument("--source-version", required=True)
+    manuscript_export.add_argument("--source-metadata", type=Path, required=True)
+    manuscript_export.add_argument("--training-runs", type=Path, required=True)
+    manuscript_export.add_argument(
+        "--evaluation-metrics",
+        type=Path,
+        help="Existing validation-metrics aggregate CSV; no evaluation is run.",
+    )
+    manuscript_export.add_argument(
+        "--evaluation-artifacts",
+        type=Path,
+        help=(
+            "Receipt-bound evaluation JSON bundle; no scoring or partition "
+            "images are read."
+        ),
+    )
+    manuscript_export.add_argument(
+        "--statistics-artifacts",
+        type=Path,
+        help="Receipt-bound statistics JSON bundle tied to evaluation artifacts.",
+    )
     manuscript_export.add_argument("--figure-sources", type=Path)
     manuscript_export.add_argument("--export-id")
     manuscript_export.set_defaults(run=_manuscript_export)
@@ -798,6 +829,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     manuscript_check.add_argument("export_dir", type=Path)
     manuscript_check.set_defaults(run=_manuscript_check)
+    manuscript_audit = manuscript_actions.add_parser(
+        "audit-check", help="Require the completed claim review and owner sign-off."
+    )
+    manuscript_audit.add_argument("export_dir", type=Path)
+    manuscript_audit.add_argument("--manuscript", type=Path)
+    manuscript_audit.set_defaults(run=_manuscript_audit_check)
 
     # planned commands owned by open tickets
     _add_freeze(commands)

@@ -6,7 +6,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from jute_disease.reporting.manuscript import rebuild_kit_splits
+from jute_disease.reporting import rebuild_kit_splits
 
 
 def main(argv: Sequence[str] | None = None) -> None:
