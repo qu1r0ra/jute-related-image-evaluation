@@ -520,7 +520,14 @@ def intake_source(
         "inventory"
     ):
         raise FreezeBlockedError("Target inventory does not match its manifest")
-    target = target_inventory
+    held_out = {
+        entry.image_id
+        for partition in ("val", "test")
+        for entry in manifest.partition(partition)
+    }
+    target = [record for record in target_inventory if record.image_id in held_out]
+    if {record.image_id for record in target} != held_out:
+        raise FreezeBlockedError("Target inventory is missing held-out images")
 
     records = scan_source(source_root, spec, workers=workers)
     digest = inventory_digest(records)
