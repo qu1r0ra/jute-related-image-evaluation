@@ -25,7 +25,9 @@ from jute_disease.evaluation import (
     GatedEvaluationError,
     evaluate_gated_test,
     write_matrix_freeze,
-    write_run_record,
+)
+from jute_disease.evaluation import (
+    write_gated_run_record as write_run_record,
 )
 from jute_disease.training import RunStore, fit_identity_digest, load_benchmark
 
@@ -438,9 +440,14 @@ def test_cli_refuses_test_read_without_both_records_then_evaluates_fixture(
     test_rows = json.loads(
         (inputs.target_dir / "evaluator" / "test-manifest.json").read_text()
     )["record"]["entries"]
-    (inputs.image_root / test_rows[0]["path"]).unlink()
-    with pytest.raises(SystemExit, match="cannot read frozen test image"):
-        main(args)
+    missing_image = inputs.image_root / test_rows[0]["path"]
+    image_bytes = missing_image.read_bytes()
+    missing_image.unlink()
+    try:
+        with pytest.raises(SystemExit, match="cannot read frozen test image"):
+            main(args)
+    finally:
+        missing_image.write_bytes(image_bytes)
     failed_read = [json.loads(line) for line in history_path.read_text().splitlines()]
     assert failed_read[-1]["status"] == "started"
 

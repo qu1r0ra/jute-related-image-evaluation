@@ -1,11 +1,6 @@
-from jute_disease.evaluation.gated import (
-    GatedEvaluationError,
-    evaluate_gated_test,
-    probe_plan,
-    write_fixture_run_record,
-    write_matrix_freeze,
-    write_run_record,
-)
+from importlib import import_module
+from typing import Any
+
 from jute_disease.evaluation.metrics import EVAL_METRICS, TRAIN_METRICS, format_metrics
 from jute_disease.evaluation.resampling import (
     CONFIDENCE_LEVEL,
@@ -32,6 +27,50 @@ from jute_disease.evaluation.statistics import (
     kendall_tau,
     wilson_interval,
 )
+
+_LAZY_EXPORTS = {
+    "GatedEvaluationError": (".gated", "GatedEvaluationError"),
+    "evaluate_gated_test": (".gated", "evaluate_gated_test"),
+    "probe_plan": (".gated", "probe_plan"),
+    "write_fixture_run_record": (".gated", "write_fixture_run_record"),
+    "write_gated_run_record": (".gated", "write_run_record"),
+    "write_matrix_freeze": (".gated", "write_matrix_freeze"),
+    "class_scene_cells": (".breakdowns", "class_scene_cells"),
+    "scene_summaries": (".breakdowns", "scene_summaries"),
+    "stratified_sample": (".breakdowns", "stratified_sample"),
+    "evaluate_test": (".evaluator", "evaluate_test"),
+    "leaf_sample_ids": (".evaluator", "leaf_sample_ids"),
+    "FreezeRecordError": (".freeze_record", "FreezeRecordError"),
+    "TestReadRefusedError": (".freeze_record", "TestReadRefusedError"),
+    "authorize_test_read": (".freeze_record", "authorize_test_read"),
+    "default_reads_log_path": (".freeze_record", "default_reads_log_path"),
+    "log_test_read": (".freeze_record", "log_test_read"),
+    "verify_freeze_record": (".freeze_record", "verify_freeze_record"),
+    "write_freeze_record": (".freeze_record", "write_freeze_record"),
+    "write_run_record": (".freeze_record", "write_run_record"),
+    "background_only_image": (".probes", "background_only_image"),
+    "border_probe": (".probes", "border_probe"),
+    "frame_leaf_share": (".probes", "frame_leaf_share"),
+    "frame_mask": (".probes", "frame_mask"),
+    "frame_only_image": (".probes", "frame_only_image"),
+    "pad_cue_fits": (".probes", "pad_cue_fits"),
+    "planned_probe_fit_ids": (".probes", "planned_probe_fit_ids"),
+    "probe_fits": (".probes", "probe_fits"),
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Load heavier evaluation exports only when a caller requests them."""
+    try:
+        module_name, attribute = _LAZY_EXPORTS[name]
+    except KeyError as error:
+        raise AttributeError(
+            f"module {__name__!r} has no attribute {name!r}"
+        ) from error
+    value = getattr(import_module(module_name, __name__), attribute)
+    globals()[name] = value
+    return value
+
 
 __all__ = [
     "CONFIDENCE_LEVEL",
@@ -61,5 +100,26 @@ __all__ = [
     "wilson_interval",
     "write_fixture_run_record",
     "write_matrix_freeze",
+    "FreezeRecordError",
+    "TestReadRefusedError",
+    "authorize_test_read",
+    "background_only_image",
+    "border_probe",
+    "class_scene_cells",
+    "default_reads_log_path",
+    "evaluate_test",
+    "frame_leaf_share",
+    "frame_mask",
+    "frame_only_image",
+    "leaf_sample_ids",
+    "log_test_read",
+    "pad_cue_fits",
+    "planned_probe_fit_ids",
+    "probe_fits",
+    "scene_summaries",
+    "stratified_sample",
+    "verify_freeze_record",
+    "write_freeze_record",
     "write_run_record",
+    "write_gated_run_record",
 ]

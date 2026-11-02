@@ -12,8 +12,8 @@ logger = get_logger(__name__)
 METRICS_PATH = Path("metrics") / "version_0" / "metrics.csv"
 
 
-def _latest_metrics(fit_dir: Path) -> Path | None:
-    """The metrics file of the highest numbered attempt that wrote one."""
+def latest_metrics_path(fit_dir: Path) -> Path | None:
+    """Return the metrics file of the highest numbered attempt that wrote one."""
     attempts = sorted(
         (
             int(child.name.removeprefix("attempt-")),
@@ -28,17 +28,17 @@ def _latest_metrics(fit_dir: Path) -> Path | None:
     return None
 
 
-def aggregate_metrics(
-    fit_ids: list[str], output_csv: Path, runs_dir: Path = RUNS_DIR
-) -> None:
-    """Write the best-validation-epoch metrics of each fit to one CSV.
+def aggregate_metric_rows(
+    fit_ids: list[str], runs_dir: Path = RUNS_DIR
+) -> list[dict[str, object]]:
+    """Return each fit's best-validation-epoch summary from its metrics file.
 
     Reads ``<runs_dir>/<fit id>/attempt-N/metrics/version_0/metrics.csv`` from the
     latest attempt. Training never records test metrics, so none appear here.
     """
     results = []
     for fit_id in fit_ids:
-        path = _latest_metrics(Path(runs_dir) / fit_id)
+        path = latest_metrics_path(Path(runs_dir) / fit_id)
         if path is None:
             continue
         df = pd.read_csv(path)
@@ -57,6 +57,14 @@ def aggregate_metrics(
                 summary[col] = df[col].max() if "acc" in col else df[col].min()
 
         results.append(summary)
+    return results
+
+
+def aggregate_metrics(
+    fit_ids: list[str], output_csv: Path, runs_dir: Path = RUNS_DIR
+) -> None:
+    """Write the best-validation-epoch metrics of each fit to one CSV."""
+    results = aggregate_metric_rows(fit_ids, runs_dir)
 
     if results:
         pd.DataFrame(results).to_csv(output_csv, index=False)

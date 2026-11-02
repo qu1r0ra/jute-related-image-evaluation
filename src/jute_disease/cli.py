@@ -21,6 +21,7 @@ from jute_disease.config import (
     ML_FEATURES_DIR,
     PLANTDOC_DIR,
     PLANTVILLAGE_DIR,
+    ROOT_DIR,
     RUNS_DIR,
     SOURCE_INVENTORY_DIR,
 )
@@ -60,10 +61,27 @@ from jute_disease.data import (
     write_thresholds,
 )
 from jute_disease.evaluation import (
+    FreezeRecordError,
+    TestReadRefusedError,
+    authorize_test_read,
+    default_reads_log_path,
     evaluate_gated_test,
+    evaluate_test,
+    leaf_sample_ids,
+    log_test_read,
+    planned_probe_fit_ids,
+    verify_freeze_record,
     write_fixture_run_record,
+    write_freeze_record,
+    write_gated_run_record,
     write_matrix_freeze,
     write_run_record,
+)
+from jute_disease.reporting import (
+    export_manuscript,
+    run_manuscript_fixture,
+    validate_claim_audit,
+    validate_export,
 )
 from jute_disease.reporting.tables import aggregate_metrics
 from jute_disease.training import (
@@ -84,6 +102,7 @@ from jute_disease.training import (
     subprocess_launcher,
     verify_stack,
 )
+from jute_disease.training.benchmark import load_benchmark
 from jute_disease.training.engines.ml import predict_ml
 
 Handler = Callable[[argparse.Namespace], None]
@@ -527,9 +546,98 @@ def _evaluate_fixture_run_record(args: argparse.Namespace) -> None:
     _print_json({"run_record": str(path), "sha256": digest})
 
 
+def _manuscript_fixture(args: argparse.Namespace) -> None:
+    try:
+        _print_json(run_manuscript_fixture(args.output))
+    except (ValueError, OSError, KeyError) as error:
+        raise SystemExit(f"manuscript fixture blocked: {error}") from error
+
+
+def _manuscript_export(args: argparse.Namespace) -> None:
+    try:
+        result = export_manuscript(
+            args.freeze_dir,
+            args.config,
+            args.output,
+            source_metadata=json.loads(
+                args.source_metadata.read_text(encoding="utf-8")
+            ),
+            training_runs_dir=args.training_runs,
+            evaluation_metrics_path=args.evaluation_metrics,
+            evaluation_artifacts_path=args.evaluation_artifacts,
+            statistics_artifacts_path=args.statistics_artifacts,
+            figure_sources_path=args.figure_sources,
+            export_id=args.export_id,
+            command="jute-disease " + " ".join(sys.argv[1:]),
+        )
+        _print_json(result)
+    except (ValueError, OSError, KeyError) as error:
+        raise SystemExit(f"manuscript export blocked: {error}") from error
+
+
+def _manuscript_check(args: argparse.Namespace) -> None:
+    try:
+        _print_json(validate_export(args.export_dir))
+    except (ValueError, OSError, KeyError) as error:
+        raise SystemExit(f"manuscript check blocked: {error}") from error
+
+
+def _manuscript_audit_check(args: argparse.Namespace) -> None:
+    try:
+        _print_json(validate_claim_audit(args.export_dir, args.manuscript))
+    except (ValueError, OSError, KeyError) as error:
+        raise SystemExit(f"manuscript audit blocked: {error}") from error
+
+
+def _read_json_file(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise SystemExit(f"cannot read {path}: {error}") from error
+
+
+def _evaluate_probe_plan(args: argparse.Namespace) -> None:
+    _print_json(planned_probe_fit_ids(load_benchmark(args.benchmark)))
+
+
+def _evaluate_freeze_record(args: argparse.Namespace) -> None:
+    benchmark = load_benchmark(args.benchmark)
+    required = [fit.fit_id for fit in benchmark.fits()] + planned_probe_fit_ids(
+        benchmark
+    )
+    outcomes = _read_json_file(args.outcomes) if args.outcomes else None
+    try:
+        record = write_freeze_record(
+            _read_json_file(args.spec),
+            outcomes,
+            args.output,
+            args.root,
+            required_fit_ids=required,
+            reads_log=args.reads_log,
+        )
+    except (FreezeRecordError, OSError) as error:
+        raise SystemExit(f"freeze record blocked: {error}") from error
+    _print_json({"hash": record["hash"], "post_hoc": record["body"]["post_hoc"]})
+
+
+def _evaluate_prediction_run_record(args: argparse.Namespace) -> None:
+    try:
+        record = write_run_record(
+            args.freeze_record,
+            _read_json_file(args.runs),
+            args.output.parent,
+            args.output,
+        )
+    except (FreezeRecordError, TestReadRefusedError, OSError) as error:
+        raise SystemExit(f"run record blocked: {error}") from error
+    _print_json({"hash": record["hash"], "fits": sorted(record["body"]["fits"])})
+
+
 def _evaluate_run_record(args: argparse.Namespace) -> None:
     try:
-        path, digest = write_run_record(args.selection, args.model_index, args.output)
+        path, digest = write_gated_run_record(
+            args.selection, args.model_index, args.output
+        )
     except (OSError, ValueError) as error:
         raise SystemExit(f"run record blocked: {error}") from error
     _print_json({"run_record": str(path), "sha256": digest})
@@ -549,6 +657,51 @@ def _evaluate_gated(args: argparse.Namespace) -> None:
     except (OSError, ValueError) as error:
         raise SystemExit(f"evaluation blocked: {error}") from error
     _print_json({"evaluation": str(path)})
+
+
+def _evaluate_leaf_sample(args: argparse.Namespace) -> None:
+    try:
+        record = verify_freeze_record(args.freeze_record, args.root)
+        log_test_read(
+            default_reads_log_path(args.root),
+            record["hash"],
+            [],
+            operation="leaf_sample",
+        )
+        _print_json(list(leaf_sample_ids(args.target_dir, record, args.sample_size)))
+    except (TestReadRefusedError, FreezeRecordError, OSError) as error:
+        raise SystemExit(f"test read refused: {error}") from error
+
+
+def _evaluate_test(args: argparse.Namespace) -> None:
+    try:
+        auth = authorize_test_read(
+            args.freeze_record, args.run_record, args.root, args.fit_id or None
+        )
+        default_log = default_reads_log_path(args.root)
+        fit_ids = [r.fit_id for r in auth.runs]
+        additional_logs = [args.reads_log] if args.reads_log else []
+        log_test_read(
+            default_log, auth.record_hash, fit_ids, additional_logs=additional_logs
+        )
+        features = _read_json_file(args.features) if args.features else {}
+        report = evaluate_test(
+            args.target_dir,
+            auth,
+            args.run_record.parent,
+            scenes=features.get("scenes"),
+            frame_leaf_share=features.get("frame_leaf_share"),
+            sample_size=args.sample_size,
+            resamples=args.resamples,
+            permutations=args.permutations,
+        )
+    except (TestReadRefusedError, FreezeRecordError, OSError) as error:
+        raise SystemExit(f"test read refused: {error}") from error
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + chr(10), encoding="utf-8"
+    )
+    _print_json({"output": str(args.output), "record_hash": report["record_hash"]})
 
 
 def _bounds(text: str) -> tuple[int, int]:
@@ -796,6 +949,59 @@ def build_parser() -> argparse.ArgumentParser:
     )
     aggregate.set_defaults(run=_evaluate_aggregate)
     evaluate_actions.add_parser("predict", help="Classify one image (forwarded).")
+    _add_gated_evaluator(evaluate_actions)
+
+    manuscript = commands.add_parser(
+        "manuscript", help="Export and verify manuscript tables, figures and macros."
+    )
+    manuscript_actions = manuscript.add_subparsers(
+        dest="manuscript_action", metavar="ACTION", required=True
+    )
+    manuscript_fixture = manuscript_actions.add_parser(
+        "fixture", help="Run synthetic freeze through export and macro validation."
+    )
+    manuscript_fixture.add_argument("--output", type=Path, required=True)
+    manuscript_fixture.set_defaults(run=_manuscript_fixture)
+    manuscript_export = manuscript_actions.add_parser(
+        "export", help="Export a verified freeze as manuscript artifacts."
+    )
+    manuscript_export.add_argument("--freeze-dir", type=Path, required=True)
+    manuscript_export.add_argument("--config", type=Path, required=True)
+    manuscript_export.add_argument("--output", type=Path, required=True)
+    manuscript_export.add_argument("--source-metadata", type=Path, required=True)
+    manuscript_export.add_argument("--training-runs", type=Path, required=True)
+    manuscript_export.add_argument(
+        "--evaluation-metrics",
+        type=Path,
+        help="Existing validation-metrics aggregate CSV; no evaluation is run.",
+    )
+    manuscript_export.add_argument(
+        "--evaluation-artifacts",
+        type=Path,
+        help=(
+            "Receipt-bound evaluation JSON bundle; no scoring or partition "
+            "images are read."
+        ),
+    )
+    manuscript_export.add_argument(
+        "--statistics-artifacts",
+        type=Path,
+        help="Receipt-bound statistics JSON bundle tied to evaluation artifacts.",
+    )
+    manuscript_export.add_argument("--figure-sources", type=Path)
+    manuscript_export.add_argument("--export-id")
+    manuscript_export.set_defaults(run=_manuscript_export)
+    manuscript_check = manuscript_actions.add_parser(
+        "check", help="Check exported macros against the authoritative freeze."
+    )
+    manuscript_check.add_argument("export_dir", type=Path)
+    manuscript_check.set_defaults(run=_manuscript_check)
+    manuscript_audit = manuscript_actions.add_parser(
+        "audit-check", help="Require the completed claim review and owner sign-off."
+    )
+    manuscript_audit.add_argument("export_dir", type=Path)
+    manuscript_audit.add_argument("--manuscript", type=Path)
+    manuscript_audit.set_defaults(run=_manuscript_audit_check)
 
     matrix_freeze = evaluate_actions.add_parser(
         "freeze-matrix",
@@ -851,6 +1057,58 @@ def build_parser() -> argparse.ArgumentParser:
     ).set_defaults(run=_planned("profile", "#721"))
 
     return parser
+
+
+def _add_gated_evaluator(actions: argparse._SubParsersAction) -> None:
+    plan = actions.add_parser("probe-plan", help="List the background and border fits.")
+    plan.add_argument("--benchmark", type=Path, default=BENCHMARK_CONFIG)
+    plan.set_defaults(run=_evaluate_probe_plan)
+
+    record = actions.add_parser(
+        "freeze-record", help="Write the hashed matrix-freeze and selection record."
+    )
+    record.add_argument("--spec", type=Path, required=True)
+    record.add_argument(
+        "--outcomes", type=Path, help="Recorded #114 validation outcomes."
+    )
+    record.add_argument("--output", type=Path, required=True)
+    record.add_argument("--benchmark", type=Path, default=BENCHMARK_CONFIG)
+    record.add_argument("--root", type=Path, default=ROOT_DIR)
+    record.add_argument("--reads-log", type=Path)
+    record.set_defaults(run=_evaluate_freeze_record)
+
+    runs = actions.add_parser(
+        "run-record", help="Bind finished fits to a freeze record."
+    )
+    runs.add_argument("--freeze-record", type=Path, required=True)
+    runs.add_argument("--runs", type=Path, required=True)
+    runs.add_argument("--output", type=Path, required=True)
+    runs.set_defaults(run=_evaluate_prediction_run_record)
+
+    test = actions.add_parser(
+        "test", help="Read test predictions; refused without both records."
+    )
+    test.add_argument("--freeze-record", type=Path)
+    test.add_argument("--run-record", type=Path)
+    test.add_argument("--target-dir", type=Path, required=True)
+    test.add_argument("--output", type=Path, required=True)
+    test.add_argument("--features", type=Path, help="Scene tags and frame leaf shares.")
+    test.add_argument("--fit-id", action="append")
+    test.add_argument("--root", type=Path, default=ROOT_DIR)
+    test.add_argument("--reads-log", type=Path)
+    test.add_argument("--sample-size", type=int, default=2000)
+    test.add_argument("--resamples", type=int, default=10_000)
+    test.add_argument("--permutations", type=int, default=1000)
+    test.set_defaults(run=_evaluate_test)
+
+    sample = actions.add_parser(
+        "leaf-sample", help="Print the stratified leaf-only test sample."
+    )
+    sample.add_argument("--freeze-record", type=Path)
+    sample.add_argument("--target-dir", type=Path, required=True)
+    sample.add_argument("--root", type=Path, default=ROOT_DIR)
+    sample.add_argument("--sample-size", type=int, default=2000)
+    sample.set_defaults(run=_evaluate_leaf_sample)
 
 
 def _add_freeze(commands: argparse._SubParsersAction) -> None:
