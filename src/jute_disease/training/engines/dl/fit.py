@@ -63,7 +63,13 @@ class EpochTimer(Callback):
 
 
 class ProgressRecord(ModelCheckpoint):
-    """Checkpoint after early stopping updates, then record its exact bytes."""
+    """Keep the full resume state of every finished epoch, with its exact bytes.
+
+    ``last.ckpt`` is written here, once per epoch at train-epoch end, after
+    validation, early stopping and any best-checkpoint save have run. Lightning's
+    own ``save_last`` only rewrites it when a best checkpoint is saved, and that
+    save can happen after the progress record, so it cannot be used here.
+    """
 
     def __init__(self, directory: Path | str, attempt: str) -> None:
         super().__init__(
@@ -72,15 +78,18 @@ class ProgressRecord(ModelCheckpoint):
             monitor="val_loss",
             mode="min",
             save_top_k=1,
-            save_last=True,
+            save_last=False,
         )
         self.directory = directory
         self.attempt = attempt
 
-    def on_validation_end(self, trainer: Trainer, pl_module: Any) -> None:
-        super().on_validation_end(trainer, pl_module)
-        if not trainer.sanity_checking:
-            record_progress(self.directory, self.attempt, trainer.current_epoch + 1)
+    def on_train_epoch_end(self, trainer: Trainer, pl_module: Any) -> None:
+        super().on_train_epoch_end(trainer, pl_module)
+        last = Path(self.directory) / LAST_CHECKPOINT
+        staging = last.with_suffix(".ckpt.tmp")
+        trainer.save_checkpoint(staging)
+        staging.replace(last)
+        record_progress(self.directory, self.attempt, trainer.current_epoch + 1)
 
 
 def training_callbacks(
