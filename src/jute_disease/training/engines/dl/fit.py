@@ -65,6 +65,7 @@ class EpochTimer(Callback):
 
 
 RNG_STATE_KEY = "rng_state"
+SHUFFLE_STATE_KEY = "shuffle_state"
 
 
 def _rng_state() -> dict[str, Any]:
@@ -120,21 +121,35 @@ class ProgressRecord(ModelCheckpoint):
         )
         self.directory = directory
         self.attempt = attempt
+        self._pending_shuffle: dict[str, torch.Tensor] | None = None
 
     def on_save_checkpoint(
         self, trainer: Trainer, pl_module: Any, checkpoint: dict[str, Any]
     ) -> None:
         super().on_save_checkpoint(trainer, pl_module, checkpoint)
         checkpoint[RNG_STATE_KEY] = _rng_state()
+        if isinstance(trainer.datamodule, DataModule):
+            checkpoint[SHUFFLE_STATE_KEY] = trainer.datamodule.shuffle_state()
 
     def on_load_checkpoint(
         self, trainer: Trainer, pl_module: Any, checkpoint: dict[str, Any]
     ) -> None:
         super().on_load_checkpoint(trainer, pl_module, checkpoint)
-        # Restored here, before the loop builds its first data iterator, since
-        # building one draws from the same stream the shuffle uses.
+        # Global streams are restored here, before the loop starts. The shuffle
+        # streams live on the data module, which is only ready at train start.
         if RNG_STATE_KEY in checkpoint:
             _restore_rng(checkpoint[RNG_STATE_KEY])
+        self._pending_shuffle = checkpoint.get(SHUFFLE_STATE_KEY)
+
+    def on_train_start(self, trainer: Trainer, pl_module: Any) -> None:
+        super().on_train_start(trainer, pl_module)
+        # Epoch iterators are built after this hook, so they draw from the
+        # restored shuffle streams.
+        if self._pending_shuffle is not None and isinstance(
+            trainer.datamodule, DataModule
+        ):
+            trainer.datamodule.restore_shuffle_state(self._pending_shuffle)
+        self._pending_shuffle = None
 
     def on_train_epoch_end(self, trainer: Trainer, pl_module: Any) -> None:
         super().on_train_epoch_end(trainer, pl_module)
