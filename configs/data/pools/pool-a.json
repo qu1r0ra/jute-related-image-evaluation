@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "supported_labels": ["Cercospora Leaf Spot", "Golden Mosaic", "Healthy"],
+  "excluded_labels": {},
+  "quarantine": [],
+  "sources": [
+    {"source": "J01 Jannat and Alam (Kaggle)", "filename_regex": "."}
+  ],
+  "min_support": 10
+}

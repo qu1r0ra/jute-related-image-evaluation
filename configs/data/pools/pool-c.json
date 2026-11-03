@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "supported_labels": ["Healthy", "Mosaic", "Soft Rot", "Stem Rot"],
+  "excluded_labels": {},
+  "quarantine": [],
+  "sources": [
+    {"source": "J22 JuteFolio-BD (BJRI)", "filename_regex": "."}
+  ],
+  "min_support": 10
+}
