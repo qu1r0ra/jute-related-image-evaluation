@@ -25,13 +25,25 @@ from jute_disease.evaluation import agreement_gate
 RUBRIC = {"exact": 1, "near-duplicate": 1, "very similar": 0, "different": 0}
 
 
+NEAR_MISS_BINS = ((5, 8), (9, 12), (13, 16))
+
+
 def sample_edges(
-    images: dict[str, tuple[int, str]], count: int = 200, seed: int = 42
+    images: dict[str, Sequence[Any]], count: int = 200, seed: int = 42
 ) -> dict[str, Any]:
-    """Sample each distance band uniformly and record population strata."""
+    """Sample each distance band uniformly and record population strata.
+
+    Each value is ``(hash, label)``. A third element names the pool: pairs then
+    form only within a pool, and strata are ``pool:distance:relation`` with
+    near-miss distances binned in fours so one kit can cover several pools.
+    """
     if count < 1:
         raise ValueError("count must be positive")
-    if any(value < 0 or value >= 1 << 64 for value, _ in images.values()):
+    if any(len(value) not in (2, 3) for value in images.values()):
+        raise ValueError("image values must be (hash, label) or (hash, label, pool)")
+    if len({len(value) for value in images.values()}) > 1:
+        raise ValueError("pool must be given for every image or for none")
+    if any(value[0] < 0 or value[0] >= 1 << 64 for value in images.values()):
         raise ValueError("hashes must be unsigned 64-bit integers")
     rng = random.Random(seed)
     reservoirs: dict[str, dict[str, list[dict[str, Any]]]] = {
@@ -42,7 +54,12 @@ def sample_edges(
         "near_miss": defaultdict(int),
         "merged": defaultdict(int),
     }
-    for a, b in combinations(sorted(images), 2):
+    pooled = any(len(value) == 3 for value in images.values())
+    by_pool: dict[str, list[str]] = defaultdict(list)
+    for path in sorted(images):
+        by_pool[str(images[path][2]) if pooled else ""].append(path)
+    pairs = (pair for paths in by_pool.values() for pair in combinations(paths, 2))
+    for a, b in pairs:
         distance = (images[a][0] ^ images[b][0]).bit_count()
         band = (
             "near_miss"
@@ -53,7 +70,19 @@ def sample_edges(
         )
         if band:
             relation = "same_label" if images[a][1] == images[b][1] else "cross_label"
-            stratum = f"{distance}:{relation}"
+            if pooled:
+                shown = (
+                    next(
+                        f"{low}-{high}"
+                        for low, high in NEAR_MISS_BINS
+                        if low <= distance <= high
+                    )
+                    if band == "near_miss"
+                    else str(distance)
+                )
+                stratum = f"{images[a][2]}:{shown}:{relation}"
+            else:
+                stratum = f"{distance}:{relation}"
             population = populations[band]
             population[stratum] += 1
             bucket = reservoirs[band][stratum]
