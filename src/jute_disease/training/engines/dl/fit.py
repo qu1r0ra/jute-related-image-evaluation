@@ -121,7 +121,6 @@ class ProgressRecord(ModelCheckpoint):
         )
         self.directory = directory
         self.attempt = attempt
-        self._pending_shuffle: dict[str, torch.Tensor] | None = None
 
     def on_save_checkpoint(
         self, trainer: Trainer, pl_module: Any, checkpoint: dict[str, Any]
@@ -135,21 +134,14 @@ class ProgressRecord(ModelCheckpoint):
         self, trainer: Trainer, pl_module: Any, checkpoint: dict[str, Any]
     ) -> None:
         super().on_load_checkpoint(trainer, pl_module, checkpoint)
-        # Global streams are restored here, before the loop starts. The shuffle
-        # streams live on the data module, which is only ready at train start.
+        # Restored here, not at train start: Lightning builds the first epoch's
+        # data iterator before train start, and it draws its shuffle order then.
         if RNG_STATE_KEY in checkpoint:
             _restore_rng(checkpoint[RNG_STATE_KEY])
-        self._pending_shuffle = checkpoint.get(SHUFFLE_STATE_KEY)
-
-    def on_train_start(self, trainer: Trainer, pl_module: Any) -> None:
-        super().on_train_start(trainer, pl_module)
-        # Epoch iterators are built after this hook, so they draw from the
-        # restored shuffle streams.
-        if self._pending_shuffle is not None and isinstance(
+        if SHUFFLE_STATE_KEY in checkpoint and isinstance(
             trainer.datamodule, DataModule
         ):
-            trainer.datamodule.restore_shuffle_state(self._pending_shuffle)
-        self._pending_shuffle = None
+            trainer.datamodule.restore_shuffle_state(checkpoint[SHUFFLE_STATE_KEY])
 
     def on_train_epoch_end(self, trainer: Trainer, pl_module: Any) -> None:
         super().on_train_epoch_end(trainer, pl_module)

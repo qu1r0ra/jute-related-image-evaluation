@@ -94,6 +94,8 @@ class DataModule(LightningDataModule):
         # The training loader's generator, kept here so a resumed fit can
         # restore its position in the shuffle stream.
         self.train_generator: torch.Generator | None = None
+        # A resumed sampler position that arrived before setup built the sampler.
+        self._pending_sampler_state: torch.Tensor | None = None
         self._classes: list[str] | None = None
         self.manifest: Manifest | None = None
 
@@ -238,6 +240,10 @@ class DataModule(LightningDataModule):
             if self.hparams.use_weighted_sampler
             else None
         )
+        if self.sampler is not None and self._pending_sampler_state is not None:
+            assert self.sampler.generator is not None
+            self.sampler.generator.set_state(self._pending_sampler_state)
+            self._pending_sampler_state = None
 
     def set_fold(self, fold_index: int) -> None:
         """Switch the active cross-validation fold (manifest mode only)."""
@@ -281,13 +287,19 @@ class DataModule(LightningDataModule):
         return state
 
     def restore_shuffle_state(self, state: dict[str, torch.Tensor]) -> None:
-        """Continue the training shuffle streams from a saved position."""
+        """Continue the training shuffle streams from a saved position.
+
+        Must run before the first training iterator is built. If setup has not
+        built the sampler yet, its position is kept and applied when it is built.
+        """
         if self.train_generator is None:
             self.train_generator = loader_generator(self.hparams.seed)
         self.train_generator.set_state(state["loader"])
-        if "sampler" in state and self.sampler is not None:
-            if self.sampler.generator is not None:
+        if "sampler" in state:
+            if self.sampler is not None and self.sampler.generator is not None:
                 self.sampler.generator.set_state(state["sampler"])
+            else:
+                self._pending_sampler_state = state["sampler"]
 
     def train_dataloader(self) -> DataLoader:
         return self._loader(self.jute_train, "train", True)
