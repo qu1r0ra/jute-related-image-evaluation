@@ -124,6 +124,8 @@ methods in `target/grouping.json`, and does not silently discard matches. Verify
 that the supplied roots are the intended source packages. Source intake is a
 separate operation and continues to apply its own quarantine rules.
 
+Pool freezes run once per pool. `scripts/stage_pools.py --archives data/source-archives --output data/pools` copies each pool's original-release files, unchanged, to `data/pools/<A|B|C>/<label>/<file>`. Pass that folder as `--image-root` with `--rules configs/data/pools/pool-<a|b|c>.json`. Point `--plantvillage-root` at `data/external/plantvillage/PlantVillage`, the folder that holds `train` and `val`. Each run re-fingerprints both source roots, so the three freezes took about 25 minutes together.
+
 Optionally, `--no-merge-ratings PATH` reads a UTF-8 CSV with the exact header
 `image_a,image_b,verdict`. Paths are relative to the target image root and must
 identify two different admitted images. Every row must have verdict `no_merge`;

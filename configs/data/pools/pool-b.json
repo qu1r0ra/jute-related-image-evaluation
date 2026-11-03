@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "supported_labels": ["Dieback", "Healthy", "Holed", "Mosaic", "Stem Soft Rot"],
+  "excluded_labels": {},
+  "quarantine": [],
+  "sources": [
+    {"source": "J02 Islam and Sheikh (Harvard Dataverse)", "filename_regex": "."}
+  ],
+  "min_support": 10
+}
