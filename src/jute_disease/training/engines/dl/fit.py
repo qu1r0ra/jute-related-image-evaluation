@@ -9,12 +9,14 @@ validation loss, and the evidence needed for a receipt is returned, not written.
 
 import json
 import math
+import random
 import shutil
 import time
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 from lightning import Callback, Trainer
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
@@ -62,8 +64,51 @@ class EpochTimer(Callback):
         self.seconds.append(time.perf_counter() - self._start)
 
 
+RNG_STATE_KEY = "rng_state"
+SHUFFLE_STATE_KEY = "shuffle_state"
+
+
+def _rng_state() -> dict[str, Any]:
+    """Every random stream a fit draws from, so a resumed fit draws the same numbers.
+
+    NumPy's state is stored as plain lists, so the checkpoint still loads under
+    ``torch.load``'s default ``weights_only`` mode.
+    """
+    numpy_name, keys, position, has_gauss, cached = np.random.get_state()
+    state: dict[str, Any] = {
+        "torch": torch.get_rng_state(),
+        "numpy": [numpy_name, keys.tolist(), position, has_gauss, cached],
+        "python": random.getstate(),
+    }
+    if torch.cuda.is_available():
+        state["cuda"] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def _restore_rng(state: dict[str, Any]) -> None:
+    torch.set_rng_state(state["torch"].cpu())
+    numpy_name, keys, position, has_gauss, cached = state["numpy"]
+    np.random.set_state(
+        (numpy_name, np.array(keys, dtype=np.uint32), position, has_gauss, cached)
+    )
+    random.setstate(state["python"])
+    if "cuda" in state and torch.cuda.is_available():
+        devices = min(len(state["cuda"]), torch.cuda.device_count())
+        torch.cuda.set_rng_state_all([s.cpu() for s in state["cuda"][:devices]])
+
+
 class ProgressRecord(ModelCheckpoint):
-    """Checkpoint after early stopping updates, then record its exact bytes."""
+    """Keep the full resume state of every finished epoch, with its exact bytes.
+
+    ``last.ckpt`` is written here, once per epoch at train-epoch end, after
+    validation, early stopping and any best-checkpoint save have run. Lightning's
+    own ``save_last`` only rewrites it when a best checkpoint is saved, and that
+    save can happen after the progress record, so it cannot be used here.
+
+    The random-number state is saved with it and restored when the fit resumes
+    from it, so the continued epochs shuffle and augment exactly as an
+    uninterrupted fit would.
+    """
 
     def __init__(self, directory: Path | str, attempt: str) -> None:
         super().__init__(
@@ -72,15 +117,39 @@ class ProgressRecord(ModelCheckpoint):
             monitor="val_loss",
             mode="min",
             save_top_k=1,
-            save_last=True,
+            save_last=False,
         )
         self.directory = directory
         self.attempt = attempt
 
-    def on_validation_end(self, trainer: Trainer, pl_module: Any) -> None:
-        super().on_validation_end(trainer, pl_module)
-        if not trainer.sanity_checking:
-            record_progress(self.directory, self.attempt, trainer.current_epoch + 1)
+    def on_save_checkpoint(
+        self, trainer: Trainer, pl_module: Any, checkpoint: dict[str, Any]
+    ) -> None:
+        super().on_save_checkpoint(trainer, pl_module, checkpoint)
+        checkpoint[RNG_STATE_KEY] = _rng_state()
+        if isinstance(trainer.datamodule, DataModule):
+            checkpoint[SHUFFLE_STATE_KEY] = trainer.datamodule.shuffle_state()
+
+    def on_load_checkpoint(
+        self, trainer: Trainer, pl_module: Any, checkpoint: dict[str, Any]
+    ) -> None:
+        super().on_load_checkpoint(trainer, pl_module, checkpoint)
+        # Restored here, not at train start: Lightning builds the first epoch's
+        # data iterator before train start, and it draws its shuffle order then.
+        if RNG_STATE_KEY in checkpoint:
+            _restore_rng(checkpoint[RNG_STATE_KEY])
+        if SHUFFLE_STATE_KEY in checkpoint and isinstance(
+            trainer.datamodule, DataModule
+        ):
+            trainer.datamodule.restore_shuffle_state(checkpoint[SHUFFLE_STATE_KEY])
+
+    def on_train_epoch_end(self, trainer: Trainer, pl_module: Any) -> None:
+        super().on_train_epoch_end(trainer, pl_module)
+        last = Path(self.directory) / LAST_CHECKPOINT
+        staging = last.with_suffix(".ckpt.tmp")
+        trainer.save_checkpoint(staging)
+        staging.replace(last)
+        record_progress(self.directory, self.attempt, trainer.current_epoch + 1)
 
 
 def training_callbacks(

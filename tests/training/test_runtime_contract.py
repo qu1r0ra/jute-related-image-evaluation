@@ -45,16 +45,13 @@ def test_runtime_config_enables_tf32_and_turns_off_cudnn_benchmark() -> None:
         torch.backends.cudnn.deterministic = old_cudnn_deterministic
 
 
-def test_resumable_callbacks_record_only_after_checkpoint_callback(
+def test_resumable_callbacks_record_only_after_the_resume_state_is_saved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     checkpoint_dir = tmp_path / "checkpoints"
-
-    def save_last(callback, trainer, module) -> None:
-        checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        (checkpoint_dir / "last.ckpt").write_bytes(b"post-callback-checkpoint")
-
-    monkeypatch.setattr(ModelCheckpoint, "on_validation_end", save_last)
+    monkeypatch.setattr(
+        ModelCheckpoint, "on_train_epoch_end", lambda callback, trainer, module: None
+    )
     callbacks = training_callbacks(
         load_benchmark(BENCHMARK_CONFIG).recipe,
         checkpoint_dir,
@@ -66,9 +63,12 @@ def test_resumable_callbacks_record_only_after_checkpoint_callback(
     )
 
     assert isinstance(checkpoint, ProgressRecord)
-    checkpoint.on_validation_end(
-        SimpleNamespace(current_epoch=4, sanity_checking=False), None
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    trainer = SimpleNamespace(
+        current_epoch=4,
+        save_checkpoint=lambda path: Path(path).write_bytes(b"full-training-state"),
     )
+    checkpoint.on_train_epoch_end(trainer, None)
     progress = verified_progress(checkpoint_dir)
 
     assert progress is not None
