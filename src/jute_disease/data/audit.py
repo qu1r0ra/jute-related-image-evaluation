@@ -28,10 +28,25 @@ RUBRIC = {"exact": 1, "near-duplicate": 1, "very similar": 0, "different": 0}
 NEAR_MISS_BINS = ((5, 8), (9, 12), (13, 16))
 
 
+def near_miss_bins(threshold: int) -> tuple[tuple[int, int], ...]:
+    """Return the near-miss distance bins that lie above the merge threshold."""
+    return tuple(
+        (max(low, threshold + 1), high)
+        for low, high in NEAR_MISS_BINS
+        if high > threshold
+    )
+
+
 def sample_edges(
-    images: dict[str, Sequence[Any]], count: int = 200, seed: int = 42
+    images: dict[str, Sequence[Any]],
+    count: int = 200,
+    seed: int = 42,
+    threshold: int = 4,
 ) -> dict[str, Any]:
     """Sample each distance band uniformly and record population strata.
+
+    Pairs at distance ``3..threshold`` form the merged band and pairs above it,
+    up to 16, the near-miss band.
 
     Each value is ``(hash, label)``. A third element names the pool: pairs then
     form only within a pool, and strata are ``pool:distance:relation`` with
@@ -39,6 +54,9 @@ def sample_edges(
     """
     if count < 1:
         raise ValueError("count must be positive")
+    if not 3 <= threshold < 16:
+        raise ValueError("threshold must be between 3 and 15")
+    bins = near_miss_bins(threshold)
     if any(len(value) not in (2, 3) for value in images.values()):
         raise ValueError("image values must be (hash, label) or (hash, label, pool)")
     if len({len(value) for value in images.values()}) > 1:
@@ -63,9 +81,9 @@ def sample_edges(
         distance = (images[a][0] ^ images[b][0]).bit_count()
         band = (
             "near_miss"
-            if 5 <= distance <= 16
+            if threshold < distance <= 16
             else "merged"
-            if 3 <= distance <= 4
+            if 3 <= distance <= threshold
             else None
         )
         if band:
@@ -73,9 +91,7 @@ def sample_edges(
             if pooled:
                 shown = (
                     next(
-                        f"{low}-{high}"
-                        for low, high in NEAR_MISS_BINS
-                        if low <= distance <= high
+                        f"{low}-{high}" for low, high in bins if low <= distance <= high
                     )
                     if band == "near_miss"
                     else str(distance)
@@ -115,7 +131,7 @@ def sample_edges(
             },
             "pairs": sampled,
         }
-    return {"seed": seed, "bands": result}
+    return {"seed": seed, "threshold": threshold, "bands": result}
 
 
 def feature_neighbors(
@@ -264,7 +280,9 @@ def residual_sample(
     }
 
 
-def synthetic_recall(images: Sequence[Image.Image]) -> dict[str, Any]:
+def synthetic_recall(
+    images: Sequence[Image.Image], threshold: int = 4
+) -> dict[str, Any]:
     """Audit 100 unrelated sources under the prespecified mild transforms.
 
     Crop strength is the fraction of total image area targeted for removal.
@@ -312,7 +330,7 @@ def synthetic_recall(images: Sequence[Image.Image]) -> dict[str, Any]:
                         copy = jpeg.convert("RGB")
                 transformed.append(copy)
             hits = sum(
-                (h ^ flip_canonical_dhash(copy)).bit_count() <= 4
+                (h ^ flip_canonical_dhash(copy)).bit_count() <= threshold
                 for h, copy in zip(hashes, transformed, strict=True)
             )
             row = {
@@ -328,7 +346,9 @@ def synthetic_recall(images: Sequence[Image.Image]) -> dict[str, Any]:
                 row["actual_removed_area_min"] = min(removed)
                 row["actual_removed_area_max"] = max(removed)
             rows.append(row)
-    false_merges = sum((a ^ b).bit_count() <= 4 for a, b in combinations(hashes, 2))
+    false_merges = sum(
+        (a ^ b).bit_count() <= threshold for a, b in combinations(hashes, 2)
+    )
     total = len(images) * (len(images) - 1) // 2
     rate = false_merges / total
     mild_failed = any(row["mild"] and row["recall"] < 0.9 for row in rows)
@@ -355,6 +375,7 @@ def prepare_cohort(samples: dict[str, Any], seed: int = 42) -> dict[str, Any]:
     rows = []
     denominators = {}
     seen = set()
+    threshold = samples.get("threshold", 4)
     for band_name in ("merged", "near_miss"):
         band = samples["bands"][band_name]
         grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -363,7 +384,9 @@ def prepare_cohort(samples: dict[str, Any], seed: int = 42) -> dict[str, Any]:
             if a == b or tuple(sorted((a, b))) in seen:
                 raise ValueError("edge samples must contain distinct unique pairs")
             if not (
-                3 <= distance <= 4 if band_name == "merged" else 5 <= distance <= 16
+                3 <= distance <= threshold
+                if band_name == "merged"
+                else threshold < distance <= 16
             ):
                 raise ValueError("edge distance does not match its band")
             seen.add(tuple(sorted((a, b))))

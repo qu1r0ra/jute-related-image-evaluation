@@ -115,7 +115,9 @@ These helpers do not run real lab sessions or experiments as part of tooling CI.
 
 ### Grouped target freezes
 
-`freeze target --grouping-version dhash-v1` requires `--plantvillage-root` and
+`--grouping-version` selects the Hamming threshold: `dhash-v1` merges at distance 4, `dhash-v2` at 6. `dhash-v2` applies the one prespecified threshold change: the synthetic 5% centered-crop recall was 0.83 at threshold 4 (bar 0.90) and is 0.93 at 6, while the unrelated false-merge rate stays at 0.0002. Threshold 6 is the smallest value that clears the bar; family counts per pool and class confirmed it (larger thresholds chain families and exclude more cross-label images in pool A). The receipt records `gate_outcomes.threshold_change: applied` and a `threshold_change_record`. Source screening keeps its distance-4 rule. Pass `--threshold 6` to `data audit-sample edges` and `recall` so the merged band is distance 3–6 and the near-miss band 7–16; `audit-cohort` reads the threshold from the sample file.
+
+`freeze target --grouping-version dhash-v1` (or `dhash-v2`) requires `--plantvillage-root` and
 `--plantdoc-root`, each pointing to an image inventory in the supported
 `<label>/<file>` or `<train|val|test>/<label>/<file>` layout. The freeze screens
 all inventoried target images against both supplied source inventories, records

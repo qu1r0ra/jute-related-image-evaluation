@@ -39,6 +39,8 @@ from jute_disease.data.cache import (
 )
 from jute_disease.data.curation import curate, load_rules
 from jute_disease.data.grouping import (
+    GROUPING_THRESHOLDS,
+    THRESHOLD_CHANGE_RECORD,
     flip_canonical_dhash,
     group_inventory,
     screen_source_overlap,
@@ -136,8 +138,9 @@ def freeze_target(
     ):
         raise ValueError("Grouping inputs require --grouping-version")
     if grouping_version is not None:
-        if grouping_version != "dhash-v1":
+        if grouping_version not in GROUPING_THRESHOLDS:
             raise ValueError("Unknown grouping version")
+        threshold = GROUPING_THRESHOLDS[grouping_version]
         if plantvillage_root is None or plantdoc_root is None:
             raise ValueError("Grouped freeze requires both source roots")
         admitted = list(curate(records, rules).admitted)
@@ -203,7 +206,7 @@ def freeze_target(
             ):
                 raise ValueError("Invalid agreement results values")
             gate = "pass" if agreement["pass"] else "fail"
-        result = group_inventory(images, ratings)
+        result = group_inventory(images, ratings, threshold)
         targets = {"target": {}}
         for record in records:
             with Image.open(Path(image_root) / record.path) as image:
@@ -263,8 +266,8 @@ def freeze_target(
             "algorithm_version": grouping_version,
             "parameters": {
                 "hash": "flip-canonical-dhash64",
-                "threshold": 4,
-                "bands": 5,
+                "threshold": threshold,
+                "bands": threshold + 1,
                 "size_percentile": 99,
                 "diameter_limit": 16,
             },
@@ -282,9 +285,11 @@ def freeze_target(
             "agreement_results": agreement,
             "gate_outcomes": {
                 "agreement": gate,
-                "threshold_change": "not_requested",
+                "threshold_change": ("not_requested" if threshold == 4 else "applied"),
             },
         }
+        if threshold != 4:
+            grouping["threshold_change_record"] = THRESHOLD_CHANGE_RECORD
         grouping["digest"] = hashlib.sha256(
             json.dumps(grouping, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()

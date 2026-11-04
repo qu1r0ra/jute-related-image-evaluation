@@ -75,6 +75,15 @@ def test_grouping_drops_entire_conflicting_component_after_audit() -> None:
     assert result["families"] == [("c",)]
 
 
+def test_threshold_decides_whether_a_distance_six_pair_shares_a_family() -> None:
+    from jute_disease.data import group_inventory
+
+    images = {"a": ("sha-a", 0, "x"), "b": ("sha-b", 0b11_1111, "x")}
+
+    assert len(group_inventory(images)["families"]) == 2
+    assert group_inventory(images, threshold=6)["families"] == [("a", "b")]
+
+
 def test_exact_conflicting_copies_cannot_be_repaired_apart() -> None:
     from jute_disease.data import group_inventory
 

@@ -137,7 +137,9 @@ def _audit_sample(args: argparse.Namespace) -> None:
     try:
         data = json.loads(args.source.read_text(encoding="utf-8"))
         if args.kind == "edges":
-            report = sample_edges(data, count=args.count, seed=args.seed)
+            report = sample_edges(
+                data, count=args.count, seed=args.seed, threshold=args.threshold
+            )
         elif args.kind == "features":
             extractor = ImageNetExtractor()
             report = {
@@ -166,7 +168,7 @@ def _audit_sample(args: argparse.Namespace) -> None:
             for path in data:
                 with Image.open(path) as image:
                     images.append(image.convert("RGB"))
-            report = synthetic_recall(images)
+            report = synthetic_recall(images, threshold=args.threshold)
         _print_json(report)
     except (ValueError, OSError, KeyError) as error:
         raise SystemExit(f"audit blocked: {error}") from error
@@ -779,6 +781,12 @@ def build_parser() -> argparse.ArgumentParser:
     sampler.add_argument("--count", type=int, default=200)
     sampler.add_argument("--seed", type=int, default=DEFAULT_SEED)
     sampler.add_argument("--k", type=int, default=5)
+    sampler.add_argument(
+        "--threshold",
+        type=int,
+        default=4,
+        help="Merge threshold for edges and recall (dhash-v2 uses 6).",
+    )
     sampler.set_defaults(run=_audit_sample)
     cohort = data_actions.add_parser(
         "audit-cohort",
@@ -1104,7 +1112,9 @@ def _add_freeze(commands: argparse._SubParsersAction) -> None:
     target.add_argument(
         "--force", action="store_true", help="Replace a different completed freeze."
     )
-    target.add_argument("--grouping-version", choices=("dhash-v1",), default=None)
+    target.add_argument(
+        "--grouping-version", choices=("dhash-v1", "dhash-v2"), default=None
+    )
     target.add_argument("--no-merge-ratings", type=Path)
     target.add_argument("--agreement-results", type=Path)
     target.add_argument("--plantvillage-root", type=Path)

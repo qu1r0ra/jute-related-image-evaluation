@@ -166,7 +166,8 @@ def _pool(root: Path) -> tuple[list[dict], dict[str, str]]:
         not isinstance(outcomes, dict)
         or outcomes.get("agreement") != "pass"
         or any(
-            outcome not in ("pass", "not_requested") for outcome in outcomes.values()
+            outcome not in ("pass", "not_requested", "applied")
+            for outcome in outcomes.values()
         )
     ):
         raise ValueError("grouping gate outcomes have not passed")
