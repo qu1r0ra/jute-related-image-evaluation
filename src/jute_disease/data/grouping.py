@@ -6,6 +6,16 @@ from typing import Any
 
 from PIL import Image, ImageOps
 
+GROUPING_THRESHOLDS = {"dhash-v1": 4, "dhash-v2": 6}
+
+THRESHOLD_CHANGE_RECORD = {
+    "issue": "qu1r0ra/jute-related-image-evaluation#172",
+    "failure": "synthetic 5% centered-crop recall below 0.90 at dhash-v1 threshold 4",
+    "recall_crop_5pct": {"4": 0.83, "5": 0.90, "6": 0.93, "7": 0.93, "8": 0.93},
+    "unrelated_false_merge_rate": {"4": 0.0002, "6": 0.0002},
+    "choice": "smallest threshold clearing the bar, confirmed on family counts only",
+}
+
 
 def dhash_candidates(
     hashes: dict[str, int], threshold: int = 4
@@ -180,6 +190,7 @@ def screen_source_overlap(
 def group_inventory(
     images: dict[str, tuple[str, int, str]],
     no_merge: set[tuple[str, str]] | None = None,
+    threshold: int = 4,
 ) -> dict[str, Any]:
     """Group inventory paths, audit and repair, then exclude conflicting families."""
     if any(
@@ -188,7 +199,7 @@ def group_inventory(
         raise ValueError("Each rated pair must name distinct inventory paths")
     hashes = {key: value for key, (_, value, _) in images.items()}
     labels = {key: label for key, (_, _, label) in images.items()}
-    edges = {(a, b): d for a, b, d in dhash_candidates(hashes)}
+    edges = {(a, b): d for a, b, d in dhash_candidates(hashes, threshold)}
     exact: dict[str, list[str]] = {}
     for key, (sha, _, _) in sorted(images.items()):
         exact.setdefault(sha, []).append(key)

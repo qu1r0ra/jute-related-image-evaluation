@@ -222,6 +222,20 @@ def test_dhash_freeze_receipt_binds_groups_and_cannot_replace_existing_freeze(
     assert refused.returncode != 0
 
 
+def test_dhash_v2_freeze_records_threshold_six_and_the_prespecified_change(
+    inputs: dict[str, Path],
+) -> None:
+    out, result = _freeze(inputs, "dhash-v2", "--grouping-version", "dhash-v2")
+    assert result.returncode == 0, result.stderr
+    grouping = json.loads((out / "target" / "grouping.json").read_text())
+    assert grouping["algorithm_version"] == "dhash-v2"
+    assert grouping["parameters"]["threshold"] == 6
+    assert grouping["parameters"]["bands"] == 7
+    assert grouping["gate_outcomes"]["threshold_change"] == "applied"
+    assert grouping["threshold_change_record"]["recall_crop_5pct"]["4"] == 0.83
+    assert load_complete_manifest(out / "target").dependencies
+
+
 def test_dhash_grouping_receipt_is_verified_before_loading(
     inputs: dict[str, Path],
 ) -> None:

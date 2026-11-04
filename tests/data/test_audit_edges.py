@@ -19,6 +19,28 @@ def test_pooled_edges_stay_inside_each_pool_with_binned_strata() -> None:
     assert set(bands["near_miss"]["strata"]) == {"A:5-8:cross_label"}
 
 
+def test_threshold_moves_the_merged_and_near_miss_bands() -> None:
+    images = {
+        "a": (0b0, "x"),
+        "b": (0b11_1111, "x"),
+        "c": (0b111_1111, "x"),
+    }
+
+    wide = sample_edges(images, count=10, threshold=6)
+    narrow = sample_edges(images, count=10)
+
+    assert wide["threshold"] == 6
+    assert set(wide["bands"]["merged"]["strata"]) == {"6:same_label"}
+    assert set(wide["bands"]["near_miss"]["strata"]) == {"7:same_label"}
+    assert not narrow["bands"]["merged"]["strata"]
+    assert set(narrow["bands"]["near_miss"]["strata"]) == {
+        "6:same_label",
+        "7:same_label",
+    }
+    with pytest.raises(ValueError, match="threshold"):
+        sample_edges(images, threshold=2)
+
+
 def test_pool_tag_must_be_given_for_every_image() -> None:
     with pytest.raises(ValueError, match="every image or for none"):
         sample_edges({"a": (0, "x", "A"), "b": (1, "x")})

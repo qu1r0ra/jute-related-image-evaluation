@@ -18,7 +18,11 @@ from jute_disease.data import (
 
 
 def frozen_pool(
-    root: Path, gate: str = "pass", healthy_count: int = 30, copies: int = 3
+    root: Path,
+    gate: str = "pass",
+    healthy_count: int = 30,
+    copies: int = 3,
+    threshold_change: str = "not_requested",
 ) -> Path:
     """Construct a small frozen pool, with two images per family."""
     records = []
@@ -54,7 +58,7 @@ def frozen_pool(
         "algorithm_version": "dhash-v1",
         "families": families,
         "excluded": [],
-        "gate_outcomes": {"agreement": gate, "threshold_change": "not_requested"},
+        "gate_outcomes": {"agreement": gate, "threshold_change": threshold_change},
     }
     grouping["digest"] = hashlib.sha256(
         json.dumps(grouping, sort_keys=True, separators=(",", ":")).encode()
@@ -79,6 +83,16 @@ def frozen_pool(
         json.dumps(grouping), encoding="utf-8"
     )
     return root
+
+
+def test_recorded_threshold_change_is_accepted_and_other_outcomes_are_not(
+    tmp_path: Path,
+) -> None:
+    from jute_disease.data.policies import _pool
+
+    _pool(frozen_pool(tmp_path / "applied", threshold_change="applied"))
+    with pytest.raises(ValueError, match="gate outcomes"):
+        _pool(frozen_pool(tmp_path / "failed", threshold_change="fail"))
 
 
 def test_command_refuses_pending_grouping_gate(tmp_path: Path) -> None:

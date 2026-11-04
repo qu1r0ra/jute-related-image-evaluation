@@ -16,6 +16,7 @@ from pathlib import Path
 
 from jute_disease.config import DEFAULT_SEED, SPLITS
 from jute_disease.data.curation import Curation, CurationRules, curate
+from jute_disease.data.grouping import GROUPING_THRESHOLDS
 from jute_disease.data.identity import (
     IdentityResolution,
     Review,
@@ -397,7 +398,7 @@ def build_manifest(
             every partition and every identity constraint respected.
     """
     if grouping_version is not None:
-        if grouping_version != "dhash-v1" or grouping_receipt is None:
+        if grouping_version not in GROUPING_THRESHOLDS or grouping_receipt is None:
             raise FreezeBlockedError("A valid grouping receipt is required")
         receipt = dict(grouping_receipt)
         digest = receipt.pop("digest", None)
@@ -573,7 +574,7 @@ def load_manifest(directory: Path, min_support: int | None = None) -> Manifest:
         raise FreezeBlockedError(f"Receipt does not match the manifest in {directory}")
     grouping_digest = dict(manifest.dependencies).get("grouping")
     if (
-        dict(manifest.dependencies).get("grouping_version") == "dhash-v1"
+        dict(manifest.dependencies).get("grouping_version") in GROUPING_THRESHOLDS
         and not grouping_digest
     ):
         raise FreezeBlockedError(f"Missing grouping receipt dependency in {directory}")
