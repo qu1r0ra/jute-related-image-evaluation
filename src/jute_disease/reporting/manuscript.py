@@ -19,6 +19,7 @@ from jute_disease.data import (
     rebuild_partition_assignments,
     validate_partition_fractions,
 )
+from jute_disease.data.manifest import load_complete_manifest
 
 CLAIM_LIST_URL = (
     "https://github.com/qu1r0ra/jute-related-image-evaluation/issues/108"
@@ -927,6 +928,7 @@ def export_manuscript(
     config_path = Path(config_path)
     output_dir = Path(output_dir)
     manifest = load_manifest(freeze_dir)
+    complete = load_complete_manifest(freeze_dir)
     receipt_path = freeze_dir / "receipt.json"
     manifest_path = freeze_dir / "manifest.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -934,7 +936,7 @@ def export_manuscript(
         raise ValueError("export configuration must be a JSON object")
     if not isinstance(source_metadata, dict):
         raise ValueError("source metadata must be a JSON object")
-    expected_sources = {entry.source for entry in manifest.entries}
+    expected_sources = {entry.source for entry in complete.entries}
     if set(source_metadata) != expected_sources:
         raise ValueError(
             "source metadata must contain exactly the source names in the manifest"
@@ -1034,7 +1036,7 @@ def export_manuscript(
         )
 
     value_groups = (
-        _support_values(manifest),
+        _support_values(complete),
         _classical_tuning_values(),
         _compute_values(compute_report),
         evaluation_values,
@@ -1060,9 +1062,9 @@ def export_manuscript(
     with (output_dir / "support.csv").open("w", encoding="utf-8", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=("partition", "label", "count"))
         writer.writeheader()
-        support = manifest.support()
+        support = complete.support()
         for partition in PARTITIONS:
-            for label in manifest.labels:
+            for label in complete.labels:
                 writer.writerow(
                     {
                         "partition": partition,
@@ -1070,7 +1072,7 @@ def export_manuscript(
                         "count": support[partition].get(label, 0),
                     }
                 )
-    _write_figure(output_dir / "support.png", manifest)
+    _write_figure(output_dir / "support.png", complete)
     _write_json(output_dir / "figure-sources.json", figure_sources)
     _write_json(output_dir / "compute-report.json", compute_report)
     (output_dir / "compute.csv").write_text(
@@ -1101,7 +1103,7 @@ def export_manuscript(
             "label": entry.label,
             "image_id": entry.image_id,
         }
-        for entry in manifest.entries
+        for entry in complete.entries
     ]
     kit = {
         "version": 1,
@@ -1332,6 +1334,7 @@ def validate_export(output_dir: Path) -> dict[str, Any]:
     if _sha256_file(receipt_path) != receipt_artifact.get("sha256"):
         raise ValueError("authoritative receipt bytes changed after export")
     manifest = load_manifest(manifest_path.parent)
+    complete = load_complete_manifest(manifest_path.parent)
     if manifest.digest() != manifest_artifact.get("manifest_digest"):
         raise ValueError("export lineage manifest digest mismatch")
     configuration_sha256 = metadata.get("configuration_sha256")
@@ -1443,7 +1446,7 @@ def validate_export(output_dir: Path) -> dict[str, Any]:
         raise ValueError("classical tuning budget differs from the accepted grid")
     expected_values: dict[str, int | float] = {}
     for group in (
-        _support_values(manifest),
+        _support_values(complete),
         _classical_tuning_values(),
         _compute_values(compute_report),
         evaluation_values,
@@ -1466,11 +1469,11 @@ def validate_export(output_dir: Path) -> dict[str, Any]:
         raise ValueError("TeX macros do not match the authoritative manifest")
 
     expected_csv = ["partition,label,count"]
-    support = manifest.support()
+    support = complete.support()
     expected_csv.extend(
         f"{partition},{label},{support[partition].get(label, 0)}"
         for partition in PARTITIONS
-        for label in manifest.labels
+        for label in complete.labels
     )
     csv_text = (
         (output_dir / "support.csv").read_text(encoding="utf-8").replace("\r\n", "\n")
@@ -1485,7 +1488,7 @@ def validate_export(output_dir: Path) -> dict[str, Any]:
     )
     if source_metadata != metadata.get("source_metadata"):
         raise ValueError("export source metadata differs from its recorded lineage")
-    expected_sources = {entry.source for entry in manifest.entries}
+    expected_sources = {entry.source for entry in complete.entries}
     if (
         not isinstance(source_metadata, dict)
         or set(source_metadata) != expected_sources
@@ -1505,7 +1508,7 @@ def validate_export(output_dir: Path) -> dict[str, Any]:
             "label": entry.label,
             "image_id": entry.image_id,
         }
-        for entry in manifest.entries
+        for entry in complete.entries
     ]
     if kit.get("entries") != expected_kit:
         raise ValueError("rebuild kit entries do not match the authoritative manifest")
@@ -1761,7 +1764,7 @@ def run_manuscript_fixture(output_dir: Path) -> dict[str, Any]:
     }
     config_path = output_dir / "fixture-export-config.json"
     _write_json(config_path, config)
-    frozen_manifest = load_manifest(freeze_dir)
+    frozen_manifest = load_complete_manifest(freeze_dir)
     source_metadata = {
         source: {"url": "synthetic://local-fixture", "version": "synthetic-1"}
         for source in {entry.source for entry in frozen_manifest.entries}

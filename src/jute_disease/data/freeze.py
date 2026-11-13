@@ -182,7 +182,8 @@ def freeze_target(
                 "method",
             }:
                 raise ValueError("Invalid agreement results schema")
-            interval, threshold = agreement["kappa_interval"], agreement["threshold"]
+            interval = agreement["kappa_interval"]
+            kappa_threshold = agreement["threshold"]
 
             def number(x: object) -> bool:
                 return type(x) in (int, float) and -1 <= x <= 1
@@ -192,14 +193,14 @@ def freeze_target(
                 isinstance(interval, list)
                 and len(interval) == 2
                 and all(number(x) for x in interval)
-                and number(threshold)
+                and number(kappa_threshold)
             ):
                 valid_interval = interval[0] <= interval[1] and agreement["pass"] == (
-                    interval[0] >= threshold
+                    interval[0] >= kappa_threshold
                 )
             if (
                 not valid_interval
-                or not number(threshold)
+                or not number(kappa_threshold)
                 or type(agreement["pass"]) is not bool
                 or not isinstance(agreement["method"], str)
                 or not agreement["method"].strip()
