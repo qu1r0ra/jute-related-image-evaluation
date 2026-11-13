@@ -33,3 +33,7 @@ Fix preprocessing and augmentation before any fit, identically across policies, 
 ## Amendment, 2026-11-01
 
 The owner's blind check grows from 50 to about 120 overlays, and the agreement gate moves from the point estimate to the lower bound of the 95% confidence interval for Cohen's κ (≥ 0.6). With 50 items the interval is roughly ±0.2, too wide to show the threshold is met. The estimated fail-rate condition (under 10%) and the decision to measure rather than mitigate the confound are unchanged. The owner rates mask quality and scene tag on the same images in one sitting. Recorded in [issue 106](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/106).
+
+## Amendment, 2026-11-13
+
+Colour threshold plus largest component is the only mask backend. The SAM refinement and the comparison of colour-threshold masks with SAM masks, both named in the decision above, are removed, so the mask audit rates colour-threshold masks only. One backend keeps every probe and leaf-score result on masks the audit gated. The agreement gate, the fail-rate condition and the measure-rather-than-mitigate decision are unchanged. Recorded in [issue 179](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/179) and [ADR 0004](0004-prespecified-grouping-gates-and-split-mean-inference.md).
