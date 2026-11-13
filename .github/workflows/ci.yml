@@ -10,7 +10,38 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed files
+        id: classify
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          # A PR is docs-only when every changed file is documentation.
+          # Anything else, including source, tests, configs, scripts,
+          # dependencies and workflows, takes the full-suite path.
+          changed=$(git diff --name-only "origin/${BASE_REF}...HEAD")
+          echo "$changed"
+          if [ -z "$changed" ]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+          elif echo "$changed" | grep -vE '^(docs/|\.github/pull_request_template\.md$|[^/]+\.md$)' > /dev/null; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+          fi
+
   test:
+    needs: changes
+    if: ${{ always() && (github.event_name == 'push' || needs.changes.outputs.docs_only != 'true') }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -39,11 +70,11 @@ jobs:
         run: uv run --locked python scripts/audit_dependencies.py
 
       - name: Run tests
-        if: github.event_name == 'push'
         run: uv run pytest -m ""
 
   focused-tests:
-    if: github.event_name == 'pull_request'
+    needs: changes
+    if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.docs_only == 'true' }}
     runs-on: ubuntu-latest
 
     steps:
