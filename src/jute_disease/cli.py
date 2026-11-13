@@ -60,6 +60,7 @@ from jute_disease.data import (
     write_policy_manifests,
     write_thresholds,
 )
+from jute_disease.data.policies import HEALTHY_CAP
 from jute_disease.evaluation import (
     FreezeRecordError,
     TestReadRefusedError,
@@ -374,6 +375,7 @@ def _freeze_policies(args: argparse.Namespace) -> None:
                 args.val_fraction,
                 args.test_fraction,
                 args.seed,
+                healthy_cap=args.healthy_cap,
             )
         )
     except (ValueError, OSError) as error:
@@ -1140,6 +1142,12 @@ def _add_freeze(commands: argparse._SubParsersAction) -> None:
     policies.add_argument("--val-fraction", type=float, required=True)
     policies.add_argument("--test-fraction", type=float, required=True)
     policies.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    policies.add_argument(
+        "--healthy-cap",
+        type=int,
+        default=HEALTHY_CAP,
+        help="Healthy training images kept per policy in pool C (default: %(default)s)",
+    )
     policies.set_defaults(run=_freeze_policies)
 
     cache = actions.add_parser(
