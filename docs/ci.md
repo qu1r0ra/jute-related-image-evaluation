@@ -27,3 +27,4 @@ The previous five-run PR duration median was 10m28s. For a CI change, record the
 before and after elapsed durations in the pull request, excluding queue time,
 and state whether the three-minute ceiling was met. If the post-change GitHub
 Actions run has not finished, report its duration as pending.
+
