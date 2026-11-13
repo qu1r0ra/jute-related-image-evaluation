@@ -41,7 +41,7 @@ SPLITS = {"train": 0.7, "val": 0.15, "test": 0.15}
 # Execution defaults
 BATCH_SIZE = 32
 NUM_WORKERS = 4
-SEEDS = (42, 1337, 7)
+SEEDS = (42, 1337, 7, 21, 84)
 DEFAULT_SEED = SEEDS[0]
 DEFAULT_LR = 3e-4
 DEFAULT_WEIGHT_DECAY = 0.01
