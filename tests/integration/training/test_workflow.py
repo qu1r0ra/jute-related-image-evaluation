@@ -133,6 +133,30 @@ def test_workspace_resolves_a_wrapped_source_package(
     assert workspace.data.sources["plantvillage"][1] == wrapped.resolve()
 
 
+def test_workspace_rejects_a_used_row_naming_a_missing_checkpoint(
+    inputs: Inputs, tmp_path: Path
+) -> None:
+    """Split 1, seed 0 rotates to checkpoint 1, which one source seed cannot supply."""
+    path = _benchmark_json(tmp_path / "benchmark.json")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["matrix"].update(splits=[1], primary_split=1)
+    raw["assignments"] = []
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="checkpoint beyond the 1 source seeds"):
+        open_workspace(
+            benchmark_path=path,
+            data=DataInputs(
+                image_root=inputs.image_root,
+                target_dir=inputs.target_dir,
+                sources=inputs.sources,
+            ),
+            runs_dir=tmp_path / "runs",
+            cache_dir=tmp_path / "cache",
+            pretrained=False,
+            require_cuda=False,
+        )
+
+
 def test_workspace_round_trips_through_its_file(workspace: Workspace) -> None:
     path = workspace.runs_dir / "workspace.json"
     workspace.save(path)
@@ -469,14 +493,14 @@ class _KillAfterEpoch(InProcess):
         super().__init__(workspace)
         self.monkeypatch = monkeypatch
         self.kill_at: int | None = None
-        original = ProgressRecord.on_validation_end
+        original = ProgressRecord.on_train_epoch_end
 
-        def on_validation_end(callback, trainer, module) -> None:
+        def on_train_epoch_end(callback, trainer, module) -> None:
             original(callback, trainer, module)
             if trainer.current_epoch + 1 == self.kill_at:
                 raise _Killed
 
-        monkeypatch.setattr(ProgressRecord, "on_validation_end", on_validation_end)
+        monkeypatch.setattr(ProgressRecord, "on_train_epoch_end", on_train_epoch_end)
 
     def __call__(self, job: Job, timeout: float | None, log: Path) -> ChildResult:
         try:
