@@ -35,7 +35,6 @@ from jute_disease.data import (
     ColorThresholdBackend,
     FreezeBlockedError,
     ImageNetExtractor,
-    Sam2Refiner,
     SceneThresholds,
     SourceMismatchError,
     download_plant_doc,
@@ -48,6 +47,7 @@ from jute_disease.data import (
     fixture_round,
     freeze_target,
     intake_source,
+    load_protected_test_images,
     make_synthetic_data,
     prepare_cohort,
     probe_cache,
@@ -247,17 +247,15 @@ def _audit_evaluate(args: argparse.Namespace) -> None:
         raise SystemExit(f"audit blocked: {error}") from error
 
 
-def _mask_backend(checkpoint: Path | None) -> ColorThresholdBackend | Sam2Refiner:
-    return Sam2Refiner(checkpoint) if checkpoint else ColorThresholdBackend()
-
-
 def _masks_calibrate(args: argparse.Namespace) -> None:
     try:
         thresholds = fit_thresholds_from_manifest(
-            args.development, _mask_backend(args.checkpoint)
+            args.development,
+            ColorThresholdBackend(),
+            load_protected_test_images(args.target_dir),
         )
         write_thresholds(args.output, thresholds)
-    except (ValueError, OSError, KeyError, ImportError) as error:
+    except (ValueError, OSError, KeyError, FreezeBlockedError) as error:
         raise SystemExit(f"mask calibration blocked: {error}") from error
     _print_json(thresholds.to_dict())
 
@@ -270,13 +268,14 @@ def _masks_audit(args: argparse.Namespace) -> None:
         manifest = run_masks_audit(
             read_candidates(args.inventory),
             thresholds,
-            _mask_backend(args.checkpoint),
+            ColorThresholdBackend(),
             args.output,
+            load_protected_test_images(args.target_dir),
             seed=args.seed,
             sample_count=args.sample_count,
             owner_count=args.owner_count,
         )
-    except (ValueError, OSError, KeyError, ImportError) as error:
+    except (ValueError, OSError, KeyError, FreezeBlockedError) as error:
         raise SystemExit(f"mask audit blocked: {error}") from error
     _print_json(
         {
@@ -829,9 +828,11 @@ def build_parser() -> argparse.ArgumentParser:
     masks_calibrate.add_argument("development", type=Path)
     masks_calibrate.add_argument("--output", type=Path, required=True)
     masks_calibrate.add_argument(
-        "--checkpoint",
+        "--target-dir",
         type=Path,
-        help="Existing local SAM 2 checkpoint directory; never downloaded.",
+        required=True,
+        help="Frozen target directory whose protected test partition must not "
+        "overlap the development set.",
     )
     masks_calibrate.set_defaults(run=_masks_calibrate)
 
@@ -846,9 +847,11 @@ def build_parser() -> argparse.ArgumentParser:
     masks_audit.add_argument("--sample-count", type=int, default=AUDIT_COUNT)
     masks_audit.add_argument("--owner-count", type=int, default=OWNER_COUNT)
     masks_audit.add_argument(
-        "--checkpoint",
+        "--target-dir",
         type=Path,
-        help="Existing local SAM 2 checkpoint directory matching calibration.",
+        required=True,
+        help="Frozen target directory whose protected test partition the "
+        "development set and audit inventory must not overlap.",
     )
     masks_audit.set_defaults(run=_masks_audit)
 

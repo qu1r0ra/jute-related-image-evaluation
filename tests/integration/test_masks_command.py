@@ -102,7 +102,9 @@ def freeze(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
 
 
 @pytest.fixture(scope="module")
-def calibrated(freeze: dict[str, Path], tmp_path_factory: pytest.TempPathFactory):
+def calibrated(
+    freeze: dict[str, Path], tmp_path_factory: pytest.TempPathFactory
+) -> dict[str, Path]:
     work = tmp_path_factory.mktemp("masks-calibrated")
     scenes = [SCENES[index % 3] for index in range(100)]
     development = _write_records(work, "dev", scenes, tagged=True, start=0)
