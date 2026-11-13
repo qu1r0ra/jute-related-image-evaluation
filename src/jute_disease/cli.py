@@ -28,6 +28,7 @@ from jute_disease.config import (
 from jute_disease.data import (
     AUDIT_COUNT,
     DEFAULT_BUDGET_SECONDS,
+    DEFAULT_DESIGN,
     DEFAULT_MAX_BYTES,
     OWNER_COUNT,
     SOURCES,
@@ -38,6 +39,8 @@ from jute_disease.data import (
     Sam2Refiner,
     SceneThresholds,
     SourceMismatchError,
+    build_audit_kit,
+    collect_audit_kit,
     download_plant_doc,
     download_plant_village,
     evaluate_masks_audit,
@@ -49,6 +52,7 @@ from jute_disease.data import (
     freeze_target,
     intake_source,
     make_synthetic_data,
+    next_audit_sitting,
     prepare_cohort,
     probe_cache,
     read_candidates,
@@ -126,7 +130,7 @@ def _data_synthetic(args: argparse.Namespace) -> None:
 
 def _audit_fixture(args: argparse.Namespace) -> None:
     try:
-        _print_json(fixture_round(args.output))
+        _print_json(fixture_round(args.output, args.grouping_version))
     except (ValueError, OSError) as error:
         raise SystemExit(f"audit blocked: {error}") from error
 
@@ -135,10 +139,23 @@ def _audit_sample(args: argparse.Namespace) -> None:
     from PIL import Image
 
     try:
+        if args.kind in ("edges", "recall") and not args.grouping_version:
+            raise ValueError(
+                f"audit-sample {args.kind} requires --grouping-version; "
+                "the version fixes the Hamming threshold"
+            )
         data = json.loads(args.source.read_text(encoding="utf-8"))
         if args.kind == "edges":
+            design = (
+                json.loads(args.design.read_text(encoding="utf-8"))
+                if args.design
+                else DEFAULT_DESIGN
+            )
             report = sample_edges(
-                data, count=args.count, seed=args.seed, threshold=args.threshold
+                {path: tuple(value) for path, value in data.items()},
+                design,
+                args.grouping_version,
+                seed=args.seed,
             )
         elif args.kind == "features":
             extractor = ImageNetExtractor()
@@ -168,7 +185,7 @@ def _audit_sample(args: argparse.Namespace) -> None:
             for path in data:
                 with Image.open(path) as image:
                     images.append(image.convert("RGB"))
-            report = synthetic_recall(images, threshold=args.threshold)
+            report = synthetic_recall(images, args.grouping_version)
         _print_json(report)
     except (ValueError, OSError, KeyError) as error:
         raise SystemExit(f"audit blocked: {error}") from error
@@ -177,7 +194,11 @@ def _audit_sample(args: argparse.Namespace) -> None:
 def _audit_cohort(args: argparse.Namespace) -> None:
     try:
         samples = json.loads(args.source.read_text(encoding="utf-8"))
-        cohort = prepare_cohort(samples, seed=args.seed)
+        cohort = prepare_cohort(
+            samples,
+            {"name": args.agent_name, "version": args.agent_version},
+            seed=args.seed,
+        )
         args.output.mkdir(parents=True, exist_ok=False)
         (args.output / "agent.json").write_text(
             json.dumps(cohort, indent=2) + "\n", encoding="utf-8"
@@ -193,6 +214,29 @@ def _audit_cohort(args: argparse.Namespace) -> None:
                 ),
             }
         )
+    except (ValueError, OSError, KeyError) as error:
+        raise SystemExit(f"audit blocked: {error}") from error
+
+
+def _audit_kit(args: argparse.Namespace) -> None:
+    try:
+        _print_json(
+            build_audit_kit(args.cohort, args.mask_audit, args.output, seed=args.seed)
+        )
+    except (ValueError, OSError, KeyError) as error:
+        raise SystemExit(f"audit blocked: {error}") from error
+
+
+def _audit_sitting(args: argparse.Namespace) -> None:
+    try:
+        _print_json(next_audit_sitting(args.kit, limit=args.limit))
+    except (ValueError, OSError, KeyError) as error:
+        raise SystemExit(f"audit blocked: {error}") from error
+
+
+def _audit_collect(args: argparse.Namespace) -> None:
+    try:
+        _print_json(collect_audit_kit(args.kit))
     except (ValueError, OSError, KeyError) as error:
         raise SystemExit(f"audit blocked: {error}") from error
 
@@ -224,9 +268,8 @@ def _audit_evaluate(args: argparse.Namespace) -> None:
         if previous is None and args.revision:
             raise ValueError("a rubric revision requires a failed first round")
         report = evaluate_ratings(
-            data["pairs"],
+            data,
             args.sheet,
-            data["denominators"],
             round_number=2 if previous else 1,
             previous=previous,
             revision=args.revision,
@@ -771,6 +814,11 @@ def build_parser() -> argparse.ArgumentParser:
         "audit-fixture", help="Run a synthetic blind rating round."
     )
     audit.add_argument("--output", type=Path, required=True)
+    audit.add_argument(
+        "--grouping-version",
+        required=True,
+        help="Grouping version; it fixes the Hamming merge threshold.",
+    )
     audit.set_defaults(run=_audit_fixture)
 
     sampler = data_actions.add_parser(
@@ -778,24 +826,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sampler.add_argument("kind", choices=("edges", "features", "residual", "recall"))
     sampler.add_argument("source", type=Path)
-    sampler.add_argument("--count", type=int, default=200)
+    sampler.add_argument(
+        "--count",
+        type=int,
+        default=200,
+        help="Protected-test images per pool for the residual sample.",
+    )
     sampler.add_argument("--seed", type=int, default=DEFAULT_SEED)
     sampler.add_argument("--k", type=int, default=5)
     sampler.add_argument(
-        "--threshold",
-        type=int,
-        default=4,
-        help="Merge threshold for edges and recall (dhash-v2 uses 6).",
+        "--grouping-version",
+        help=(
+            "Grouping version for edges and recall; it fixes the Hamming "
+            "merge threshold and has no default."
+        ),
+    )
+    sampler.add_argument(
+        "--design",
+        type=Path,
+        help="JSON stratum design for edges; defaults to the recorded 240-pair design.",
     )
     sampler.set_defaults(run=_audit_sample)
     cohort = data_actions.add_parser(
         "audit-cohort",
-        help="Select 60 pairs per hash band and write blind rating sheets.",
+        help="Take every sampled pair into a blind cohort with an owner sheet.",
         description=(
-            "Select 60 merged and 60 near-miss pairs, shuffling within "
-            "each stratum and cycling through strata using the given seed. "
-            "After export, independently complete agent_rating in agent.json "
-            "and rating in owner.csv before running audit-evaluate."
+            "Take every pair of the edge sample, shuffle it with the given seed "
+            "and record the grouping version and agent rater. After export, "
+            "independently complete agent_rating in agent.json and rating in "
+            "owner.csv before running audit-evaluate."
         ),
     )
     cohort.add_argument(
@@ -805,7 +864,40 @@ def build_parser() -> argparse.ArgumentParser:
         "output", type=Path, help="New directory for agent.json and owner.csv"
     )
     cohort.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    cohort.add_argument("--agent-name", required=True, help="Name of the agent rater.")
+    cohort.add_argument(
+        "--agent-version", required=True, help="Version of the agent rater."
+    )
     cohort.set_defaults(run=_audit_cohort)
+    kit = data_actions.add_parser(
+        "audit-kit",
+        help="Build the blind owner kit from a grouping cohort and mask audit.",
+        description=(
+            "Combine the grouping pairs of a cohort directory with the owner "
+            "subset of a mask audit's overlays into one blind kit. Agent "
+            "ratings and algorithm decisions are left out; mask items come first."
+        ),
+    )
+    kit.add_argument("cohort", type=Path, help="Directory from data audit-cohort")
+    kit.add_argument(
+        "mask_audit", type=Path, help="Audit directory from data masks-audit"
+    )
+    kit.add_argument("output", type=Path, help="New directory for the kit")
+    kit.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    kit.set_defaults(run=_audit_kit)
+    sitting = data_actions.add_parser(
+        "audit-sitting",
+        help="Write the next owner sheet holding only items not yet rated.",
+    )
+    sitting.add_argument("kit", type=Path, help="Directory from data audit-kit")
+    sitting.add_argument("--limit", type=int, help="Most items in this sitting.")
+    sitting.set_defaults(run=_audit_sitting)
+    collect = data_actions.add_parser(
+        "audit-collect",
+        help="Merge finished sittings into owner rating sheets for evaluation.",
+    )
+    collect.add_argument("kit", type=Path, help="Directory from data audit-kit")
+    collect.set_defaults(run=_audit_collect)
     export = data_actions.add_parser("audit-export", help="Export a blind owner sheet.")
     export.add_argument("source", type=Path)
     export.add_argument("sheet", type=Path)

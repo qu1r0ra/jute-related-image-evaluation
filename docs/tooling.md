@@ -115,7 +115,7 @@ These helpers do not run real lab sessions or experiments as part of tooling CI.
 
 ### Grouped target freezes
 
-`--grouping-version` selects the Hamming threshold: `dhash-v1` merges at distance 4, `dhash-v2` at 6. `dhash-v2` applies the one prespecified threshold change: the synthetic 5% centered-crop recall was 0.83 at threshold 4 (bar 0.90) and is 0.93 at 6, while the unrelated false-merge rate stays at 0.0002. Threshold 6 is the smallest value that clears the bar; family counts per pool and class confirmed it (larger thresholds chain families and exclude more cross-label images in pool A). The receipt records `gate_outcomes.threshold_change: applied` and a `threshold_change_record`. Source screening keeps its distance-4 rule. Pass `--threshold 6` to `data audit-sample edges` and `recall` so the merged band is distance 3–6 and the near-miss band 7–16; `audit-cohort` reads the threshold from the sample file.
+`--grouping-version` selects the Hamming threshold: `dhash-v1` merges at distance 4, `dhash-v2` at 6. `dhash-v2` applies the one prespecified threshold change: the synthetic 5% centered-crop recall was 0.83 at threshold 4 (bar 0.90) and is 0.93 at 6, while the unrelated false-merge rate stays at 0.0002. Threshold 6 is the smallest value that clears the bar; family counts per pool and class confirmed it (larger thresholds chain families and exclude more cross-label images in pool A). The receipt records `gate_outcomes.threshold_change: applied` and a `threshold_change_record`. Source screening keeps its distance-4 rule. Every grouping audit tool (`data audit-sample edges` and `recall`, `audit-fixture`) requires `--grouping-version` and derives the Hamming threshold from it; none has a threshold default or a `--threshold` option. The merged band is distance 0 to the threshold and the near-miss band runs from the threshold plus one to 16. `audit-cohort` reads the version from the sample file.
 
 `freeze target --grouping-version dhash-v1` (or `dhash-v2`) requires `--plantvillage-root` and
 `--plantdoc-root`, each pointing to an image inventory in the supported
@@ -128,7 +128,19 @@ separate operation and continues to apply its own quarantine rules.
 
 Pool freezes run once per pool. `scripts/stage_pools.py --archives data/source-archives --output data/pools` copies each pool's original-release files, unchanged, to `data/pools/<A|B|C>/<label>/<file>`. Pass that folder as `--image-root` with `--rules configs/data/pools/pool-<a|b|c>.json`. Point `--plantvillage-root` at `data/external/plantvillage/PlantVillage`, the folder that holds `train` and `val`. Each run re-fingerprints both source roots, so the three freezes took about 25 minutes together.
 
-One combined audit kit covers all three pools. Give `data audit-sample edges` a JSON object of `"<pool>/<path>": [hash, label, pool]` entries. Pairs then form only inside a pool, strata read `pool:distance:relation`, and near-miss distances fall into the bins 5–8, 9–12 and 13–16, so the 60-pair cohort represents every stratum. Entries with two elements keep the single-pool strata by exact distance.
+One combined audit covers all three pools. Give `data audit-sample edges` a JSON object of `"<pool>/<path>": [hash, label, pool]` entries and `--grouping-version`. Pairs form only inside a pool. The sampler draws about 240 pairs from a recorded stratum design (`--design PATH` replaces the default): every Pool C cross-label merged pair is taken whole, including Hamming 0–2, and the remaining budget is spread over the other strata of each pool, proportionally or by Neyman allocation, with at least one pair per nonempty stratum. A stratum reads `pool:band:distance-bin:relation:family`, where family is `same` or `split`, meaning whether the two images fall in one connected family at the threshold. Each sampled pair records its stratum, inclusion probability (sampled over population in the stratum) and family membership. The sample file also reports the count of Pool C scenes that mix labels as a dataset-quality output; no family is dropped.
+
+`audit-cohort SAMPLE --agent-name NAME --agent-version VERSION` writes the agent-rated cohort; every audit record names the agent rater. `audit-evaluate` reports per-stratum and design-weighted wrong-merge and false-split rates with exact Clopper–Pearson 95% bounds (two-sided; the design-weighted bound uses the Korn–Graubard effective sample size), and Cohen's κ on the combined pools with a bootstrap stratified by pool and band and clustered on images that recur across pairs. Specific agreement is reported per pool. `--gate-output` still writes only `kappa_interval`, `threshold`, `pass` and `method`.
+
+The blind owner kit joins the grouping pairs with the owner subset of the mask-audit overlays (`data masks-audit`), mask items first, with no agent ratings, algorithm decisions, strata or predicted scenes:
+
+```sh
+uv run jute-disease data audit-kit artifacts/audit-cohort artifacts/mask-audit artifacts/audit-kit
+uv run jute-disease data audit-sitting artifacts/audit-kit --limit 60
+uv run jute-disease data audit-collect artifacts/audit-kit
+```
+
+Each `audit-sitting` call writes `sitting-NNN.csv` holding only items not yet rated, so a later sitting never re-shows a rated item; run it again after filling a sheet to resume. `audit-collect` refuses while any item is unrated, or if two sittings rate one item differently, then writes `owner.csv` for `audit-evaluate` and `owner-masks.csv` for `masks-evaluate`.
 
 Optionally, `--no-merge-ratings PATH` reads a UTF-8 CSV with the exact header
 `image_a,image_b,verdict`. Paths are relative to the target image root and must

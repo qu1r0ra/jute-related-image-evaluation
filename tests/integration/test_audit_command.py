@@ -1,22 +1,303 @@
 import csv
 import json
+import random
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from jute_disease import cli
 
-def test_fixture_rating_round_is_blind_and_evaluated(tmp_path: Path) -> None:
+BASE = [sys.executable, "-m", "jute_disease.cli", "data"]
+AGENT = ["--agent-name", "test-agent", "--agent-version", "t1"]
+
+
+def run(capsys: pytest.CaptureFixture[str], *argv: str) -> Any:
+    cli.main(["data", *argv])
+    return json.loads(capsys.readouterr().out)
+
+
+def write_hashes(path: Path, per_pool: int = 40, seed: int = 7) -> dict[str, list]:
+    rng = random.Random(seed)
+    images: dict[str, list] = {}
+    for pool in "ABC":
+        values = [rng.randrange(1 << 20) for _ in range(per_pool)]
+        for i in range(per_pool // 4):
+            # Near copies, 0 to 3 bits apart, populate the closest merged bins.
+            values[per_pool - 1 - i] = values[i] ^ ((1 << (i % 4)) - 1)
+        for i, value in enumerate(values):
+            images[f"{pool}/{i}.jpg"] = [value, rng.choice("xy"), pool]
+    path.write_text(json.dumps(images), encoding="utf-8")
+    return images
+
+
+def read_sheet(path: Path) -> list[dict[str, str]]:
+    with path.open(newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def write_sheet(path: Path, rows: list[dict[str, str]]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def make_cohort(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, version: str = "dhash-v1"
+) -> tuple[Path, dict[str, Any]]:
+    hashes = tmp_path / "hashes.json"
+    write_hashes(hashes)
+    sample = tmp_path / "edges.json"
+    sample.write_text(
+        json.dumps(
+            run(
+                capsys,
+                "audit-sample",
+                "edges",
+                str(hashes),
+                "--grouping-version",
+                version,
+            )
+        ),
+        encoding="utf-8",
+    )
+    cohort_dir = tmp_path / "cohort"
+    run(capsys, "audit-cohort", str(sample), str(cohort_dir), *AGENT)
+    return cohort_dir, json.loads((cohort_dir / "agent.json").read_text("utf-8"))
+
+
+def rate_pairs(cohort: dict[str, Any], flip_every: int = 4) -> dict[str, str]:
+    """Agent rates by the algorithm decision; the owner flips every nth pair."""
+    owner = {}
+    for row in cohort["pairs"]:
+        row["agent_rating"] = (
+            "near-duplicate" if row["algorithm_merge"] else "different"
+        )
+        flipped = int(row["pair_id"]) % flip_every == 0
+        merge = row["algorithm_merge"] != flipped
+        owner[row["pair_id"]] = "near-duplicate" if merge else "different"
+    return owner
+
+
+def test_audit_tools_refuse_to_run_without_a_grouping_version(
+    tmp_path: Path,
+) -> None:
+    hashes = tmp_path / "hashes.json"
+    write_hashes(hashes)
+
+    fixture = subprocess.run(
+        [*BASE, "audit-fixture", "--output", str(tmp_path / "audit")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert fixture.returncode != 0
+    assert "--grouping-version" in fixture.stderr
+    assert not (tmp_path / "audit").exists()
+
+    for kind in ("edges", "recall"):
+        sampler = subprocess.run(
+            [*BASE, "audit-sample", kind, str(hashes)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert sampler.returncode != 0
+        assert "--grouping-version" in sampler.stderr
+
+    unknown = subprocess.run(
+        [*BASE, "audit-sample", "edges", str(hashes), "--grouping-version", "dhash-v9"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert unknown.returncode != 0
+    assert "grouping version" in unknown.stderr
+
+
+def test_edge_sampler_takes_every_pool_c_cross_label_merged_pair(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    hashes = tmp_path / "hashes.json"
+    images = write_hashes(hashes)
+
+    v2 = run(
+        capsys, "audit-sample", "edges", str(hashes), "--grouping-version", "dhash-v2"
+    )
+    v1 = run(
+        capsys, "audit-sample", "edges", str(hashes), "--grouping-version", "dhash-v1"
+    )
+
+    assert (v1["threshold"], v2["threshold"]) == (4, 6)
+    paths = [p for p in images if p.startswith("C/")]
+    expected = {
+        tuple(sorted((a, b)))
+        for i, a in enumerate(paths)
+        for b in paths[i + 1 :]
+        if images[a][1] != images[b][1]
+        and (images[a][0] ^ images[b][0]).bit_count() <= 6
+    }
+    census = {
+        (p["image_a"], p["image_b"])
+        for p in v2["pairs"]
+        if v2["strata"][p["stratum"]]["census"]
+    }
+    assert census == expected
+    assert any((images[a][0] ^ images[b][0]).bit_count() <= 2 for a, b in expected)
+    for pair in v2["pairs"]:
+        stratum = v2["strata"][pair["stratum"]]
+        assert pair["family"] in {"same_family", "split"}
+        assert pair["inclusion_probability"] == pytest.approx(
+            stratum["sampled"] / stratum["population"]
+        )
+    quality = v2["dataset_quality"]
+    assert (
+        quality["pool_c_mixed_label_scenes"]
+        == quality["pools"]["C"]["mixed_label_scenes"]
+    )
+    assert all(pool["dropped_families"] == 0 for pool in quality["pools"].values())
+    assert sum(pool["images"] for pool in quality["pools"].values()) == len(images)
+
+
+def test_cohort_records_grouping_version_and_agent_rater(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    cohort_dir, cohort = make_cohort(capsys, tmp_path, "dhash-v2")
+
+    assert cohort["grouping_version"] == "dhash-v2"
+    assert cohort["threshold"] == 6
+    assert cohort["agent"] == {"name": "test-agent", "version": "t1"}
+    assert {"pool", "family", "inclusion_probability", "stratum"} <= set(
+        cohort["pairs"][0]
+    )
+    owner = read_sheet(cohort_dir / "owner.csv")
+    assert len(owner) == len(cohort["pairs"])
+    assert list(owner[0]) == ["pair_id", "image_a", "image_b", "rating"]
+
+    with pytest.raises(SystemExit):
+        cli.main(
+            ["data", "audit-cohort", str(tmp_path / "edges.json"), str(tmp_path / "x")]
+        )
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text(json.dumps({"seed": 1, "bands": {}}), encoding="utf-8")
+    with pytest.raises(SystemExit, match="grouping version"):
+        cli.main(["data", "audit-cohort", str(legacy), str(tmp_path / "y"), *AGENT])
+
+
+def test_evaluation_reports_exact_bounds_per_pool_and_names_the_agent(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    cohort_dir, cohort = make_cohort(capsys, tmp_path)
+    ratings = rate_pairs(cohort)
+    (cohort_dir / "agent.json").write_text(json.dumps(cohort), encoding="utf-8")
+    sheet = cohort_dir / "owner.csv"
+    rows = read_sheet(sheet)
+    for row in rows:
+        row["rating"] = ratings[row["pair_id"]]
+    write_sheet(sheet, rows)
+    gate = tmp_path / "gate.json"
+
+    report = run(
+        capsys,
+        "audit-evaluate",
+        str(cohort_dir / "agent.json"),
+        str(sheet),
+        "--gate-output",
+        str(gate),
+    )
+
+    assert report["grouping_version"] == "dhash-v1"
+    assert report["hamming_threshold"] == 4
+    assert report["agent"] == {"name": "test-agent", "version": "t1"}
+    assert set(report["specific_agreement_by_pool"]) == {"A", "B", "C"}
+    assert report["kappa_interval"][0] < report["kappa"] < report["kappa_interval"][1]
+    assert set(json.loads(gate.read_text("utf-8"))) == {
+        "kappa_interval",
+        "threshold",
+        "pass",
+        "method",
+    }
+    for kind in ("wrong_merge", "false_split"):
+        overall = report[kind]["overall"]
+        assert overall["lower"] <= overall["rate"] <= overall["upper"]
+        assert set(report[kind]["by_pool"]) == {"A", "B", "C"}
+    # Owner flips every fourth pair, so some merged pairs are wrong merges.
+    assert report["wrong_merge"]["overall"]["events"] > 0
+    assert report["wrong_merge"]["overall"]["upper"] > 0
+    for stratum in report["per_stratum"].values():
+        assert stratum["lower"] <= stratum["rate"] <= stratum["upper"]
+        assert stratum["kind"] in {"wrong_merge", "false_split", "same_family"}
+    assert report["dataset_quality"]["pool_c_mixed_label_scenes"] >= 0
+
+
+def test_evaluation_refuses_a_cohort_without_grouping_version_or_agent(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    cohort_dir, cohort = make_cohort(capsys, tmp_path)
+    sheet = cohort_dir / "owner.csv"
+    for missing in ("grouping_version", "agent"):
+        broken = {key: value for key, value in cohort.items() if key != missing}
+        path = tmp_path / f"no-{missing}.json"
+        path.write_text(json.dumps(broken), encoding="utf-8")
+        with pytest.raises(SystemExit, match=missing):
+            cli.main(["data", "audit-evaluate", str(path), str(sheet)])
+
+
+def test_retry_is_bound_to_the_cohort_and_escalates(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    cohort_dir, cohort = make_cohort(capsys, tmp_path)
+    rate_pairs(cohort)
+    source = cohort_dir / "agent.json"
+    source.write_text(json.dumps(cohort), encoding="utf-8")
+    sheet = cohort_dir / "owner.csv"
+    rows = read_sheet(sheet)
+    for row in rows:
+        # The owner reverses every agent decision, so the raters disagree.
+        agent = cohort["pairs"][int(row["pair_id"])]["agent_rating"]
+        row["rating"] = "different" if agent == "near-duplicate" else "exact"
+    write_sheet(sheet, rows)
+
+    first = run(capsys, "audit-evaluate", str(source), str(sheet))
+    assert first["pass"] is False
+    assert first["next_action"] == "revise_rubric_and_rerun"
+    previous = tmp_path / "first.json"
+    previous.write_text(json.dumps(first), encoding="utf-8")
+    retry = [
+        "audit-evaluate",
+        str(source),
+        str(sheet),
+        "--previous",
+        str(previous),
+        "--revision",
+        "clarified examples",
+    ]
+    second = run(capsys, *retry)
+    assert second["next_action"] == "owner_escalation"
+    assert second["cohort_digest"] == first["cohort_digest"]
+
+    changed = json.loads(source.read_text("utf-8"))
+    changed["pairs"][0]["image_a"] = "replacement"
+    altered = tmp_path / "altered.json"
+    altered.write_text(json.dumps(changed), encoding="utf-8")
+    with pytest.raises(SystemExit, match="cohort"):
+        cli.main(["data", *retry[:1], str(altered), *retry[2:]])
+
+
+def test_fixture_round_samples_rates_and_reports_through_the_cli(
+    tmp_path: Path,
+) -> None:
     result = subprocess.run(
         [
-            sys.executable,
-            "-m",
-            "jute_disease.cli",
-            "data",
+            *BASE,
             "audit-fixture",
             "--output",
             str(tmp_path / "audit"),
+            "--grouping-version",
+            "dhash-v2",
         ],
         capture_output=True,
         text=True,
@@ -24,239 +305,38 @@ def test_fixture_rating_round_is_blind_and_evaluated(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     output = tmp_path / "audit"
-    with (output / "owner.csv").open(newline="", encoding="utf-8") as handle:
-        rows = list(csv.DictReader(handle))
-    assert len(rows) == 120
-    assert "agent_rating" not in rows[0]
+    samples = json.loads((output / "samples.json").read_text())
+    edges = samples["edges"]
+    assert edges["grouping_version"] == "dhash-v2" and edges["threshold"] == 6
+    assert 200 <= len(edges["pairs"]) <= 260
+    owner = read_sheet(output / "owner.csv")
+    assert len(owner) == len(edges["pairs"])
+    assert "agent_rating" not in owner[0]
+    sampled = {(p["image_a"], p["image_b"]) for p in edges["pairs"]}
+    assert all((r["image_a"], r["image_b"]) in sampled for r in owner)
     report = json.loads((output / "agreement.json").read_text())
     assert report["pass"] is True
     assert report["kappa_interval"][0] >= 0.6
-    assert report["weighted_error_rate"] == 0
+    assert report["agent"]["name"] == "synthetic-fixture-agent"
+    assert report["wrong_merge"]["overall"]["rate"] == 0
+    assert report["wrong_merge"]["overall"]["upper"] > 0
     assert report["very_similar"]
-    samples = json.loads((output / "samples.json").read_text())
-    population_pairs = {
-        (p["image_a"], p["image_b"])
-        for band in samples["edges"]["bands"].values()
-        for p in band["pairs"]
+    recall = samples["recall"]
+    assert recall["source_images"] == 100 and recall["unrelated"]["total"] == 4950
+    assert {row["transform"] for row in recall["transforms"]} == {
+        "resize",
+        "crop",
+        "jpeg",
     }
-    assert all((r["image_a"], r["image_b"]) in population_pairs for r in rows)
-    assert report["weighted_algorithm_error_rate"] == 0
+    assert samples["features"] and samples["feature_provenance"]["kind"] == "synthetic"
     failed = json.loads((output / "failed_rounds.json").read_text())
     assert failed[0]["next_action"] == "revise_rubric_and_rerun"
     assert failed[1]["next_action"] == "owner_escalation"
 
 
-def test_fixture_exercises_audit_samples(tmp_path: Path) -> None:
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "jute_disease.cli",
-            "data",
-            "audit-fixture",
-            "--output",
-            str(tmp_path / "audit"),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    report = json.loads((tmp_path / "audit" / "samples.json").read_text())
-    assert report["edges"]["bands"]["near_miss"]["population"] > 0
-    assert report["edges"]["bands"]["merged"]["population"] > 0
-    assert len(report["edges"]["bands"]["near_miss"]["pairs"]) == 200
-    assert len(report["edges"]["bands"]["merged"]["pairs"]) == 200
-    assert report["features"]
-    assert report["feature_provenance"]["kind"] == "synthetic"
-    assert len(report["residual"]["pools"]["fixture"]["rows"]) == 200
-    assert report["residual"]["pools"]["fixture"]["population"] == 220
-    assert report["residual"]["pools"]["fixture"]["rows"][0]["hash_neighbors"]
-    assert report["residual"]["pools"]["fixture"]["rows"][0]["feature_neighbors"]
-    assert {row["transform"] for row in report["recall"]["transforms"]} == {
-        "resize",
-        "crop",
-        "jpeg",
-    }
-    recall = report["recall"]
-    assert recall["source_images"] == 100
-    assert recall["unrelated"]["total"] == 4950
-    assert {(r["transform"], r["strength"]) for r in recall["transforms"]} == {
-        ("resize", 0.5),
-        ("resize", 0.75),
-        ("crop", 0.05),
-        ("crop", 0.1),
-        ("jpeg", 70),
-        ("jpeg", 85),
-    }
-    assert all(row["total"] == 100 and row["mild"] for row in recall["transforms"])
-    assert all(
-        row["actual_removed_area_max"] <= row["strength"]
-        for row in recall["transforms"]
-        if row["transform"] == "crop"
-    )
-    assert all(
-        len(row["actual_removed_area"]) == 100
-        and max(row["actual_removed_area"]) <= row["strength"]
-        for row in recall["transforms"]
-        if row["transform"] == "crop"
-    )
-    assert recall["threshold_change"]["condition_met"] == (
-        recall["threshold_change"]["mild_recall_failed"]
-        or recall["threshold_change"]["unrelated_false_merge_failed"]
-    )
-
-
-def test_owner_rating_import_reports_weighted_error_and_escalation(
-    tmp_path: Path,
-) -> None:
-    rows = [
-        {
-            "pair_id": str(i),
-            "image_a": f"a{i}",
-            "image_b": f"b{i}",
-            "agent_rating": "exact" if i % 2 else "different",
-            "algorithm_merge": bool(i % 2 == 0),
-            "stratum": "small" if i < 20 else "large",
-        }
-        for i in range(40)
-    ]
-    source = tmp_path / "agent.json"
-    source.write_text(
-        json.dumps({"pairs": rows, "denominators": {"small": 10, "large": 90}}),
-        encoding="utf-8",
-    )
-    sheet = tmp_path / "owner.csv"
-    base = [sys.executable, "-m", "jute_disease.cli", "data"]
-    exported = subprocess.run(
-        base + ["audit-export", str(source), str(sheet)], capture_output=True, text=True
-    )
-    assert exported.returncode == 0, exported.stderr
-    with sheet.open(newline="", encoding="utf-8") as handle:
-        ratings = list(csv.DictReader(handle))
-    for row in ratings:
-        i = int(row["pair_id"])
-        row["rating"] = "different" if i % 2 else "exact"
-    with sheet.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(
-            handle, fieldnames=["pair_id", "image_a", "image_b", "rating"]
-        )
-        writer.writeheader()
-        writer.writerows(ratings)
-    first = subprocess.run(
-        base + ["audit-evaluate", str(source), str(sheet)],
-        capture_output=True,
-        text=True,
-    )
-    assert first.returncode == 0, first.stderr
-    report = json.loads(first.stdout)
-    assert report["weighted_error_rate"] == 1
-    assert report["positive_agreement"] == 0
-    assert report["negative_agreement"] == 0
-    assert report["weighted_algorithm_error_rate"] == 0
-    assert report["next_action"] == "revise_rubric_and_rerun"
-    previous = tmp_path / "first.json"
-    previous.write_text(first.stdout, encoding="utf-8")
-    second = subprocess.run(
-        base
-        + [
-            "audit-evaluate",
-            str(source),
-            str(sheet),
-            "--previous",
-            str(previous),
-            "--revision",
-            "clarified examples",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    assert second.returncode == 0, second.stderr
-    assert json.loads(second.stdout)["next_action"] == "owner_escalation"
-    assert json.loads(second.stdout)["cohort_digest"] == report["cohort_digest"]
-    for mutation in ("denominator", "pair"):
-        changed = json.loads(source.read_text(encoding="utf-8"))
-        if mutation == "denominator":
-            changed["denominators"]["small"] += 1
-        else:
-            changed["pairs"][0]["image_a"] = "replacement"
-        altered = tmp_path / f"altered-{mutation}.json"
-        altered.write_text(json.dumps(changed), encoding="utf-8")
-        retry = subprocess.run(
-            base
-            + [
-                "audit-evaluate",
-                str(altered),
-                str(sheet),
-                "--previous",
-                str(previous),
-                "--revision",
-                "clarified examples",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        assert retry.returncode != 0
-        assert "cohort" in retry.stderr
-
-
-def test_prepare_real_cohort_from_edge_samples(tmp_path: Path) -> None:
-    bands = {}
-    for band, distance in [("merged", 3), ("near_miss", 5)]:
-        pairs = [
-            {
-                "image_a": f"{band}-a{i}",
-                "image_b": f"{band}-b{i}",
-                "distance": distance,
-                "stratum": f"{distance}:same_label",
-            }
-            for i in range(75)
-        ]
-        bands[band] = {
-            "population": 100,
-            "strata": {f"{distance}:same_label": {"population": 100, "sampled": 75}},
-            "pairs": pairs,
-        }
-    source = tmp_path / "edges.json"
-    source.write_text(json.dumps({"seed": 42, "bands": bands}), encoding="utf-8")
-    output = tmp_path / "cohort"
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "jute_disease.cli",
-            "data",
-            "audit-cohort",
-            str(source),
-            str(output),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    agent = json.loads((output / "agent.json").read_text(encoding="utf-8"))
-    with (output / "owner.csv").open(newline="", encoding="utf-8") as handle:
-        owner = list(csv.DictReader(handle))
-    assert len(agent["pairs"]) == len(owner) == 120
-    assert sum(row["algorithm_merge"] for row in agent["pairs"]) == 60
-    assert {row["algorithm_merge"] for row in agent["pairs"][:60]} == {True, False}
-    assert all(row["agent_rating"] == "" for row in agent["pairs"])
-    assert all(
-        set(row) == {"pair_id", "image_a", "image_b", "rating"} and row["rating"] == ""
-        for row in owner
-    )
-    assert agent["denominators"] == {
-        "merged:3:same_label": 100,
-        "near_miss:5:same_label": 100,
-    }
-
-
 def test_residual_sampler_rejects_short_pool_before_feature_extraction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from jute_disease import cli
-
     source = tmp_path / "short.json"
     source.write_text(
         json.dumps(
@@ -277,72 +357,3 @@ def test_residual_sampler_rejects_short_pool_before_feature_extraction(
     with pytest.raises(SystemExit, match="short.*200"):
         cli.main(["data", "audit-sample", "residual", str(source)])
     assert not calls
-
-
-def test_undefined_kappa_fails_then_escalates_after_revision(tmp_path: Path) -> None:
-    rows = [
-        {
-            "pair_id": str(i),
-            "image_a": f"a{i}",
-            "image_b": f"b{i}",
-            "agent_rating": "exact",
-            "algorithm_merge": True,
-            "stratum": "all",
-        }
-        for i in range(20)
-    ]
-    source = tmp_path / "agent.json"
-    source.write_text(
-        json.dumps({"pairs": rows, "denominators": {"all": 20}}), encoding="utf-8"
-    )
-    sheet = tmp_path / "owner.csv"
-    with sheet.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(
-            handle, fieldnames=["pair_id", "image_a", "image_b", "rating"]
-        )
-        writer.writeheader()
-        writer.writerows(
-            {
-                "pair_id": r["pair_id"],
-                "image_a": r["image_a"],
-                "image_b": r["image_b"],
-                "rating": "exact",
-            }
-            for r in rows
-        )
-    base = [
-        sys.executable,
-        "-m",
-        "jute_disease.cli",
-        "data",
-        "audit-evaluate",
-        str(source),
-        str(sheet),
-    ]
-    gate = tmp_path / "gate.json"
-    first = subprocess.run(
-        base + ["--gate-output", str(gate)], capture_output=True, text=True, check=False
-    )
-    assert first.returncode == 0, first.stderr
-    assert json.loads(gate.read_text(encoding="utf-8")) == {
-        "kappa_interval": None,
-        "threshold": 0.6,
-        "pass": False,
-        "method": "Cohen kappa undefined: both raters used one category",
-    }
-    report = json.loads(first.stdout)
-    assert report["kappa"] is None and report["kappa_interval"] is None
-    assert (
-        report["pass"] is False and report["next_action"] == "revise_rubric_and_rerun"
-    )
-    assert report["positive_agreement"] == 1 and report["negative_agreement"] is None
-    prior = tmp_path / "prior.json"
-    prior.write_text(first.stdout, encoding="utf-8")
-    second = subprocess.run(
-        base + ["--previous", str(prior), "--revision", "clarify examples"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert second.returncode == 0, second.stderr
-    assert json.loads(second.stdout)["next_action"] == "owner_escalation"

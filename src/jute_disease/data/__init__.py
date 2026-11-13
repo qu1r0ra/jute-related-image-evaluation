@@ -6,8 +6,17 @@ from jute_disease.data.audit import (
     fixture_round,
     prepare_cohort,
     residual_sample,
-    sample_edges,
     synthetic_recall,
+)
+from jute_disease.data.audit_kit import (
+    build_audit_kit,
+    collect_audit_kit,
+    next_audit_sitting,
+)
+from jute_disease.data.audit_sampling import (
+    DEFAULT_DESIGN,
+    grouping_threshold,
+    sample_edges,
 )
 from jute_disease.data.cache import (
     DECISION_FILE,
@@ -299,13 +308,18 @@ __all__ += [
 
 
 __all__ += [
+    "build_audit_kit",
+    "collect_audit_kit",
     "evaluate_ratings",
     "export_blind",
+    "next_audit_sitting",
     "feature_neighbors",
     "prepare_cohort",
     "fixture_round",
     "ImageNetExtractor",
     "residual_sample",
     "sample_edges",
+    "DEFAULT_DESIGN",
+    "grouping_threshold",
     "synthetic_recall",
 ]
