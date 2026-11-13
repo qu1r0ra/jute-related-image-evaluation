@@ -61,10 +61,10 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --locked --all-groups --extra masks
+        run: uv sync --locked --all-groups
 
       - name: Verify Linux CPU imports
-        run: uv run python -c "import torch, torchvision, transformers; assert not torch.cuda.is_available(); print(torch.__version__, torchvision.__version__, transformers.__version__)"
+        run: uv run python -c "import torch, torchvision; assert not torch.cuda.is_available(); print(torch.__version__, torchvision.__version__)"
 
       - name: Audit locked dependencies
         run: uv run --locked python scripts/audit_dependencies.py
@@ -90,7 +90,7 @@ jobs:
         run: uv python install 3.14.10
 
       - name: Install dependencies
-        run: uv sync --locked --all-groups --extra masks
+        run: uv sync --locked --all-groups
 
       - name: Run focused behavior tests
         run: >-
@@ -98,7 +98,7 @@ jobs:
           tests/data/test_identity.py tests/evaluation/test_statistics.py
 
       - name: Verify Linux CPU imports
-        run: uv run python -c "import torch, torchvision, transformers; assert not torch.cuda.is_available(); print(torch.__version__, torchvision.__version__, transformers.__version__)"
+        run: uv run python -c "import torch, torchvision; assert not torch.cuda.is_available(); print(torch.__version__, torchvision.__version__)"
 
       - name: Audit locked dependencies
         run: uv run --locked python scripts/audit_dependencies.py
@@ -113,8 +113,8 @@ jobs:
         with:
           version: "latest"
 
-      - name: Resolve locked Linux core and mask dependencies
-        run: uv sync --locked --all-groups --extra masks --dry-run
+      - name: Resolve locked Linux dependencies
+        run: uv sync --locked --all-groups --dry-run
 
       - name: Check Linux helper syntax
         run: bash -n scripts/lab_run.sh

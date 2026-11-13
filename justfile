@@ -9,9 +9,6 @@ default:
 setup:
     uv sync --locked --all-groups
 
-setup-masks:
-    uv sync --locked --all-groups --extra masks
-
 audit:
     uv run --locked python scripts/audit_dependencies.py
 

@@ -86,8 +86,6 @@ def main() -> int:
             "export",
             "--locked",
             "--all-groups",
-            "--extra",
-            "masks",
             "--format",
             "requirements-txt",
             "--no-emit-project",
