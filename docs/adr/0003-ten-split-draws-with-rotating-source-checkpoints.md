@@ -1,6 +1,6 @@
 # 3. Use ten split draws with rotating source checkpoints
 
-Status: accepted, 2026-11-01. Canonical protocol: [issue 106](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/106).
+Status: accepted, 2026-11-01; the uncertainty decision is superseded by [ADR 0004](0004-prespecified-grouping-gates-and-split-mean-inference.md). Canonical protocol: [issue 106](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/106).
 
 ## Context
 
@@ -12,7 +12,7 @@ The earlier matrix used one primary split plus three redraws per policy, and tra
 - Train each source stage with three independently seeded checkpoints. PlantDoc checkpoint *j* is trained from PlantVillage checkpoint *j*. The source learning rate is selected once on source-stage validation and reused.
 - A target fit with seed *s* on split *k* uses checkpoint (*s* + *k*) mod 3, giving 17/17/16 fits per checkpoint. The assignment table is identical across policies and views, so comparisons stay paired.
 - Route estimands weight checkpoints equally: average within each checkpoint, then across checkpoints.
-- Uncertainty uses one nested bootstrap (splits, then seeds, then test families), with draws and family multiplicities shared across all systems in a comparison. Intervals are conditional on the three retained source checkpoints.
+- Superseded by ADR 0004 (primary inference on split means; the bootstrap is descriptive): uncertainty uses one nested bootstrap (splits, then seeds, then test families), with draws and family multiplicities shared across all systems in a comparison. Intervals are conditional on the three retained source checkpoints.
 
 ## Alternatives considered
 
