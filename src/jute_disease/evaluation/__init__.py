@@ -23,7 +23,10 @@ from jute_disease.evaluation.scores import (
 )
 from jute_disease.evaluation.statistics import (
     Agreement,
+    StratumCounts,
     agreement_gate,
+    clopper_pearson_interval,
+    design_weighted_interval,
     kendall_tau,
     wilson_interval,
 )
@@ -104,7 +107,10 @@ __all__ = [
     "RunScores",
     "RunEntry",
     "SeedSummary",
+    "StratumCounts",
     "agreement_gate",
+    "clopper_pearson_interval",
+    "design_weighted_interval",
     "evaluate_predictions",
     "format_metrics",
     "kendall_tau",
