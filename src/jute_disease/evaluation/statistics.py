@@ -1,13 +1,71 @@
-"""Agreement and interval statistics for evaluation reports."""
+"""Agreement and interval statistics for evaluation reports.
 
-from collections.abc import Sequence
+The split-mean tests follow ADR 0004: every test runs on one macro-F1 value per
+split, never on images, so the ten splits are the unit of replication.
+"""
+
+import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from statistics import NormalDist
 
 import numpy as np
+from scipy import stats as scipy_stats
 from scipy.stats import kendalltau
 
 from jute_disease.evaluation.resampling import Interval
+
+SMALLEST_EFFECT_OF_INTEREST = 0.02
+"""The smallest macro-F1 difference worth detecting, on the 0-1 scale (2 points)."""
+
+EQUIVALENCE_MARGIN = SMALLEST_EFFECT_OF_INTEREST
+"""The recorded equivalence margin; it defaults to the smallest effect of interest."""
+
+TEST_LEVEL = 0.95
+"""Confidence level of the Welch and paired intervals; alpha is 1 - TEST_LEVEL."""
+
+
+@dataclass(frozen=True)
+class MeanDifference:
+    """A two-sided t test of a mean difference, with its confidence interval."""
+
+    estimate: float
+    statistic: float
+    df: float
+    p_value: float
+    interval: Interval
+    method: str
+
+
+@dataclass(frozen=True)
+class EquivalenceResult:
+    """Two one-sided tests (TOST) of a mean difference against +-margin."""
+
+    estimate: float
+    margin: float
+    alpha: float
+    lower_statistic: float
+    upper_statistic: float
+    lower_p: float
+    upper_p: float
+    p_value: float
+    df: float
+    interval: Interval
+    equivalent: bool
+
+
+@dataclass(frozen=True)
+class PowerStatement:
+    """Power of the two-sided Welch test to detect ``effect`` at the observed spread."""
+
+    effect: float
+    alpha: float
+    sd_first: float
+    sd_second: float
+    n_first: int
+    n_second: int
+    df: float
+    power: float
 
 
 @dataclass(frozen=True)
@@ -24,6 +82,186 @@ class Agreement:
     threshold: float
     passed: bool
     method: str
+
+
+def _sample(values: Sequence[float], name: str) -> np.ndarray:
+    array = np.asarray(values, dtype=float)
+    if array.ndim != 1 or len(array) < 2 or not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} needs at least two finite values")
+    return array
+
+
+def _check_level(level: float) -> None:
+    if not 0 < level < 1:
+        raise ValueError("confidence level must lie strictly between 0 and 1")
+
+
+def _welch_parts(
+    first: Sequence[float], second: Sequence[float]
+) -> tuple[float, float, float]:
+    """Return the mean difference, its standard error and the Welch df."""
+    a, b = _sample(first, "first group"), _sample(second, "second group")
+    va, vb = a.var(ddof=1) / len(a), b.var(ddof=1) / len(b)
+    if va + vb == 0:
+        raise ValueError("Welch test is undefined when neither group has spread")
+    df = (va + vb) ** 2 / (va**2 / (len(a) - 1) + vb**2 / (len(b) - 1))
+    return float(a.mean() - b.mean()), math.sqrt(va + vb), float(df)
+
+
+def welch_test(
+    first: Sequence[float], second: Sequence[float], level: float = TEST_LEVEL
+) -> MeanDifference:
+    """Welch's unequal-variance t test of ``mean(first) - mean(second)``.
+
+    With sample variances s1^2, s2^2 and sizes n1, n2 (Welch 1947),
+
+        t = (m1 - m2) / sqrt(s1^2/n1 + s2^2/n2),
+        df = (s1^2/n1 + s2^2/n2)^2 / ((s1^2/n1)^2/(n1-1) + (s2^2/n2)^2/(n2-1)),
+
+    the Welch-Satterthwaite approximation. The p-value is two-sided and the
+    interval is ``estimate +- t_{df, (1+level)/2} * se``. Each group needs two
+    values and at least one needs spread.
+    """
+    _check_level(level)
+    estimate, se, df = _welch_parts(first, second)
+    return _difference(estimate, se, df, level, "Welch t test on split means")
+
+
+def paired_test(
+    first: Sequence[float], second: Sequence[float], level: float = TEST_LEVEL
+) -> MeanDifference:
+    """Paired t test: a one-sample t test of the per-split differences.
+
+    With differences d_k = first_k - second_k, mean d, sample sd s and n pairs,
+    t = d / (s / sqrt(n)) on n - 1 df. Zero spread in the differences leaves the
+    statistic undefined and is rejected.
+    """
+    _check_level(level)
+    a, b = _sample(first, "first group"), _sample(second, "second group")
+    if a.shape != b.shape:
+        raise ValueError("paired groups must have the same length")
+    differences = a - b
+    se = float(differences.std(ddof=1) / math.sqrt(len(differences)))
+    if se == 0:
+        raise ValueError("paired test is undefined when every difference is equal")
+    return _difference(
+        float(differences.mean()),
+        se,
+        len(differences) - 1,
+        level,
+        "paired t test on split means",
+    )
+
+
+def _difference(
+    estimate: float, se: float, df: float, level: float, method: str
+) -> MeanDifference:
+    statistic = estimate / se
+    p_value = float(2 * scipy_stats.t.sf(abs(statistic), df))
+    radius = float(scipy_stats.t.ppf((1 + level) / 2, df)) * se
+    return MeanDifference(
+        estimate,
+        statistic,
+        float(df),
+        p_value,
+        Interval(estimate, estimate - radius, estimate + radius, level),
+        method,
+    )
+
+
+def holm_adjust(p_values: Mapping[str, float]) -> dict[str, float]:
+    """Holm step-down adjusted p-values (Holm 1979).
+
+    With the m p-values sorted ascending as p(1) <= ... <= p(m), the adjusted
+    value is max over j <= i of min(1, (m - j + 1) * p(j)). Rejecting adjusted
+    values below alpha controls the family-wise error rate at alpha without any
+    assumption on the dependence between the tests.
+    """
+    if not p_values or any(not 0 <= p <= 1 for p in p_values.values()):
+        raise ValueError("p-values must be nonempty and lie in [0, 1]")
+    ordered = sorted(p_values, key=lambda name: (p_values[name], name))
+    adjusted, running = {}, 0.0
+    for rank, name in enumerate(ordered):
+        running = max(running, min(1.0, (len(ordered) - rank) * p_values[name]))
+        adjusted[name] = running
+    return {name: adjusted[name] for name in p_values}
+
+
+def equivalence_test(
+    first: Sequence[float],
+    second: Sequence[float],
+    margin: float = EQUIVALENCE_MARGIN,
+    alpha: float = 0.05,
+) -> EquivalenceResult:
+    """Two one-sided Welch tests of equivalence within +-``margin`` (TOST).
+
+    Schuirmann (1987), Lakens (2017). With difference d = m1 - m2 and Welch
+    standard error se, test H0: d <= -margin with t_L = (d + margin) / se and
+    H0: d >= +margin with t_U = (d - margin) / se, each on the Welch df. The
+    p-value is the larger one-sided p-value; equivalence is declared when it is
+    below ``alpha``, which is the same as the (1 - 2 alpha) interval lying inside
+    (-margin, +margin).
+    """
+    if margin <= 0 or not 0 < alpha < 0.5:
+        raise ValueError("margin must be positive and alpha in (0, 0.5)")
+    estimate, se, df = _welch_parts(first, second)
+    lower_statistic = (estimate + margin) / se
+    upper_statistic = (estimate - margin) / se
+    lower_p = float(scipy_stats.t.sf(lower_statistic, df))
+    upper_p = float(scipy_stats.t.cdf(upper_statistic, df))
+    radius = float(scipy_stats.t.ppf(1 - alpha, df)) * se
+    p_value = max(lower_p, upper_p)
+    return EquivalenceResult(
+        estimate,
+        margin,
+        alpha,
+        lower_statistic,
+        upper_statistic,
+        lower_p,
+        upper_p,
+        p_value,
+        df,
+        Interval(estimate, estimate - radius, estimate + radius, 1 - 2 * alpha),
+        bool(p_value < alpha),
+    )
+
+
+def split_power(
+    first: Sequence[float],
+    second: Sequence[float],
+    effect: float = SMALLEST_EFFECT_OF_INTEREST,
+    alpha: float = 0.05,
+) -> PowerStatement:
+    """Power of the two-sided Welch test to detect ``effect``, at the split spread.
+
+    The standard error and Welch df come from the observed split means (for
+    example the validation draws). Under a true difference ``effect`` the
+    statistic is noncentral t with noncentrality effect / se, so
+
+        power = P(T > t_crit) + P(T < -t_crit),   t_crit = t_{df, 1 - alpha/2}.
+
+    Cohen (1988); G*Power gives 0.5619 for sd 1, n = 10 per group, effect 1.
+    """
+    if effect <= 0 or not 0 < alpha < 1:
+        raise ValueError("effect must be positive and alpha in (0, 1)")
+    _, se, df = _welch_parts(first, second)
+    noncentrality = effect / se
+    critical = float(scipy_stats.t.ppf(1 - alpha / 2, df))
+    power = float(
+        scipy_stats.nct.sf(critical, df, noncentrality)
+        + scipy_stats.nct.cdf(-critical, df, noncentrality)
+    )
+    a, b = np.asarray(first, dtype=float), np.asarray(second, dtype=float)
+    return PowerStatement(
+        effect,
+        alpha,
+        float(a.std(ddof=1)),
+        float(b.std(ddof=1)),
+        len(a),
+        len(b),
+        df,
+        power,
+    )
 
 
 def wilson_interval(successes: int, total: int, level: float = 0.95) -> Interval:

@@ -8,6 +8,7 @@ import argparse
 import json
 import sys
 from collections.abc import Callable, Sequence
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -519,6 +520,37 @@ def _evaluate_aggregate(args: argparse.Namespace) -> None:
     aggregate_metrics(args.fit_ids, args.output, args.runs_dir)
 
 
+def _evaluate_bootstrap_coverage(args: argparse.Namespace) -> None:
+    from jute_disease.evaluation import simulate_coverage
+
+    try:
+        report = asdict(
+            simulate_coverage(
+                replicates=args.replicates, resamples=args.resamples, seed=args.seed
+            )
+        )
+    except ValueError as error:
+        raise SystemExit(f"bootstrap coverage blocked: {error}") from error
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(
+            json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+    _print_json(report)
+
+
+def _add_bootstrap_coverage(actions: argparse._SubParsersAction) -> None:
+    coverage = actions.add_parser(
+        "bootstrap-coverage",
+        help="Report the nested bootstrap's empirical coverage on synthetic data.",
+    )
+    coverage.add_argument("--replicates", type=int, default=200)
+    coverage.add_argument("--resamples", type=int, default=200)
+    coverage.add_argument("--seed", type=int, default=42)
+    coverage.add_argument("--output", type=Path)
+    coverage.set_defaults(run=_evaluate_bootstrap_coverage)
+
+
 def _manuscript_fixture(args: argparse.Namespace) -> None:
     try:
         _print_json(run_manuscript_fixture(args.output))
@@ -948,6 +980,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     aggregate.set_defaults(run=_evaluate_aggregate)
     evaluate_actions.add_parser("predict", help="Classify one image (forwarded).")
+    _add_bootstrap_coverage(evaluate_actions)
     _add_gated_evaluator(evaluate_actions)
 
     manuscript = commands.add_parser(
