@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, ci/180-throwaway-base]
   pull_request:
-    branches: [main]
+    branches: [main, ci/180-throwaway-base]
 
 permissions:
   contents: read
