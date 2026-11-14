@@ -574,7 +574,9 @@ def test_lab_runner_timeout_terminates_descendant_processes(tmp_path: Path) -> N
     assert marker.read_text(encoding="utf-8") == "terminated"
 
 
-_QUEUE_DRIVER = """
+# Raw, so the backslash-n escapes inside the driver's own string literals reach
+# the generated file as written instead of becoming real newlines.
+_QUEUE_DRIVER = r"""
 import subprocess
 import sys
 from pathlib import Path
@@ -631,29 +633,40 @@ def test_a_killed_queue_leaves_no_child_and_frees_the_lock_last(
     driver = tmp_path / "queue_driver.py"
     driver.write_text(_QUEUE_DRIVER, encoding="utf-8")
     lock = tmp_path / "run.lock"
-    owner = subprocess.Popen(
-        [
-            BASH,
-            str(RUN_COMMAND),
-            str(lock),
-            "120",
-            sys.executable,
-            str(driver),
-            str(tmp_path),
-        ],
-    )
+    output = tmp_path / "owner.out"
+    with output.open("wb") as stream:
+        owner = subprocess.Popen(
+            [
+                BASH,
+                str(RUN_COMMAND),
+                str(lock),
+                "120",
+                sys.executable,
+                str(driver),
+                str(tmp_path),
+            ],
+            stdout=stream,
+            stderr=subprocess.STDOUT,
+        )
     pids: dict[str, int] = {}
     try:
         deadline = time.monotonic() + 90
         while time.monotonic() < deadline and len(pids) < 2:
+            assert owner.poll() is None, (
+                "the queue process exited before both children started: "
+                + output.read_text(encoding="utf-8", errors="replace")
+            )
             for name in ("fit", "sidecar"):
                 pid_file = tmp_path / f"{name}.pid"
                 if name not in pids and pid_file.exists():
-                    text = pid_file.read_text(encoding="utf-8")
-                    if text:
-                        pids[name] = int(text)
+                    recorded = pid_file.read_text(encoding="utf-8")
+                    if recorded:
+                        pids[name] = int(recorded)
             time.sleep(0.05)
-        assert set(pids) == {"fit", "sidecar"}
+        assert set(pids) == {"fit", "sidecar"}, "the children never started"
+        # The signal must land on a live queue with both children running.
+        assert owner.poll() is None
+        assert _is_running(pids["fit"]) and _is_running(pids["sidecar"])
 
         owner.send_signal(15)
 
