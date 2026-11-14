@@ -21,55 +21,82 @@ HEALTHY_CAP = 1000
 AUDIT_BAND_LIMIT = 16
 
 
+def _healthy_units(entries: list[dict], policy: str) -> dict[str, list[dict]]:
+    """Healthy training rows grouped into the units a cap may keep or drop.
+
+    A unit is a whole grouping family, except under image-random, where each
+    image is its own unit because that policy does not group images at all.
+    """
+    key = "path" if policy == "image-random" else "family"
+    units: dict[str, list[dict]] = defaultdict(list)
+    for row in entries:
+        if row["label"].lower() == "healthy" and row["partition"] == "train":
+            units[row[key]].append(row)
+    return units
+
+
 def _cap_healthy(
     splits: dict[str, list[dict]], cap: int, rank_seed: str
 ) -> tuple[dict[str, list[dict]], dict[str, list[dict]], dict[str, int]]:
-    """Cap the Healthy training image count identically in every policy.
+    """Give every policy the same Healthy training image count, at most `cap`.
 
-    A policy above the cap keeps exactly `cap` images, filled with whole
-    families taken in one seeded order and skipping a family only when it would
-    overshoot. A policy at or below the cap is left whole. Failing to fill the
-    cap exactly stops the run.
+    One target is chosen for all policies: the largest count up to the cap that
+    every policy can reach by keeping whole families (single images under
+    image-random). Each policy then keeps exactly that count. Units are taken
+    in one seeded order, and the choice is an exact subset-sum search, so a
+    reachable target is never missed. When no positive count is reachable in
+    every policy, the run stops instead of leaving the counts unequal.
     """
-
-    def healthy(entries: list[dict]) -> list[dict]:
-        return [
-            row
-            for row in entries
-            if row["label"].lower() == "healthy" and row["partition"] == "train"
+    mask = (1 << (cap + 1)) - 1
+    ordered: dict[str, list[tuple[str, list[dict]]]] = {}
+    reach: dict[str, list[int]] = {}
+    for policy, entries in splits.items():
+        units = _healthy_units(entries, policy)
+        ordered[policy] = [
+            (key, units[key])
+            for key in sorted(units, key=lambda item: _rank(rank_seed, item))
         ]
-
-    target = cap
+        prefixes = [1]
+        for _, rows in ordered[policy]:
+            prefixes.append((prefixes[-1] | prefixes[-1] << len(rows)) & mask)
+        reach[policy] = prefixes
+    common = mask
+    for prefixes in reach.values():
+        common &= prefixes[-1]
+    common >>= 1
+    if not common:
+        available = {
+            policy: sum(len(rows) for _, rows in ordered[policy]) for policy in splits
+        }
+        raise ValueError(
+            f"no common Healthy image count of at most {cap} can be reached with "
+            f"whole families in every policy (Healthy training images {available})"
+        )
+    target = common.bit_length()
     kept: dict[str, list[dict]] = {}
     excluded: dict[str, list[dict]] = {}
     counts: dict[str, int] = {}
     for policy, entries in splits.items():
-        if len(healthy(entries)) <= cap:
-            kept[policy] = entries
-            excluded[policy] = []
-            counts[policy] = len(healthy(entries))
-            continue
-        families: dict[str, list[dict]] = defaultdict(list)
-        for row in healthy(entries):
-            families[row["family"]].append(row)
+        remaining = target
         chosen: set[str] = set()
-        count = 0
-        for family in sorted(families, key=lambda item: _rank(rank_seed, item)):
-            if count == target:
-                break
-            if count + len(families[family]) <= target:
-                chosen.add(family)
-                count += len(families[family])
-        if count != target:
+        for index in range(len(ordered[policy]) - 1, -1, -1):
+            if reach[policy][index] >> remaining & 1:
+                continue
+            key, rows = ordered[policy][index]
+            chosen.add(key)
+            remaining -= len(rows)
+        if remaining:
             raise ValueError(
-                f"Healthy cap of {target} images cannot be filled with whole "
-                f"families under {policy}"
+                f"Healthy cap search failed to fill the reachable target of "
+                f"{target} images under {policy}"
             )
-        dropped = [row for row in healthy(entries) if row["family"] not in chosen]
+        dropped = [
+            row for key, rows in ordered[policy] if key not in chosen for row in rows
+        ]
         dropped_paths = {row["path"] for row in dropped}
         excluded[policy] = dropped
         kept[policy] = [row for row in entries if row["path"] not in dropped_paths]
-        counts[policy] = count
+        counts[policy] = target
     return kept, excluded, counts
 
 
@@ -405,9 +432,11 @@ def write_policy_manifests(
         "view2_test": "whole near-duplicate families per class, shared across policies",
         "healthy_cap_images": healthy_cap,
         "healthy_cap_rule": (
-            "pool C only: a policy with more Healthy training images than the "
-            "cap keeps exactly the cap, filled with whole families in a seeded "
-            "order; the same cap applies in every policy, view and draw"
+            "pool C only: every policy keeps the same number of Healthy training "
+            "images, the largest count up to the cap that all policies reach "
+            "with whole families (single images under image-random), chosen by "
+            "an exact subset-sum search in a seeded order, in every view and "
+            "draw; the run stops when no such count exists"
         ),
     }
     config_digest = hashlib.sha256(
@@ -486,7 +515,12 @@ def write_policy_manifests(
                         splits, healthy_cap, f"{draw_seed}:{name}:healthy-cap"
                     )
                     cap_record[name].append(
-                        {"view": view, "draw": draw, "healthy_train_images": applied}
+                        {
+                            "view": view,
+                            "draw": draw,
+                            "target": applied[POLICIES[0]],
+                            "healthy_train_images": applied,
+                        }
                     )
                 for policy in POLICIES:
                     entries = splits[policy]
