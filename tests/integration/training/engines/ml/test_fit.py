@@ -47,7 +47,9 @@ def _fit(estimator: str, features: str) -> FitSpec:
     )
 
 
-PREPARE = FitSpec("classical/prepare", FitKind.PREPARE, 0)
+PREPARE = FitSpec(
+    "classical/prepare/pool-A/reserve", FitKind.PREPARE, 0, pool="A", phase="tune"
+)
 
 
 def test_prepare_extracts_both_feature_sets_for_train_and_validation_only(
