@@ -54,8 +54,17 @@ def _move_aside(directory: Path) -> None:
     os.replace(directory, target / f"{directory.name}-{number}")
 
 
-def record_progress(directory: Path | str, attempt: str, epochs_completed: int) -> None:
-    """Record the saved training state after an epoch (called by the child)."""
+def record_progress(
+    directory: Path | str,
+    attempt: str,
+    epochs_completed: int,
+    best: Path | str | None = None,
+) -> None:
+    """Record the saved training state after an epoch (called by the child).
+
+    ``best`` is the best checkpoint so far, if one has been saved. Its file name
+    is recorded so a resume can tell that it has since gone missing.
+    """
     directory = Path(directory)
     last = directory / LAST_CHECKPOINT
     if last.is_file():
@@ -65,6 +74,7 @@ def record_progress(directory: Path | str, attempt: str, epochs_completed: int) 
                 "sha256": _sha256(last),
                 "epochs_completed": epochs_completed,
                 "attempt": attempt,
+                "best": Path(best).name if best else None,
             },
         )
 
@@ -85,6 +95,12 @@ def verified_progress(directory: Path | str) -> dict[str, Any] | None:
         "epochs_completed": progress["epochs_completed"],
         "checkpoint_sha256": progress["sha256"],
     }
+
+
+def _best_is_missing(directory: Path) -> bool:
+    """Whether the progress record names a best checkpoint that is gone."""
+    best = (read_json(directory / PROGRESS_FILE) or {}).get("best")
+    return isinstance(best, str) and not (directory / best).is_file()
 
 
 def prepare_checkpoints(
@@ -115,6 +131,9 @@ def prepare_checkpoints(
             plan = ResumePlan(refusal="the earlier training had already finished")
         elif progress is None:
             plan = ResumePlan(refusal="no complete checkpoint with its recorded bytes")
+        elif _best_is_missing(directory):
+            # Resuming would end with a fit whose best checkpoint cannot be found.
+            plan = ResumePlan(refusal="the best checkpoint is missing")
         else:
             plan = ResumePlan(
                 checkpoint=directory / LAST_CHECKPOINT, resumed_from=progress

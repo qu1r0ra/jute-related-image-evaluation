@@ -15,6 +15,21 @@ from dataclasses import dataclass
 from pathlib import Path
 
 TAIL_LINES = 20
+SIGTERM_EXIT_STATUS = 128 + signal.SIGTERM
+
+
+def _exit_on_signal(signum: int, frame: object) -> None:
+    raise SystemExit(SIGTERM_EXIT_STATUS)
+
+
+def exit_on_sigterm() -> None:
+    """Turn SIGTERM into ``SystemExit`` so a waiting ``run_child`` kills its child.
+
+    Fit children run in their own sessions, which a group signal to the queue
+    cannot reach. Exiting unwinds through ``run_child``, which kills the child
+    tree before the process goes away. Call from the main thread only.
+    """
+    signal.signal(signal.SIGTERM, _exit_on_signal)
 
 
 @dataclass(frozen=True)

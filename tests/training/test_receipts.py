@@ -6,7 +6,14 @@ from pathlib import Path
 import pytest
 
 from jute_disease.data import file_sha256
-from jute_disease.training import Resume, RunState, RunStore, write_json_atomic
+from jute_disease.training import (
+    CompletedFitError,
+    FitLockedError,
+    Resume,
+    RunState,
+    RunStore,
+    write_json_atomic,
+)
 from jute_disease.training.receipts import RECEIPT_FORMAT_VERSION
 
 
@@ -174,6 +181,42 @@ def test_omitted_runs_record_why(tmp_path: Path) -> None:
     store.omit("cnn/b", "id-9", "does not fit before the finalization reservation")
     assert store.state("cnn/b") is RunState.OMITTED
     assert "finalization" in store.reason("cnn/b")
+
+
+def test_omit_refuses_to_overwrite_a_completed_fit(tmp_path: Path) -> None:
+    store = RunStore(tmp_path)
+    _complete(store, "cnn/a", "id-1")
+    with pytest.raises(CompletedFitError, match="cnn/a"):
+        store.omit("cnn/a", "", "upstream did not complete")
+    assert store.state("cnn/a") is RunState.COMPLETED
+    assert store.resolve("cnn/a", "id-1") is Resume.SKIP
+
+
+def test_omit_may_replace_a_fit_whose_receipt_is_no_longer_valid(
+    tmp_path: Path,
+) -> None:
+    store = RunStore(tmp_path)
+    _complete(store, "cnn/a", "id-1").write_bytes(b"culled")
+    store.omit("cnn/a", "", "inputs unavailable")
+    assert store.state("cnn/a") is RunState.OMITTED
+
+
+def test_a_second_writer_to_a_fit_is_refused_until_the_first_leaves(
+    tmp_path: Path,
+) -> None:
+    first, second = RunStore(tmp_path), RunStore(tmp_path)
+    with first.exclusive("cnn/a"):
+        with first.exclusive("cnn/a"):  # re-entering through the holder is allowed
+            pass
+        with pytest.raises(FitLockedError, match="cnn/a"):
+            second.start("cnn/a", "id-1")
+        with pytest.raises(FitLockedError):
+            second.omit("cnn/a", "", "upstream did not complete")
+        with second.exclusive("cnn/b"):  # other fits are unaffected
+            pass
+    assert second.state("cnn/a") is RunState.PLANNED
+    second.start("cnn/a", "id-1")
+    assert second.state("cnn/a") is RunState.RUNNING
 
 
 def test_receipt_from_an_older_format_is_not_reusable(tmp_path: Path) -> None:

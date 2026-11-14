@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Protocol
 
 from jute_disease.training.benchmark import Benchmark, FitKind, FitSpec
+from jute_disease.training.lock import FitLockedError
 from jute_disease.training.queue.plan import Stage, build_plan
 from jute_disease.training.receipts import (
     Resume,
@@ -373,8 +374,29 @@ class _Queue:
         self.report.outcomes[fit.fit_id] = state
         self.report.reasons[fit.fit_id] = reason
 
+    def keep_completed(self, fit: FitSpec) -> bool:
+        """Count a fit with a valid receipt and a completed state as complete.
+
+        Its inputs may have been culled since it ran, which says nothing against
+        a finished fit. Nothing is written, so its completed state stands.
+        """
+        if not self.store.is_complete(fit.fit_id):
+            return False
+        self.report.skipped.append(fit.fit_id)
+        self.record(fit, RunState.COMPLETED, "")
+        self.save()
+        return True
+
     def omit(self, fit: FitSpec, reason: str) -> None:
-        self.store.omit(fit.fit_id, "", reason)
+        """Leave a fit out of this run because a dependency did not complete.
+
+        A completed fit keeps its receipt and state on disk; only this run's
+        report calls it omitted, so nothing downstream builds on a stale result.
+        """
+        if self.store.is_complete(fit.fit_id):
+            reason = f"{reason}; its completed receipt is kept"
+        else:
+            self.store.omit(fit.fit_id, "", reason)
         self.record(fit, RunState.OMITTED, reason)
         self.save()
 
@@ -398,6 +420,9 @@ class _Queue:
         timeout = self.benchmark.timeout(fit)
         try:
             outcome = self.execute(fit, timeout)
+        except FitLockedError:
+            # Another writer owns this fit: not a failure to retry or record.
+            raise
         except Exception as error:
             self.store.settle(fit.fit_id)
             failure_kind = (
@@ -444,6 +469,8 @@ class _Queue:
             # Absent inputs do not appear on a retry, so none is spent, but the
             # fit still counts towards the failure streak. Any other identity
             # error, such as changed frozen content, propagates and stops the queue.
+            if self.keep_completed(fit):
+                return
             reason = f"inputs unavailable: {error}"
             self.store.omit(fit.fit_id, "", reason)
             if fit.kind is FitKind.SOURCE and fit.stage in self.unavailable_stages:

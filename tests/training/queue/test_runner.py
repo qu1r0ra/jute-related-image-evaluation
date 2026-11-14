@@ -589,6 +589,48 @@ def test_a_failed_tuning_fit_omits_the_finals_that_reuse_it(harness: Harness) ->
     assert report.outcomes["classical/lr-crafted"] is RunState.COMPLETED
 
 
+def test_a_completed_fit_keeps_its_receipt_when_its_upstream_fails_later(
+    harness: Harness,
+) -> None:
+    harness.run()
+    harness.calls.clear()
+    harness.identity_tag = "v2"
+    harness.failing["source/tune/plantvillage"] = 2
+    report = harness.run()
+
+    assert report.outcomes["source/tune/plantvillage"] is RunState.FAILED
+    for fit_id in [*PLANTVILLAGE_TARGETS, "source/plantvillage/seed-42"]:
+        assert fit_id not in harness.calls
+        # This run did not carry the fit, but its finished result is not erased.
+        assert report.outcomes[fit_id] is RunState.OMITTED
+        assert "completed receipt is kept" in report.reasons[fit_id]
+        assert harness.store.state(fit_id) is RunState.COMPLETED
+        assert harness.store.receipt(fit_id)["identity"] == f"v1:{fit_id}"
+
+
+def test_a_completed_fit_counts_as_complete_when_its_inputs_are_gone(
+    harness: Harness,
+) -> None:
+    harness.run()
+    harness.calls.clear()
+    original_identity = harness.identity
+
+    def identity(fit: FitSpec) -> str:
+        if fit.fit_id.startswith("source/plantdoc/"):
+            raise FileNotFoundError("PlantDoc manifest is missing after a cull")
+        return original_identity(fit)
+
+    harness.identity = identity  # type: ignore[method-assign]
+    report = harness.run()
+
+    assert report.arms == {"plantvillage": "complete", "plantdoc": "complete"}
+    assert not report.escalations
+    assert harness.calls == []
+    for fit_id in ["source/plantdoc/seed-42", *PLANTDOC_TARGETS]:
+        assert report.outcomes[fit_id] is RunState.COMPLETED
+        assert harness.store.state(fit_id) is RunState.COMPLETED
+
+
 def test_tuning_selection_precedes_every_final_that_reuses_it() -> None:
     benchmark = small_benchmark()
     order = {fit.fit_id: index for index, fit in enumerate(benchmark.fits())}

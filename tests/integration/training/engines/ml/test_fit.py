@@ -1,5 +1,6 @@
 """Classical fits on tiny frozen fixtures: train-only scaling, no test pixels."""
 
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -106,6 +107,33 @@ def test_every_estimator_fits_both_feature_sets(
         assert results["sweep"] is False
         assert results["test_accessed"] is False
         assert not any("test" in key for key in results["metrics"])
+
+
+def test_tuning_json_is_installed_atomically(
+    recipe: Recipe,
+    data: DataInputs,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installed: list[str] = []
+    replace_file = os.replace
+
+    def spy(source: str | Path, target: str | Path) -> None:
+        installed.append(Path(target).name)
+        replace_file(source, target)
+
+    monkeypatch.setattr(os, "replace", spy)
+    result = fit_classical(
+        replace(_fit("lr", "raw"), phase="tune"),
+        recipe,
+        data,
+        tmp_path / "fit",
+        tmp_path / "cache",
+    )
+
+    assert "tuning.json" in installed
+    assert result.artifacts["tuning"].is_file()
+    assert not list((tmp_path / "fit").glob("*.tmp"))
 
 
 def test_scaler_sees_training_rows_only(

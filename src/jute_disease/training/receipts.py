@@ -10,15 +10,20 @@ Anything else is a partial attempt: it is kept for disclosure and never reused.
 import json
 import os
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from jute_disease.training.lock import FileLock, FitLockedError
+
 STATE_FILE = "state.json"
 RECEIPT_FILE = "receipt.json"
 ATTEMPT_FILE = "attempt.json"
+LOCK_FILE = "run.lock"
 RECEIPT_FORMAT_VERSION = 2
 SUPERSEDED_DIR = "superseded"
 
@@ -31,6 +36,10 @@ class RunState(StrEnum):
     TIMED_OUT = "timed-out"
     INTERRUPTED = "interrupted"
     OMITTED = "omitted"
+
+
+class CompletedFitError(RuntimeError):
+    """A completed fit was asked to be overwritten as something else."""
 
 
 class Resume(StrEnum):
@@ -152,6 +161,39 @@ class RunStore:
 
     def __init__(self, root: Path | str) -> None:
         self.root = Path(root)
+        self._held: dict[str, tuple[FileLock, int]] = {}
+
+    @contextmanager
+    def exclusive(self, fit_id: str) -> Iterator[None]:
+        """Be the only writer of one fit's run directory while the block runs.
+
+        Re-entering for the same fit through this store is free. The lock is the
+        operating system's, so it vanishes with a killed holder.
+
+        Raises:
+            FitLockedError: another process, or another store, holds this fit.
+        """
+        held = self._held.get(fit_id)
+        if held is not None:
+            self._held[fit_id] = (held[0], held[1] + 1)
+        else:
+            lock = FileLock(self.run_dir(fit_id) / LOCK_FILE)
+            try:
+                lock.acquire()
+            except FitLockedError as error:
+                raise FitLockedError(
+                    f"{fit_id} is being written by another process"
+                ) from error
+            self._held[fit_id] = (lock, 1)
+        try:
+            yield
+        finally:
+            lock, depth = self._held[fit_id]
+            if depth > 1:
+                self._held[fit_id] = (lock, depth - 1)
+            else:
+                del self._held[fit_id]
+                lock.release()
 
     def run_dir(self, fit_id: str) -> Path:
         return self.root.joinpath(*fit_id.split("/"))
@@ -243,11 +285,11 @@ class RunStore:
     def state(self, fit_id: str) -> RunState:
         payload = self._state_payload(fit_id)
         if payload is None:
-            return (
-                RunState.INTERRUPTED
-                if self.run_dir(fit_id).exists()
-                else (RunState.PLANNED)
+            directory = self.run_dir(fit_id)
+            started = directory.exists() and any(
+                child.name != LOCK_FILE for child in directory.iterdir()
             )
+            return RunState.INTERRUPTED if started else RunState.PLANNED
         try:
             state = RunState(payload["state"])
         except KeyError, ValueError:
@@ -277,19 +319,20 @@ class RunStore:
         Call only when no process owns the run (the queue is serial, so the
         previous attempt's process is gone before the next one starts).
         """
-        payload = self._state_payload(fit_id)
-        if payload is not None and payload.get("state") == RunState.RUNNING:
-            run = ActiveRun(
-                self, fit_id, str(payload.get("identity")), int(payload["attempt"])
-            )
-            runtime = read_json(run.attempt_dir / "runtime.json")
-            metadata = {"runtime": runtime} if isinstance(runtime, dict) else None
-            run.fail(
-                RunState.INTERRUPTED,
-                "process ended without a result",
-                metadata=metadata,
-            )
-        return self.state(fit_id)
+        with self.exclusive(fit_id):
+            payload = self._state_payload(fit_id)
+            if payload is not None and payload.get("state") == RunState.RUNNING:
+                run = ActiveRun(
+                    self, fit_id, str(payload.get("identity")), int(payload["attempt"])
+                )
+                runtime = read_json(run.attempt_dir / "runtime.json")
+                metadata = {"runtime": runtime} if isinstance(runtime, dict) else None
+                run.fail(
+                    RunState.INTERRUPTED,
+                    "process ended without a result",
+                    metadata=metadata,
+                )
+            return self.state(fit_id)
 
     def _attempts(self, fit_id: str) -> list[int]:
         directory = self.run_dir(fit_id)
@@ -359,26 +402,47 @@ class RunStore:
         metadata: dict[str, Any] | None = None,
     ) -> ActiveRun:
         """Open a new attempt; any earlier receipt is retired, never reused."""
-        self.settle(fit_id)
-        self._supersede(fit_id)
-        attempts = self._attempts(fit_id)
-        run = ActiveRun(self, fit_id, identity, (attempts[-1] + 1) if attempts else 1)
-        run.attempt_dir.mkdir(parents=True)
-        write_json_atomic(
-            run.attempt_dir / ATTEMPT_FILE,
-            {
-                "attempt": run.attempt,
-                "identity": identity,
-                "state": RunState.RUNNING.value,
-                "started_at": _now(),
-                "metadata": metadata or {},
-            },
+        with self.exclusive(fit_id):
+            self.settle(fit_id)
+            self._supersede(fit_id)
+            attempts = self._attempts(fit_id)
+            run = ActiveRun(
+                self, fit_id, identity, (attempts[-1] + 1) if attempts else 1
+            )
+            run.attempt_dir.mkdir(parents=True)
+            write_json_atomic(
+                run.attempt_dir / ATTEMPT_FILE,
+                {
+                    "attempt": run.attempt,
+                    "identity": identity,
+                    "state": RunState.RUNNING.value,
+                    "started_at": _now(),
+                    "metadata": metadata or {},
+                },
+            )
+            self.write_state(run, RunState.RUNNING)
+            return run
+
+    def is_complete(self, fit_id: str) -> bool:
+        """Whether a valid receipt and a completed state both stand for this fit."""
+        payload = self._state_payload(fit_id)
+        return (
+            payload is not None
+            and payload.get("state") == RunState.COMPLETED.value
+            and self._valid_receipt(fit_id) is not None
         )
-        self.write_state(run, RunState.RUNNING)
-        return run
 
     def omit(self, fit_id: str, identity: str, reason: str) -> None:
-        """Record that a planned fit was deliberately not run, and why."""
-        attempts = self._attempts(fit_id)
-        run = ActiveRun(self, fit_id, identity, attempts[-1] if attempts else 0)
-        self.write_state(run, RunState.OMITTED, reason)
+        """Record that a planned fit was deliberately not run, and why.
+
+        Raises:
+            CompletedFitError: the fit is complete; omitting would erase it.
+        """
+        with self.exclusive(fit_id):
+            if self.is_complete(fit_id):
+                raise CompletedFitError(
+                    f"{fit_id} is complete with a valid receipt; refusing to omit it"
+                )
+            attempts = self._attempts(fit_id)
+            run = ActiveRun(self, fit_id, identity, attempts[-1] if attempts else 0)
+            self.write_state(run, RunState.OMITTED, reason)
