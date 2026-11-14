@@ -541,7 +541,8 @@ def test_all_analyses_run_through_the_evaluator(
             runs.append(_leaf_run(store, target, fit_id, fits["full"], 0, 5, sample))
             continue
         system = "pad" if variant == "pad_cue" else SYSTEM
-        run = _complete_fit(store, target, fit_id, 0, 5, system=system)
+        trained = variant if variant in ("border", "pad_cue") else ""
+        run = _complete_fit(store, target, fit_id, 0, 5, system=system, variant=trained)
         runs.append({**run, "variant": variant, "of": None})
     _write(tmp_path / "runs" / "runs.json", runs)
     _issue_receipts(store, record)

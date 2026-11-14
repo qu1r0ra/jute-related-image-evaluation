@@ -156,6 +156,44 @@ class RawPixelFeatureExtractor(BaseFeatureExtractor):
         return img_array.flatten().astype(np.float32)
 
 
+PAD_CUE_FEATURES = "pad-cue"
+
+
+class PadCueFeatureExtractor(BaseFeatureExtractor):
+    """Letterbox geometry alone: the pad fraction and aspect ratio of the image.
+
+    The pad-cue baseline asks how much of a label the shape of the original photo
+    already carries, so it reads the validity mask and never a pixel.
+    """
+
+    dimensions = 7
+
+    def extract(self, img: Image.Image | np.ndarray | ImageWithMask) -> np.ndarray:
+        """Return the pad share per side, content size, pad fraction and aspect."""
+        if not isinstance(img, ImageWithMask):
+            raise ValueError("The pad-cue features need the letterbox validity mask")
+        valid = np.asarray(img.valid_mask, dtype=bool)
+        rows, cols = np.nonzero(valid)
+        if not len(rows):
+            raise ValueError("valid mask has no content")
+        height, width = valid.shape
+        top, bottom = int(rows.min()), height - int(rows.max()) - 1
+        left, right = int(cols.min()), width - int(cols.max()) - 1
+        content_h, content_w = height - top - bottom, width - left - right
+        return np.array(
+            [
+                top / height,
+                bottom / height,
+                left / width,
+                right / width,
+                content_h / height,
+                content_w / width,
+                1.0 - float(valid.mean()),
+            ],
+            dtype=np.float32,
+        )
+
+
 def feature_cache_key(
     dataset_identity: dict[str, str], extractor: BaseFeatureExtractor, length: int
 ) -> str:

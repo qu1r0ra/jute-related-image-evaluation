@@ -11,12 +11,17 @@ from typing import Any
 
 import numpy as np
 
+from jute_disease.data.probe_pixels import (
+    FRAME_WIDTH_PX,
+    frame_mask,
+    frame_only_image,
+)
 from jute_disease.evaluation.resampling import Interval, resample_metrics
 from jute_disease.evaluation.scores import PredictionSet, metric_values
-from jute_disease.training.benchmark import Benchmark, FitKind, FitSpec
+from jute_disease.training.benchmark import PROBE_SYSTEM, Benchmark, is_probe_base
 
-PROBE_SYSTEM = "mobilenet_v2_direct"
-FRAME_WIDTH_PX = 32
+__all__ = ["FRAME_WIDTH_PX", "PROBE_SYSTEM", "frame_mask", "frame_only_image"]
+
 LEAF_CUTOFF = 0.05
 PERMUTATIONS = 1000
 DETECTION_ALPHA = 0.05
@@ -36,18 +41,6 @@ class ProbeFit:
     base_fit_id: str
 
 
-def _probe_base(fit: FitSpec, benchmark: Benchmark) -> bool:
-    if fit.kind is FitKind.CLASSICAL:
-        pass
-    elif fit.kind is FitKind.TARGET and fit.system == PROBE_SYSTEM:
-        pass
-    else:
-        return False
-    if fit.phase != "final" or fit.split != benchmark.primary_split:
-        return False
-    return True
-
-
 def probe_fits(benchmark: Benchmark, variant: str) -> tuple[ProbeFit, ...]:
     """Plan the background-only or border fits from the declared matrix.
 
@@ -59,22 +52,15 @@ def probe_fits(benchmark: Benchmark, variant: str) -> tuple[ProbeFit, ...]:
     return tuple(
         ProbeFit(f"probe/{variant}/{fit.fit_id}", variant, fit.fit_id)
         for fit in benchmark.fits()
-        if _probe_base(fit, benchmark)
+        if is_probe_base(fit, benchmark)
     )
 
 
 def pad_cue_fits(benchmark: Benchmark) -> tuple[ProbeFit, ...]:
     """Pad-fraction and aspect-ratio-only baseline fits, one per matrix cell."""
-    fits = []
-    for pool in benchmark.pools:
-        for view in benchmark.views:
-            for policy in benchmark.policies:
-                for seed in benchmark.recipe.seeds:
-                    fit_id = (
-                        f"probe/pad-cue/pool-{pool}/view-{view}/{policy}/seed-{seed}"
-                    )
-                    fits.append(ProbeFit(fit_id, "pad_cue", fit_id))
-    return tuple(fits)
+    return tuple(
+        ProbeFit(fit.fit_id, "pad_cue", fit.fit_id) for fit in benchmark.pad_cue_fits()
+    )
 
 
 def planned_probe_fit_ids(benchmark: Benchmark) -> list[str]:
@@ -88,35 +74,6 @@ def planned_probe_fit_ids(benchmark: Benchmark) -> list[str]:
             )
         }
     )
-
-
-def _content_box(valid_mask: np.ndarray) -> tuple[int, int, int, int]:
-    rows, cols = np.nonzero(valid_mask)
-    if not len(rows):
-        raise ValueError("valid mask has no content")
-    return int(rows.min()), int(rows.max()) + 1, int(cols.min()), int(cols.max()) + 1
-
-
-def frame_mask(valid_mask: np.ndarray, width: int) -> np.ndarray:
-    """Pixels within ``width`` px of the edge of the resized image content."""
-    if width < 1:
-        raise ValueError("frame width must be positive")
-    top, bottom, left, right = _content_box(np.asarray(valid_mask, dtype=bool))
-    frame = np.zeros(valid_mask.shape, dtype=bool)
-    frame[top:bottom, left:right] = True
-    if bottom - top > 2 * width and right - left > 2 * width:
-        frame[top + width : bottom - width, left + width : right - width] = False
-    return frame
-
-
-def frame_only_image(
-    pixels: np.ndarray, valid_mask: np.ndarray, width: int
-) -> np.ndarray:
-    """Keep the frame, blank the interior and mask the letterbox padding."""
-    out = np.zeros_like(pixels)
-    keep = frame_mask(valid_mask, width)
-    out[keep] = pixels[keep]
-    return out
 
 
 def background_only_image(

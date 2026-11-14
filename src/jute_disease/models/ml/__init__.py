@@ -13,8 +13,10 @@ from jute_disease.models.ml.classifiers import (
 )
 from jute_disease.models.ml.features import (
     FEATURE_EXTRACTORS,
+    PAD_CUE_FEATURES,
     BaseFeatureExtractor,
     CraftedFeatureExtractor,
+    PadCueFeatureExtractor,
     RawPixelFeatureExtractor,
     extract_features,
     feature_cache_key,
@@ -27,6 +29,8 @@ __all__ = [
     "FeatureBlockWeights",
     "KNearestNeighbors",
     "LogisticRegression",
+    "PAD_CUE_FEATURES",
+    "PadCueFeatureExtractor",
     "RandomForest",
     "RawPixelFeatureExtractor",
     "SklearnClassifier",
