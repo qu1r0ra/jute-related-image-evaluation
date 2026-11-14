@@ -228,6 +228,7 @@ def _data_module(
         image_size=recipe.image_size,
         cache_root=None if images is None else images.root,
         allow_test=False,
+        variant=fit.variant,
     )
     module.setup("fit")
     assert module.manifest is not None
@@ -403,6 +404,7 @@ def fit_cnn(
     metrics_file = attempt / METRICS_DIR / "version_0" / METRICS_FILE
     results = {
         "fit": asdict(fit),
+        "variant": fit.variant,
         "recipe": asdict(recipe),
         "preprocessing": preprocessing,
         "checkpoint": {

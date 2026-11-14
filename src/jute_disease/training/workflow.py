@@ -304,6 +304,9 @@ def find_fit(workspace: Workspace, fit_id: str) -> FitSpec:
     for fit in workspace.benchmark.fits():
         if fit.fit_id == fit_id:
             return fit
+    probe = workspace.benchmark.probe_fit(fit_id)
+    if probe is not None:
+        return probe
     raise KeyError(f"No declared fit {fit_id!r}")
 
 
@@ -330,7 +333,12 @@ def run_job(workspace: Workspace, job: Job) -> None:
         result = prepare_features(fit, recipe, data, workspace.cache_dir)
     elif fit.kind is FitKind.CLASSICAL:
         store = RunStore(workspace.runs_dir)
-        if not _prepared(workspace, store, make_identity(workspace, store), fit):
+        # A probe's pixels differ from the prepared draw's, so it extracts its own
+        # features (cached under a key that names the variant) instead of reading
+        # the prepared cache.
+        if not fit.variant and not _prepared(
+            workspace, store, make_identity(workspace, store), fit
+        ):
             raise ValueError("Prepared feature cache has no valid compatible receipt")
         selected_parameters = tuning_selection(workspace, store, fit)
         result = fit_classical(
@@ -339,7 +347,7 @@ def run_job(workspace: Workspace, job: Job) -> None:
             data,
             job.attempt_dir,
             workspace.cache_dir,
-            require_cache=True,
+            require_cache=not fit.variant,
             selected_parameters=selected_parameters,
         )
     else:

@@ -30,6 +30,13 @@ from torchvision.transforms import (
 from torchvision.transforms import functional as F
 
 from jute_disease.config import DEFAULT_SEED, IMAGE_SIZE
+from jute_disease.data.probe_pixels import (
+    BORDER_VARIANT,
+    FRAME_WIDTH_PX,
+    PROBE_VARIANTS,
+    frame_mask,
+    frame_only_image,
+)
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -93,15 +100,27 @@ class ImagePipeline:
     """Per-dataset torchvision pipeline with independent worker random state."""
 
     def __init__(
-        self, size: int, is_train: bool, is_dl: bool, seed: int, include_mask: bool
+        self,
+        size: int,
+        is_train: bool,
+        is_dl: bool,
+        seed: int,
+        include_mask: bool,
+        variant: str = "",
     ) -> None:
+        if variant and variant not in PROBE_VARIANTS:
+            raise ValueError(f"unknown probe variant {variant!r}")
         self.size = size
         self.is_train = is_train
         self.is_dl = is_dl
         self.include_mask = include_mask
         self.seed = seed
+        self.variant = variant
         self.deterministic = not is_train
         self.description = f"letterbox={size};train={is_train};dl={is_dl}"
+        if variant:
+            # The variant is part of what the pixels are, so every cache keys on it.
+            self.description += f";variant={variant}"
         self._states: dict[int, torch.Tensor] = {}
 
     def __call__(
@@ -127,6 +146,13 @@ class ImagePipeline:
         left, top = horizontal // 2, vertical // 2
         valid_mask = np.zeros((self.size, self.size), dtype=bool)
         valid_mask[top : top + height, left : left + width] = True
+        if self.variant == BORDER_VARIANT:
+            # Only the frame survives; the model never sees the interior.
+            frame = frame_mask(valid_mask, FRAME_WIDTH_PX)
+            image = PILImage.fromarray(
+                frame_only_image(np.asarray(image), valid_mask, FRAME_WIDTH_PX)
+            )
+            valid_mask = frame
         if self.is_train:
             worker = torch.utils.data.get_worker_info()
             worker_seed = worker.seed if worker else self.seed
@@ -160,15 +186,22 @@ def create_pipeline(
     is_dl: bool = True,
     seed: int = DEFAULT_SEED,
     include_mask: bool = False,
+    variant: str = "",
 ) -> ImagePipeline:
-    """Build the fixed ADR 0002 preprocessing and optional training augmentation."""
+    """Build the fixed ADR 0002 preprocessing and optional training augmentation.
+
+    ``variant`` names a probe's input ("border" keeps only the frame of the
+    resized image); the empty default is the ordinary pipeline.
+    """
     if size < 1:
         raise ValueError("Image size must be positive")
-    return ImagePipeline(size, is_train, is_dl, seed, include_mask)
+    return ImagePipeline(size, is_train, is_dl, seed, include_mask, variant)
 
 
 def classical_pipeline(
-    size: int = IMAGE_SIZE, *, include_mask: bool = False
+    size: int = IMAGE_SIZE, *, include_mask: bool = False, variant: str = ""
 ) -> ImagePipeline:
     """Return deterministic letterboxed RGB arrays for classical features."""
-    return create_pipeline(size, is_dl=False, include_mask=include_mask)
+    return create_pipeline(
+        size, is_dl=False, include_mask=include_mask, variant=variant
+    )

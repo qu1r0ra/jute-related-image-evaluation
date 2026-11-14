@@ -532,6 +532,9 @@ class RunEntry:
 
 
 VARIANTS = ("full", "leaf_only", "background_only", "border", "pad_cue")
+# Variants whose fits train on their own pixels; a run of one of them must be of a
+# fit that trained on it, and no other run may borrow such a fit.
+TRAINED_VARIANTS = frozenset({"border", "pad_cue"})
 PREDICTION_RECEIPT_SCHEMA = 1
 LEAF_RECEIPT_SCHEMA = 1
 
@@ -612,14 +615,17 @@ def write_prediction_receipt(
     artifact_sha256: str,
     fit_manifest_sha256: str,
     predictions_sha256: str,
+    variant: str = "",
 ) -> str:
     """Write the digest-bound receipt of one gated prediction and return its SHA-256.
 
     It binds the freeze record, the training receipt, the checkpoint or model, the
-    manifest the fit trained on and the predictions, so a run record can tell the
-    predictions of this fit from another fit's or a hand-written file.
+    manifest the fit trained on, the input variant it read the images through (a
+    probe's border or pad-cue pixels; absent for a full fit) and the predictions,
+    so a run record can tell the predictions of this fit from another fit's or a
+    hand-written file.
     """
-    body = {
+    body: dict[str, Any] = {
         "schema": PREDICTION_RECEIPT_SCHEMA,
         "freeze_record_hash": record_hash,
         "fit_id": fit_id,
@@ -628,6 +634,8 @@ def write_prediction_receipt(
         "fit_manifest_sha256": fit_manifest_sha256,
         "predictions_sha256": predictions_sha256,
     }
+    if variant:
+        body["variant"] = variant
     return _write_receipt(prediction_receipt_path(run_dir, record_hash), body)
 
 
@@ -771,13 +779,16 @@ def _fit_lineage(
     fit_id: str,
     run: Mapping[str, Any],
     record_hash: str,
+    variant: str = "full",
 ) -> tuple[dict[str, Any], str]:
     """Bind one fit's receipt, artifact and gated prediction receipt by digest.
 
     Returns the lineage entry and the predictions digest the prediction receipt
     pins. A fit without a verified training receipt, or whose predictions were not
     produced by ``evaluate predict-test`` under this record from this very receipt
-    and checkpoint or model, is refused.
+    and checkpoint or model, is refused. ``variant`` is the input variant the run
+    claims; the fit must have trained on it ("full" for a fit without one) and
+    ``predict-test`` must have read the test images through it.
     """
     receipt = store.receipt(fit_id, missing_ok=True)
     if receipt is None:
@@ -788,6 +799,12 @@ def _fit_lineage(
     description, kind, artifact = training_description(receipt, fit_id)
     if description.get("fit_id", fit_id) != fit_id:
         raise FreezeRecordError(f"training receipt fit ID does not match {fit_id}")
+    trained_variant = str(description.get("variant") or "full")
+    if trained_variant != variant and TRAINED_VARIANTS & {trained_variant, variant}:
+        raise FreezeRecordError(
+            f"run of {fit_id} claims variant {variant!r} but the fit trained "
+            f"on variant {trained_variant!r}"
+        )
     if description.get("seed") != int(run["seed"]):
         raise FreezeRecordError(
             f"training receipt seed does not match run record for {fit_id}"
@@ -815,6 +832,10 @@ def _fit_lineage(
         prediction.get("training_receipt_sha256") != receipt_sha256
         or prediction.get("artifact") != {"kind": kind, "sha256": observed}
         or prediction.get("fit_manifest_sha256") != receipt_manifest_digest(description)
+        or (
+            TRAINED_VARIANTS & {trained_variant, variant}
+            and (prediction.get("variant") or "full") != variant
+        )
     ):
         raise FreezeRecordError(
             f"prediction receipt of {fit_id} was made from a different fit; "
@@ -975,7 +996,14 @@ def write_run_record(
         except OSError as error:
             raise FreezeRecordError(f"cannot read predictions: {path}") from error
         digest = hashlib.sha256(raw).hexdigest()
-        lineage, gated_digest = _fit_lineage(store, base, source, run, record["hash"])
+        lineage, gated_digest = _fit_lineage(
+            store,
+            base,
+            source,
+            run,
+            record["hash"],
+            "full" if variant == "leaf_only" else variant,
+        )
         if variant == "leaf_only":
             lineage["leaf_receipt_sha256"] = _leaf_lineage(
                 store, str(fit_id), run, record["hash"], lineage, raw

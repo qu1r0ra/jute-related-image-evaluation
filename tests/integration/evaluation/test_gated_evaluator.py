@@ -147,6 +147,7 @@ def _receipt(
     *,
     classical: bool = False,
     system: str = SYSTEM,
+    variant: str = "",
 ) -> None:
     """Record a completed fit the way the trainer does, with a real artifact.
 
@@ -162,6 +163,7 @@ def _receipt(
             {
                 "fit": fit_id,
                 "seed": seed,
+                "variant": variant,
                 "manifest": manifest,
                 "metrics": {"val_macro_f1": 0.5},
             },
@@ -172,7 +174,12 @@ def _receipt(
     artifact.write_bytes(f"weights-{fit_id}".encode())
     run.complete(
         {
-            "fit": {"fit_id": fit_id, "system": system, "seed": seed},
+            "fit": {
+                "fit_id": fit_id,
+                "system": system,
+                "seed": seed,
+                "variant": variant,
+            },
             "lineage": {"manifests": {"train": manifest}},
             "metrics": {"val_f1": 0.5},
         },
@@ -205,6 +212,7 @@ def _issue_receipts(store: RunStore, freeze: Path) -> None:
             artifact_sha256=artifact["sha256"],
             fit_manifest_sha256=receipt_manifest_digest(description),
             predictions_sha256=hashlib.sha256(predictions.read_bytes()).hexdigest(),
+            variant=str(description.get("variant") or ""),
         )
     for marker in sorted(store.root.rglob(LEAF_MARKER)):
         _issue_leaf_receipt(store, record_hash, marker)
@@ -252,6 +260,7 @@ def _complete_fit(
     *,
     system: str = SYSTEM,
     classical: bool = False,
+    variant: str = "",
 ) -> dict[str, object]:
     """Complete one fit in the store and return its run-record entry."""
     _receipt(
@@ -261,6 +270,7 @@ def _complete_fit(
         load_manifest(target).digest(),
         classical=classical,
         system=system,
+        variant=variant,
     )
     _predictions(target, store.run_dir(fit_id) / "predictions.json", flip, None)
     return {

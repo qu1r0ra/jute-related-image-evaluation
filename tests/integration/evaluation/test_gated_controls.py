@@ -122,7 +122,11 @@ def test_probe_plan_is_primary_split_classical_and_imagenet_route(
         }
 
     assert len(final_cnn_seeds(background)) == len(benchmark.recipe.seeds)
-    assert len(final_cnn_seeds(border)) == 3
+    assert len(final_cnn_seeds(border)) == len(benchmark.recipe.seeds)
+    pad_cue_seeds = {
+        p.rsplit("seed-", 1)[1] for p in probes if p.startswith("probe/pad-cue/")
+    }
+    assert len(pad_cue_seeds) == len(benchmark.recipe.seeds)
     for pool in benchmark.pools:
         for policy in benchmark.policies:
             assert any(f"pool-{pool}" in p and policy in p for p in background)
@@ -537,7 +541,8 @@ def test_all_analyses_run_through_the_evaluator(
             runs.append(_leaf_run(store, target, fit_id, fits["full"], 0, 5, sample))
             continue
         system = "pad" if variant == "pad_cue" else SYSTEM
-        run = _complete_fit(store, target, fit_id, 0, 5, system=system)
+        trained = variant if variant in ("border", "pad_cue") else ""
+        run = _complete_fit(store, target, fit_id, 0, 5, system=system, variant=trained)
         runs.append({**run, "variant": variant, "of": None})
     _write(tmp_path / "runs" / "runs.json", runs)
     _issue_receipts(store, record)
@@ -572,6 +577,11 @@ def test_all_analyses_run_through_the_evaluator(
     assert system["leaf_only"] and system["full_on_leaf_sample"]
     assert system["background_probe"]["statement"]
     border = system["border_probe"]
+    for result in (system["background_probe"], border["unrestricted"]):
+        assert 0 <= result["exchangeable_image_share"] <= 1
+        assert result["exchangeable_images"] <= result["n"]
+        assert result["exchangeable_families"] <= result["families"]
+        assert result["p_value_standard_error"] >= 0
     assert border["headline"] is None and "fewer than 50" in border["headline_withheld"]
     assert border["pad_cue"] is not None
     assert report["leaf_sample"]["image_ids"] == sample
