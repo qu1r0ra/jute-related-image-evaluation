@@ -17,10 +17,10 @@ from typing import Any
 from jute_disease.data.audit import cohort_digest
 from jute_disease.data.audit_sampling import grouping_threshold
 from jute_disease.data.masks import MASK_QUALITY_RATINGS, SCENE_TAGS
+from jute_disease.data.masks_audit import AUDIT_SCHEMA as MASK_AUDIT_SCHEMA
 
 KIT_SCHEMA = "jute-audit-kit-v1"
 KIT_FILE = "kit.json"
-MASK_AUDIT_SCHEMA = "jute-mask-audit-v1"
 RATING_VALUES = ("exact", "near-duplicate", "very similar", "different")
 SHEET_COLUMNS = (
     "item_id",
