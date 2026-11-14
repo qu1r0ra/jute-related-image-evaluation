@@ -79,6 +79,7 @@ from jute_disease.evaluation import (
     leaf_sample_ids,
     log_test_read,
     planned_probe_fit_ids,
+    predict_leaf_only,
     predict_test,
     verify_freeze_record,
     write_freeze_record,
@@ -752,6 +753,18 @@ def _evaluate_freeze_record(args: argparse.Namespace) -> None:
     _print_json({"hash": record["hash"], "post_hoc": record["body"]["post_hoc"]})
 
 
+def _pool_roots(args: argparse.Namespace) -> dict[str, Path]:
+    return {
+        pool: root
+        for pool, root in (
+            ("A", args.pool_a_root),
+            ("B", args.pool_b_root),
+            ("C", args.pool_c_root),
+        )
+        if root is not None
+    }
+
+
 def _evaluate_predict_test(args: argparse.Namespace) -> None:
     try:
         result = predict_test(
@@ -762,16 +775,29 @@ def _evaluate_predict_test(args: argparse.Namespace) -> None:
             image_root=args.image_root,
             target_dir=args.target_dir,
             policy_dir=args.policy_dir,
-            pool_roots={
-                pool: root
-                for pool, root in (
-                    ("A", args.pool_a_root),
-                    ("B", args.pool_b_root),
-                    ("C", args.pool_c_root),
-                )
-                if root is not None
-            },
+            pool_roots=_pool_roots(args),
             reads_log=args.reads_log,
+        )
+    except (TestReadRefusedError, FreezeRecordError, OSError, ValueError) as error:
+        raise SystemExit(f"test read refused: {error}") from error
+    _print_json(result)
+
+
+def _evaluate_predict_leaf_only(args: argparse.Namespace) -> None:
+    try:
+        result = predict_leaf_only(
+            args.freeze_record,
+            args.fit_id,
+            args.of,
+            args.run_store,
+            root=args.root,
+            image_root=args.image_root,
+            target_dir=args.target_dir,
+            policy_dir=args.policy_dir,
+            pool_roots=_pool_roots(args),
+            reads_log=args.reads_log,
+            sample_size=args.sample_size,
+            seed=args.seed,
         )
     except (TestReadRefusedError, FreezeRecordError, OSError, ValueError) as error:
         raise SystemExit(f"test read refused: {error}") from error
@@ -1349,6 +1375,31 @@ def _add_gated_evaluator(actions: argparse._SubParsersAction) -> None:
     predict.add_argument("--root", type=Path, default=ROOT_DIR)
     predict.add_argument("--reads-log", type=Path)
     predict.set_defaults(run=_evaluate_predict_test)
+
+    leaf_only = actions.add_parser(
+        "predict-leaf-only",
+        help=(
+            "Write a leaf-only run's gated test predictions and receipt from a "
+            "full fit's weights; refused without a freeze record."
+        ),
+    )
+    leaf_only.add_argument("--freeze-record", type=Path)
+    leaf_only.add_argument("--fit-id", required=True, help="The leaf-only run's ID.")
+    leaf_only.add_argument(
+        "--of", required=True, help="The full fit whose weights predict."
+    )
+    leaf_only.add_argument("--run-store", type=Path, required=True)
+    leaf_only.add_argument("--target-dir", type=Path, required=True)
+    leaf_only.add_argument("--image-root", type=Path, required=True)
+    leaf_only.add_argument("--policy-dir", type=Path, default=None)
+    leaf_only.add_argument("--pool-a-root", type=Path, default=None)
+    leaf_only.add_argument("--pool-b-root", type=Path, default=None)
+    leaf_only.add_argument("--pool-c-root", type=Path, default=None)
+    leaf_only.add_argument("--root", type=Path, default=ROOT_DIR)
+    leaf_only.add_argument("--reads-log", type=Path)
+    leaf_only.add_argument("--sample-size", type=int, default=2000)
+    leaf_only.add_argument("--seed", type=int, default=42)
+    leaf_only.set_defaults(run=_evaluate_predict_leaf_only)
 
     test = actions.add_parser(
         "test", help="Read test predictions; refused without both records."

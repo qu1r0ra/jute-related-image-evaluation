@@ -3,6 +3,8 @@
 import hashlib
 import json
 import shutil
+import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -464,6 +466,166 @@ def test_a_repeat_with_a_different_training_receipt_is_refused(
     with pytest.raises(SystemExit, match="already read under this freeze record"):
         _predict(capsys, freeze, fit_id, retrained, target, image_root, root)
     assert len(_rows(root)) == 1
+
+
+def test_concurrent_reads_of_one_fit_from_two_stores_cannot_both_be_logged(
+    freeze: Path,
+    store: Path,
+    retrained: Path,
+    target: Path,
+    image_root: Path,
+    root: Path,
+    tmp_path: Path,
+) -> None:
+    """The conflict check and the ledger write are one step under the ledger lock.
+
+    Two processes read the same fit ID under one record from stores holding
+    different fits. Each waits where it writes the ledger until the other has
+    arrived or found the lock held, so a check made before the lock would pass
+    in both.
+    """
+    other = tmp_path / "other-store"
+    shutil.copytree(retrained, other)
+    marks = tmp_path / "marks"
+    marks.mkdir()
+    worker = Path(__file__).with_name("ledger_worker.py")
+    processes = []
+    for name, run_store in (("first", store), ("second", other)):
+        command = [
+            sys.executable,
+            str(worker),
+            name,
+            str(marks),
+            "evaluate",
+            "predict-test",
+            "--freeze-record",
+            str(freeze),
+            "--fit-id",
+            CLASSICAL.fit_id,
+            "--run-store",
+            str(run_store),
+            "--target-dir",
+            str(target),
+            "--image-root",
+            str(image_root),
+            "--root",
+            str(root),
+        ]
+        log = (tmp_path / f"{name}.log").open("wb")
+        processes.append(
+            subprocess.Popen(
+                command, stdout=log, stderr=subprocess.STDOUT, cwd=tmp_path
+            )
+        )
+    for process in processes:
+        process.wait(timeout=600)
+
+    results = [
+        json.loads((marks / f"{name}.result.json").read_text(encoding="utf-8"))
+        for name in ("first", "second")
+    ]
+    refused = [result for result in results if result["exit"] != 0]
+    assert len(refused) == 1, results
+    assert "already read under this freeze record" in refused[0]["message"]
+    reads = [row for row in _rows(root) if row["operation"] == "predict_test"]
+    assert len(reads) == 1
+
+
+def _artifact_file(store: Path, fit_id: str) -> Path:
+    artifacts = RunStore(store).receipt(fit_id)["artifacts"]
+    entry = artifacts["checkpoint" if "checkpoint" in artifacts else "model"]
+    return store / fit_id / entry["path"]
+
+
+def _predictions(store: Path, fit_id: str) -> dict[str, list[str]]:
+    return json.loads((store / fit_id / "predictions.json").read_text("utf-8"))
+
+
+def _write_other_weights(path: Path, kind: str, labels: list[str]) -> None:
+    """Replace the artifact on disk with weights that predict one fixed label."""
+    if kind == "classical":
+        import joblib
+        from sklearn.dummy import DummyClassifier
+
+        constant = DummyClassifier(strategy="constant", constant=len(labels) - 1)
+        joblib.dump(constant.fit([[0.0]] * len(labels), range(len(labels))), path)
+        return
+    import torch
+
+    from jute_disease.models.dl import read_checkpoint_state
+
+    state = {key: torch.zeros_like(v) for key, v in read_checkpoint_state(path).items()}
+    state["classifier.bias"][len(labels) - 1] = 10.0
+    torch.save({"state_dict": state}, path)
+
+
+@pytest.mark.parametrize("kind", ["deep", "classical"])
+def test_the_weights_that_predict_are_the_bytes_that_were_verified(
+    kind: str,
+    freeze: Path,
+    store: Path,
+    trained: Path,
+    target: Path,
+    image_root: Path,
+    root: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Weights swapped on disk after verification do not change the predictions."""
+    fit_id = FITS[kind].fit_id
+    classes = sorted({entry.label for entry in load_manifest(target).entries})
+    _predict(capsys, freeze, fit_id, store, target, image_root, root)
+    baseline = _predictions(store, fit_id)["predictions"]
+    assert len(set(baseline)) > 1
+
+    swapped = tmp_path / "swapped-store"
+    shutil.copytree(trained, swapped)
+    artifact = _artifact_file(swapped, fit_id)
+
+    def replace_on_disk(*args: object, **kwargs: object) -> object:
+        _write_other_weights(artifact, kind, classes)
+        return real(*args, **kwargs)
+
+    if kind == "classical":
+        import joblib
+
+        real = joblib.load
+        monkeypatch.setattr(joblib, "load", replace_on_disk)
+    else:
+        real = predict_module.read_checkpoint_state
+        monkeypatch.setattr(predict_module, "read_checkpoint_state", replace_on_disk)
+
+    _predict(capsys, freeze, fit_id, swapped, target, image_root, root)
+
+    assert _predictions(swapped, fit_id)["predictions"] == baseline
+
+
+@pytest.mark.parametrize("kind", ["deep", "classical"])
+def test_weights_changed_between_the_receipt_check_and_the_read_are_refused(
+    kind: str,
+    freeze: Path,
+    store: Path,
+    target: Path,
+    image_root: Path,
+    root: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fit_id = FITS[kind].fit_id
+    classes = sorted({entry.label for entry in load_manifest(target).entries})
+    artifact = _artifact_file(store, fit_id)
+    original = predict_module._complete_manifest
+
+    def swap_then_continue(*args: object, **kwargs: object) -> object:
+        _write_other_weights(artifact, kind, classes)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(predict_module, "_complete_manifest", swap_then_continue)
+    with pytest.raises(SystemExit, match="changed after its receipt"):
+        _predict(capsys, freeze, fit_id, store, target, image_root, root)
+    assert _rows(root) == []
+    assert not (store / fit_id / "predictions.json").exists()
 
 
 def test_a_repeat_read_is_logged_again_and_writes_the_same_predictions(

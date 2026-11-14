@@ -12,11 +12,12 @@ invalidates earlier reads; a record created after any test read is flagged
 post-hoc. Reads are appended under a lock and flushed to disk.
 """
 
+import contextlib
 import hashlib
 import json
 import os
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,6 +27,7 @@ from jute_disease.data import (
     POLICIES,
     audit_report_outcome,
     policy_matrix_binding,
+    require_colour_threshold,
 )
 from jute_disease.data.manifest import (
     load_complete_manifest,
@@ -526,10 +528,12 @@ class RunEntry:
     seed_index: int | None = None
     assignment_table_sha256: str | None = None
     prediction_receipt_sha256: str | None = None
+    leaf_receipt_sha256: str | None = None
 
 
 VARIANTS = ("full", "leaf_only", "background_only", "border", "pad_cue")
 PREDICTION_RECEIPT_SCHEMA = 1
+LEAF_RECEIPT_SCHEMA = 1
 
 
 def training_description(
@@ -624,41 +628,133 @@ def write_prediction_receipt(
         "fit_manifest_sha256": fit_manifest_sha256,
         "predictions_sha256": predictions_sha256,
     }
+    return _write_receipt(prediction_receipt_path(run_dir, record_hash), body)
+
+
+def _write_receipt(path: Path, body: Mapping[str, Any]) -> str:
+    """Write a self-hashed receipt once and return its file SHA-256."""
     data = (
         json.dumps({"hash": canonical_hash(body), "body": body}, sort_keys=True) + "\n"
     ).encode("utf-8")
-    path = prediction_receipt_path(run_dir, record_hash)
     if path.exists() and path.read_bytes() != data:
-        raise FreezeRecordError(
-            f"prediction receipt already exists and differs: {path}"
-        )
+        raise FreezeRecordError(f"receipt already exists and differs: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     return hashlib.sha256(data).hexdigest()
+
+
+def _read_receipt(
+    path: Path,
+    *,
+    schema: int,
+    record_hash: str,
+    fit_id: str,
+    absent: str,
+    description: str,
+) -> tuple[dict[str, Any], str]:
+    """Return a verified receipt body and its file SHA-256.
+
+    Raises:
+        FreezeRecordError: ``absent`` when the file cannot be read, or when it is
+            not a self-consistent receipt of ``fit_id`` under ``record_hash``.
+    """
+    try:
+        raw = path.read_bytes()
+        payload = json.loads(raw)
+    except (OSError, ValueError) as error:
+        raise FreezeRecordError(absent) from error
+    body = payload.get("body") if isinstance(payload, dict) else None
+    if (
+        not isinstance(body, dict)
+        or payload.get("hash") != canonical_hash(body)
+        or body.get("schema") != schema
+        or body.get("freeze_record_hash") != record_hash
+        or body.get("fit_id") != fit_id
+    ):
+        raise FreezeRecordError(f"{description} of {fit_id} does not verify")
+    return body, hashlib.sha256(raw).hexdigest()
 
 
 def read_prediction_receipt(
     run_dir: Path, record_hash: str, fit_id: str
 ) -> tuple[dict[str, Any], str]:
     """Return a verified prediction receipt body and its file SHA-256."""
-    path = prediction_receipt_path(run_dir, record_hash)
-    try:
-        raw = path.read_bytes()
-        payload = json.loads(raw)
-    except (OSError, ValueError) as error:
-        raise FreezeRecordError(
+    return _read_receipt(
+        prediction_receipt_path(run_dir, record_hash),
+        schema=PREDICTION_RECEIPT_SCHEMA,
+        record_hash=record_hash,
+        fit_id=fit_id,
+        absent=(
             f"no prediction receipt for {fit_id} under this freeze record; "
             "run evaluate predict-test"
-        ) from error
-    body = payload.get("body") if isinstance(payload, dict) else None
-    if (
-        not isinstance(body, dict)
-        or payload.get("hash") != canonical_hash(body)
-        or body.get("schema") != PREDICTION_RECEIPT_SCHEMA
-        or body.get("freeze_record_hash") != record_hash
-        or body.get("fit_id") != fit_id
-    ):
-        raise FreezeRecordError(f"prediction receipt of {fit_id} does not verify")
-    return body, hashlib.sha256(raw).hexdigest()
+        ),
+        description="prediction receipt",
+    )
+
+
+def leaf_receipt_path(run_dir: Path, record_hash: str) -> Path:
+    """Where the gate writes the receipt of leaf-only predictions under one record."""
+    return run_dir / f"predictions.{record_hash}.leaf.receipt.json"
+
+
+def sample_ids_digest(image_ids: Sequence[str]) -> str:
+    """Digest of the image IDs a leaf-only run predicted, in order."""
+    return canonical_hash(list(image_ids))
+
+
+def write_leaf_prediction_receipt(
+    run_dir: Path,
+    *,
+    record_hash: str,
+    fit_id: str,
+    of: str,
+    source_training_receipt_sha256: str,
+    source_artifact_kind: str,
+    source_artifact_sha256: str,
+    preprocessing: Mapping[str, Any],
+    sample_ids: Sequence[str],
+    predictions_sha256: str,
+) -> str:
+    """Write the digest-bound receipt of one leaf-only prediction; return its SHA-256.
+
+    It binds the freeze record, the full fit whose weights predicted (its training
+    receipt and checkpoint or model), the preprocessing the leaf-only transform
+    applied, the sample of test images and the predictions, so a run record can
+    tell this producer's predictions from a hand-written file.
+    """
+    body = {
+        "schema": LEAF_RECEIPT_SCHEMA,
+        "freeze_record_hash": record_hash,
+        "fit_id": fit_id,
+        "of": of,
+        "source_training_receipt_sha256": source_training_receipt_sha256,
+        "source_artifact": {
+            "kind": source_artifact_kind,
+            "sha256": source_artifact_sha256,
+        },
+        "preprocessing": dict(preprocessing),
+        "sample_ids_sha256": sample_ids_digest(sample_ids),
+        "sample_size": len(sample_ids),
+        "predictions_sha256": predictions_sha256,
+    }
+    return _write_receipt(leaf_receipt_path(run_dir, record_hash), body)
+
+
+def read_leaf_prediction_receipt(
+    run_dir: Path, record_hash: str, fit_id: str
+) -> tuple[dict[str, Any], str]:
+    """Return a verified leaf-only receipt body and its file SHA-256."""
+    return _read_receipt(
+        leaf_receipt_path(run_dir, record_hash),
+        schema=LEAF_RECEIPT_SCHEMA,
+        record_hash=record_hash,
+        fit_id=fit_id,
+        absent=(
+            f"no leaf-only receipt for {fit_id} under this freeze record; "
+            "run evaluate predict-leaf-only"
+        ),
+        description="leaf-only receipt",
+    )
 
 
 def _inside(base: Path, relative: str | Path) -> Path:
@@ -749,6 +845,89 @@ def _fit_lineage(
     return entry, str(prediction["predictions_sha256"])
 
 
+def _predicted_ids(raw: bytes, fit_id: str) -> list[str]:
+    try:
+        payload = json.loads(raw)
+        ids = payload["image_ids"]
+    except (ValueError, KeyError, TypeError) as error:
+        raise FreezeRecordError(f"predictions of {fit_id} are unreadable") from error
+    if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+        raise FreezeRecordError(f"predictions of {fit_id} are unreadable")
+    return ids
+
+
+def _leaf_lineage(
+    store: RunStore,
+    fit_id: str,
+    run: Mapping[str, Any],
+    record_hash: str,
+    source: Mapping[str, Any],
+    raw: bytes,
+) -> str:
+    """Bind a leaf-only run to the receipt of ``evaluate predict-leaf-only``.
+
+    ``source`` is the verified lineage of the full fit the run names in ``of`` and
+    ``raw`` the predictions file as read. The receipt must name that fit's training
+    receipt and weights, the exact predictions bytes and the exact image IDs, and
+    the preprocessing it records must be the full fit's own with the colour-threshold
+    mask applied at the fit's letterbox size. Returns the receipt's SHA-256.
+    """
+    of = str(run["of"])
+    receipt, receipt_sha256 = read_leaf_prediction_receipt(
+        store.run_dir(fit_id), record_hash, fit_id
+    )
+    kind = "checkpoint" if "checkpoint_sha256" in source else "model"
+    if (
+        receipt.get("of") != of
+        or receipt.get("source_training_receipt_sha256")
+        != source["training_receipt_sha256"]
+        or receipt.get("source_artifact")
+        != {"kind": kind, "sha256": source[f"{kind}_sha256"]}
+    ):
+        raise FreezeRecordError(
+            f"leaf-only receipt of {fit_id} was made from a different fit than {of}; "
+            "run evaluate predict-leaf-only again"
+        )
+    if receipt.get("predictions_sha256") != hashlib.sha256(raw).hexdigest():
+        raise FreezeRecordError(
+            f"predictions of {fit_id} are not the ones predict-leaf-only wrote "
+            "for that fit under this freeze record"
+        )
+    ids = _predicted_ids(raw, fit_id)
+    if receipt.get("sample_ids_sha256") != sample_ids_digest(ids) or receipt.get(
+        "sample_size"
+    ) != len(ids):
+        raise FreezeRecordError(
+            f"the sample of {fit_id} is not the one its leaf-only receipt records"
+        )
+    source_receipt = store.receipt(of, missing_ok=True)
+    if source_receipt is None:
+        raise FreezeRecordError(f"no verified training receipt for {of}")
+    description, _, _ = training_description(source_receipt, of)
+    preprocessing = receipt.get("preprocessing")
+    leaf = preprocessing.get("leaf_only") if isinstance(preprocessing, dict) else None
+    if (
+        not isinstance(preprocessing, dict)
+        or not isinstance(leaf, dict)
+        or preprocessing.get("fit") != description.get("preprocessing")
+    ):
+        raise FreezeRecordError(
+            f"leaf-only receipt of {fit_id} records preprocessing that is not {of}'s"
+        )
+    try:
+        require_colour_threshold(
+            str(leaf.get("mask_model")), str(leaf.get("mask_version"))
+        )
+    except ValueError as error:
+        raise FreezeRecordError(f"leaf-only receipt of {fit_id}: {error}") from error
+    size = (description.get("recipe") or {}).get("image_size")
+    if size is not None and leaf.get("letterbox") != size:
+        raise FreezeRecordError(
+            f"leaf-only receipt of {fit_id} masked at another letterbox size than {of}"
+        )
+    return receipt_sha256
+
+
 def write_run_record(
     freeze_record: Path | str,
     runs: Sequence[Mapping[str, Any]],
@@ -763,8 +942,9 @@ def write_run_record(
     that fit's checkpoint or model digest, the gated prediction receipt and the
     predictions digest. A fit's predictions must be the ones ``predict-test`` wrote
     for that fit under this record; another fit's file or a hand-written one is
-    refused. Leaf-only predictions have no gated producer, so they are bound by
-    digest and by the prediction receipt of the full fit they were made from.
+    refused. A leaf-only run must in addition carry the receipt of
+    ``predict-leaf-only``, which binds the full fit's weights, the preprocessing,
+    the sampled image IDs and the predictions digest.
     """
     record = load_freeze_record(freeze_record)
     listed = set(record["body"]["fit_ids"])
@@ -791,11 +971,16 @@ def write_run_record(
             )
         path = _inside(base, str(run["predictions"]))
         try:
-            digest = _file_hash(path)
+            raw = path.read_bytes()
         except OSError as error:
             raise FreezeRecordError(f"cannot read predictions: {path}") from error
+        digest = hashlib.sha256(raw).hexdigest()
         lineage, gated_digest = _fit_lineage(store, base, source, run, record["hash"])
-        if variant != "leaf_only" and digest != gated_digest:
+        if variant == "leaf_only":
+            lineage["leaf_receipt_sha256"] = _leaf_lineage(
+                store, str(fit_id), run, record["hash"], lineage, raw
+            )
+        elif digest != gated_digest:
             raise FreezeRecordError(
                 f"predictions of {fit_id} are not the ones predict-test wrote "
                 "for that fit under this freeze record"
@@ -996,12 +1181,22 @@ def log_test_read(
     operation: str = "evaluate_test",
     additional_logs: Sequence[Path | str] = (),
     details: Mapping[str, Any] | None = None,
+    refuse_conflict: bool = False,
 ) -> None:
     """Append a test read so a later record can be flagged post-hoc.
 
     ``details`` names what the read used (training receipt and artifact digests for
     a prediction; pool, sample IDs and weights for a residual audit), so the
     ledger row can be checked later rather than trusted by its operation string.
+
+    With ``refuse_conflict`` the check against earlier rows of the same fit and
+    operation runs after every log's lock is held and before any line is
+    written, so two readers cannot both pass the check and then both append.
+
+    Raises:
+        TestReadRefusedError: ``refuse_conflict`` and an earlier row for this
+            record and fit carries different details; nothing is written.
+        FreezeRecordError: a log is locked by another writer.
     """
     line: dict[str, Any] = {
         "time": datetime.now(UTC).isoformat(),
@@ -1012,22 +1207,28 @@ def log_test_read(
     if details is not None:
         line["details"] = dict(details)
     encoded = json.dumps(line, sort_keys=True) + "\n"
-    paths = [Path(reads_log), *(Path(path) for path in additional_logs)]
+    paths: list[Path] = []
     seen: set[Path] = set()
-    for path in paths:
+    for path in (Path(reads_log), *(Path(path) for path in additional_logs)):
         resolved = path.resolve()
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        _append_durably(path, encoded)
+        if resolved not in seen:
+            seen.add(resolved)
+            paths.append(path)
+    with contextlib.ExitStack() as held:
+        for path in paths:
+            held.enter_context(_locked(path))
+        if refuse_conflict:
+            for fit_id in fit_ids:
+                refuse_conflicting_repeat(
+                    paths, record_hash, fit_id, operation, details or {}
+                )
+        for path in paths:
+            _append_durably(path, encoded)
 
 
-def _append_durably(path: Path, text: str) -> None:
-    """Append one line under an exclusive lock and flush it to disk.
-
-    Concurrent readers of the project wait for the lock instead of interleaving,
-    and the line is on disk before the caller opens any test image.
-    """
+@contextlib.contextmanager
+def _locked(path: Path) -> Iterator[None]:
+    """Hold the exclusive lock of one log, waiting for another writer to finish."""
     path.parent.mkdir(parents=True, exist_ok=True)
     lock = FileLock(path.with_name(f"{path.name}.lock"))
     deadline = time.monotonic() + LOG_LOCK_TIMEOUT_SECONDS
@@ -1042,12 +1243,20 @@ def _append_durably(path: Path, text: str) -> None:
                 ) from error
             time.sleep(0.05)
     try:
-        with path.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
+        yield
     finally:
         lock.release()
+
+
+def _append_durably(path: Path, text: str) -> None:
+    """Append one line and flush it to disk; the caller holds the log's lock.
+
+    The line is on disk before the caller opens any test image.
+    """
+    with path.open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def refuse_conflicting_repeat(

@@ -9,12 +9,13 @@ import pytest
 from jute_disease import cli as cli_module
 from jute_disease.cli import main
 from jute_disease.config import BENCHMARK_CONFIG
-from jute_disease.data import load_manifest
+from jute_disease.data import ColorThresholdBackend, load_manifest
 from jute_disease.data.manifest import load_protected_test_manifest
 from jute_disease.evaluation import (
     receipt_manifest_digest,
     training_description,
     training_receipt_digest,
+    write_leaf_prediction_receipt,
     write_prediction_receipt,
 )
 from jute_disease.training import RunStore, load_benchmark
@@ -25,6 +26,7 @@ LABEL_COUNT = 2
 SYSTEM = "mobilenet_v2_direct"
 FIT = "fixture/mobilenet_v2_direct/seed-{}"
 LEAF_FIT = "fixture/mobilenet_v2_direct/leaf-seed-{}"
+LEAF_MARKER = "leaf-of.json"
 ANALYSES = [
     "background-probe",
     "border-probe",
@@ -204,6 +206,41 @@ def _issue_receipts(store: RunStore, freeze: Path) -> None:
             fit_manifest_sha256=receipt_manifest_digest(description),
             predictions_sha256=hashlib.sha256(predictions.read_bytes()).hexdigest(),
         )
+    for marker in sorted(store.root.rglob(LEAF_MARKER)):
+        _issue_leaf_receipt(store, record_hash, marker)
+
+
+def _issue_leaf_receipt(store: RunStore, record_hash: str, marker: Path) -> None:
+    """Write the receipt ``predict-leaf-only`` writes, for one fixture leaf-only run."""
+    run_dir = marker.parent
+    fit_id = run_dir.relative_to(store.root).as_posix()
+    of = json.loads(marker.read_text(encoding="utf-8"))["of"]
+    source = store.receipt(of)
+    assert source is not None
+    description, kind, artifact = training_description(source, of)
+    predictions = run_dir / "predictions.json"
+    ids = json.loads(predictions.read_text(encoding="utf-8"))["image_ids"]
+    backend = ColorThresholdBackend()
+    write_leaf_prediction_receipt(
+        run_dir,
+        record_hash=record_hash,
+        fit_id=fit_id,
+        of=of,
+        source_training_receipt_sha256=training_receipt_digest(store.run_dir(of)),
+        source_artifact_kind=kind,
+        source_artifact_sha256=artifact["sha256"],
+        preprocessing={
+            "fit": description.get("preprocessing"),
+            "leaf_only": {
+                "mask_model": backend.model,
+                "mask_version": backend.version,
+                "fill": [124, 116, 104],
+                "letterbox": 64,
+            },
+        },
+        sample_ids=ids,
+        predictions_sha256=hashlib.sha256(predictions.read_bytes()).hexdigest(),
+    )
 
 
 def _complete_fit(
@@ -243,8 +280,13 @@ def _leaf_run(
     flip: int,
     ids: list[str] | None = None,
 ) -> dict[str, object]:
-    """Write a leaf-only run's predictions and return its run-record entry."""
+    """Write a leaf-only run's predictions and return its run-record entry.
+
+    A marker names the full fit, so ``_issue_receipts`` can stand in for
+    ``predict-leaf-only`` the way it stands in for ``predict-test``.
+    """
     _predictions(target, store.run_dir(fit_id) / "predictions.json", flip, ids)
+    _write(store.run_dir(fit_id) / LEAF_MARKER, {"of": of})
     return {
         "fit_id": fit_id,
         "system": SYSTEM,

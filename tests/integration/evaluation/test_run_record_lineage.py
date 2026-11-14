@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from jute_disease.data import ColorThresholdBackend
 from jute_disease.evaluation import (
     FreezeRecordError,
     authorize_test_read,
@@ -13,6 +14,7 @@ from jute_disease.evaluation import (
     training_description,
     training_receipt_digest,
     write_freeze_record,
+    write_leaf_prediction_receipt,
     write_prediction_receipt,
     write_run_record,
 )
@@ -84,6 +86,40 @@ def _issue(freeze: Path, runs: Path, fit_id: str = FIT) -> Path:
         ).hexdigest(),
     )
     return run_dir
+
+
+def _issue_leaf(freeze: Path, runs: Path, leaf: str, of: str = FIT) -> None:
+    """Write the leaf-only predictions and receipt ``predict-leaf-only`` writes."""
+    store = RunStore(runs)
+    description, kind, artifact = training_description(store.receipt(of), of)
+    run_dir = store.run_dir(leaf)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    predictions = run_dir / "predictions.json"
+    ids = ["a", "b"]
+    predictions.write_text(
+        json.dumps({"image_ids": ids, "predictions": ["x", "x"]}), encoding="utf-8"
+    )
+    backend = ColorThresholdBackend()
+    write_leaf_prediction_receipt(
+        run_dir,
+        record_hash=json.loads(freeze.read_text(encoding="utf-8"))["hash"],
+        fit_id=leaf,
+        of=of,
+        source_training_receipt_sha256=training_receipt_digest(store.run_dir(of)),
+        source_artifact_kind=kind,
+        source_artifact_sha256=artifact["sha256"],
+        preprocessing={
+            "fit": description.get("preprocessing"),
+            "leaf_only": {
+                "mask_model": backend.model,
+                "mask_version": backend.version,
+                "fill": [124, 116, 104],
+                "letterbox": 64,
+            },
+        },
+        sample_ids=ids,
+        predictions_sha256=hashlib.sha256(predictions.read_bytes()).hexdigest(),
+    )
 
 
 def _complete_deep(store: RunStore, *, seed: int = 42) -> Path:
@@ -203,10 +239,19 @@ def test_a_probe_variant_takes_the_lineage_of_the_fit_it_was_made_from(
     checkpoint = _complete_deep(RunStore(runs))
     (runs / "predictions.json").write_text('{"predictions":[]}', encoding="utf-8")
     _issue(freeze, runs)
+    _issue_leaf(freeze, runs, f"{FIT}-leaf")
 
     record = write_run_record(
         freeze,
-        [_run(), _run(f"{FIT}-leaf", variant="leaf_only", of=FIT)],
+        [
+            _run(),
+            _run(
+                f"{FIT}-leaf",
+                variant="leaf_only",
+                of=FIT,
+                predictions=f"{FIT}-leaf/predictions.json",
+            ),
+        ],
         runs,
         tmp_path / "run-record.json",
     )

@@ -170,6 +170,8 @@ from jute_disease.data.sources import (
 )
 from jute_disease.data.synthetic import SyntheticPlan, make_synthetic_data
 from jute_disease.data.transforms import (
+    IMAGENET_MEAN,
+    IMAGENET_STD,
     ImageWithMask,
     PreprocessingSpec,
     classical_pipeline,
@@ -182,6 +184,8 @@ __all__ = [
     "DECISION_FILE",
     "DEFAULT_BUDGET_SECONDS",
     "DEFAULT_MAX_BYTES",
+    "IMAGENET_MEAN",
+    "IMAGENET_STD",
     "INVENTORY_FILE",
     "PHASH_THRESHOLD",
     "PLANTDOC",
