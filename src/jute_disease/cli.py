@@ -101,6 +101,7 @@ from jute_disease.training import (
 )
 from jute_disease.training.benchmark import load_benchmark
 from jute_disease.training.engines.ml import predict_ml
+from jute_disease.training.process import exit_on_sigterm
 
 Handler = Callable[[argparse.Namespace], None]
 
@@ -475,6 +476,10 @@ def _queue_status(args: argparse.Namespace) -> None:
 
 
 def _queue_run(args: argparse.Namespace) -> None:
+    # Fit children live in their own sessions, so the lab runner's group signal
+    # cannot reach them. Exiting on SIGTERM unwinds through run_child, which
+    # kills each running fit before this process goes away.
+    exit_on_sigterm()
     workspace = _workspace_from(args)
     matrix = workspace.benchmark
     if workspace.data.policy_dir is None and (

@@ -79,3 +79,42 @@ def test_an_interrupted_wait_kills_the_child(
     monkeypatch.setattr(subprocess.Popen, "wait", interrupt)
     with pytest.raises(KeyboardInterrupt):
         run_child(_python("import time; time.sleep(60)"), 60, tmp_path / "c.log")
+
+
+def test_sigterm_while_waiting_kills_the_child_and_exits(tmp_path: Path) -> None:
+    import signal
+    import threading
+
+    import psutil
+
+    from jute_disease.training.process import exit_on_sigterm
+
+    pid_file = tmp_path / "child.pid"
+    code = (
+        f"open({str(pid_file)!r}, 'w').write(str(__import__('os').getpid()))\n"
+        "import time; time.sleep(60)\n"
+    )
+
+    def deliver() -> None:
+        deadline = time.monotonic() + 20
+        while not pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        signal.raise_signal(signal.SIGTERM)
+
+    previous = signal.getsignal(signal.SIGTERM)
+    exit_on_sigterm()
+    sender = threading.Thread(target=deliver)
+    sender.start()
+    try:
+        with pytest.raises(SystemExit) as stopped:
+            run_child(_python(code), 60, tmp_path / "c.log")
+    finally:
+        sender.join()
+        signal.signal(signal.SIGTERM, previous)
+
+    assert stopped.value.code == 128 + signal.SIGTERM
+    pid = int(pid_file.read_text())
+    deadline = time.monotonic() + 10
+    while psutil.pid_exists(pid) and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert not psutil.pid_exists(pid)
