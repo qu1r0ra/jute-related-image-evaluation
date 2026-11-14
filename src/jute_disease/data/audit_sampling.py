@@ -162,6 +162,7 @@ def sample_edges(
     design: dict[str, Any],
     grouping_version: str,
     seed: int = 42,
+    inventory_digests: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Draw the audit pairs from a recorded stratum design.
 
@@ -170,6 +171,10 @@ def sample_edges(
     its other strata proportionally or by Neyman allocation, with at least one pair
     per stratum. Strata with population N and n sampled give each pair an inclusion
     probability n / N.
+
+    ``inventory_digests`` maps each pool to the inventory digest of the freeze its
+    images came from. It is recorded so the gate can be bound to that freeze, and
+    must name exactly the pools present.
     """
     threshold = grouping_threshold(grouping_version)
     design = validate_design(design)
@@ -182,6 +187,8 @@ def sample_edges(
         by_pool[str(images[path][2])].append(path)
     if unknown := sorted(set(by_pool) - set(design["pools"])):
         raise ValueError(f"design has no budget for pool(s) {', '.join(unknown)}")
+    if inventory_digests is not None and set(inventory_digests) != set(by_pool):
+        raise ValueError("inventory digests must name exactly the pools sampled")
     family_of, quality = _families(images, by_pool, threshold)
     bins = {"merged": merged_bins(threshold), "near_miss": near_miss_bins(threshold)}
     rng = random.Random(seed)
@@ -286,6 +293,7 @@ def sample_edges(
         "seed": seed,
         "grouping_version": grouping_version,
         "threshold": threshold,
+        **({"inventory_digests": dict(inventory_digests)} if inventory_digests else {}),
         "design": design,
         "pools": pools,
         "strata": strata,

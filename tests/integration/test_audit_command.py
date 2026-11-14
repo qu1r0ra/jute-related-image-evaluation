@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import json
 import random
 import subprocess
@@ -12,6 +13,8 @@ from jute_disease import cli
 
 BASE = [sys.executable, "-m", "jute_disease.cli", "data"]
 AGENT = ["--agent-name", "test-agent", "--agent-version", "t1"]
+DIGESTS = {pool: hashlib.sha256(pool.encode()).hexdigest() for pool in "ABC"}
+DIGEST_ARGS = [f"--inventory-digest={pool}={d}" for pool, d in DIGESTS.items()]
 
 
 def run(capsys: pytest.CaptureFixture[str], *argv: str) -> Any:
@@ -60,6 +63,7 @@ def make_cohort(
                 str(hashes),
                 "--grouping-version",
                 version,
+                *DIGEST_ARGS,
             )
         ),
         encoding="utf-8",
@@ -214,12 +218,21 @@ def test_evaluation_reports_exact_bounds_per_pool_and_names_the_agent(
     assert report["agent"] == {"name": "test-agent", "version": "t1"}
     assert set(report["specific_agreement_by_pool"]) == {"A", "B", "C"}
     assert report["kappa_interval"][0] < report["kappa"] < report["kappa_interval"][1]
-    assert set(json.loads(gate.read_text("utf-8"))) == {
-        "kappa_interval",
-        "threshold",
-        "pass",
-        "method",
-    }
+    record = json.loads(gate.read_text("utf-8"))
+    assert record["cohort_digest"] == report["cohort_digest"]
+    assert record["grouping_version"] == "dhash-v1"
+    assert record["hamming_threshold"] == 4
+    assert record["inventory_digests"] == DIGESTS
+    assert record["threshold"] == 0.6
+    assert record["kappa_interval"] == report["kappa_interval"]
+    assert (
+        record["wrong_merge"]["upper"] == report["wrong_merge"]["by_pool"]["C"]["upper"]
+    )
+    assert record["wrong_merge"]["limit"] == 0.05
+    assert (
+        record["false_split"]["upper"] == report["false_split"]["by_pool"]["C"]["upper"]
+    )
+    assert record["false_split"]["limit"] == 0.20
     for kind in ("wrong_merge", "false_split"):
         overall = report[kind]["overall"]
         assert overall["rate"] <= overall["upper"] and "lower" not in overall

@@ -32,6 +32,8 @@ from jute_disease.data.grouping import flip_canonical_dhash
 from jute_disease.data.inventory import read_inventory
 from jute_disease.data.manifest import load_complete_manifest
 
+from .gate_records import gate_record
+
 LABELS = ("Healthy", "Mosaic")
 FAMILIES_PER_LABEL = 24
 HEALTHY_CAP = 12
@@ -200,12 +202,10 @@ def frozen(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Frozen]:
     )
     (state.base / "agreement.json").write_text(
         json.dumps(
-            {
-                "kappa_interval": [0.7, 0.9],
-                "threshold": 0.6,
-                "pass": True,
-                "method": "bootstrap",
-            }
+            gate_record(
+                inventory_digest(build_inventory(state.target_images, workers=2)),
+                version="dhash-v2",
+            )
         ),
         encoding="utf-8",
     )
@@ -229,6 +229,8 @@ def frozen(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Frozen]:
                 "2",
                 "--grouping-version",
                 "dhash-v2",
+                "--pool",
+                "C",
                 "--agreement-results",
                 str(state.base / "agreement.json"),
                 "--plantvillage-root",
