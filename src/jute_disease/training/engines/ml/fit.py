@@ -8,7 +8,6 @@ sweeps. The test partition is never opened.
 """
 
 import hashlib
-import json
 import time
 from pathlib import Path
 from typing import Any
@@ -36,6 +35,7 @@ from jute_disease.models.ml import (
 )
 from jute_disease.training.benchmark import FitSpec, Recipe
 from jute_disease.training.inputs import DataInputs, target_manifest_for_fit
+from jute_disease.training.receipts import write_json_atomic
 from jute_disease.training.results import FitResult
 
 FIT_PARTITIONS = ("train", "val")
@@ -177,10 +177,7 @@ def fit_classical(
             y_val,
         )
         path = attempt / "tuning.json"
-        path.write_text(
-            json.dumps(selection, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        write_json_atomic(path, selection)
         return FitResult(
             {
                 "fit": fit.fit_id,

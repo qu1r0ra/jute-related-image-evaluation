@@ -21,11 +21,18 @@ def directory(tmp_path: Path) -> Path:
     return tmp_path / "run" / "checkpoints"
 
 
-def _train(directory: Path, epochs: int = 2, attempt: str = "attempt-1") -> None:
+def _train(
+    directory: Path,
+    epochs: int = 2,
+    attempt: str = "attempt-1",
+    best: str | None = None,
+) -> None:
     """What a child leaves behind after ``epochs`` epochs."""
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "last.ckpt").write_bytes(f"state-{epochs}".encode())
-    record_progress(directory, attempt, epochs)
+    if best is not None:
+        (directory / best).write_bytes(b"best weights")
+    record_progress(directory, attempt, epochs, best=directory / best if best else None)
 
 
 def _aside(directory: Path) -> list[str]:
@@ -104,6 +111,29 @@ def test_a_checkpoint_with_no_progress_record_is_refused(directory: Path) -> Non
     plan = prepare_checkpoints(directory, IDENTITY, "attempt-2")
     assert plan.checkpoint is None
     assert plan.refusal == "no complete checkpoint with its recorded bytes"
+
+
+def test_a_resume_keeps_its_best_checkpoint(directory: Path) -> None:
+    prepare_checkpoints(directory, IDENTITY, "attempt-1")
+    _train(directory, best="best-00.ckpt")
+    plan = prepare_checkpoints(directory, IDENTITY, "attempt-2")
+    assert plan.checkpoint == directory / "last.ckpt"
+    assert plan.refusal is None
+    assert _aside(directory) == []
+
+
+def test_a_resume_whose_best_checkpoint_is_missing_is_refused(
+    directory: Path,
+) -> None:
+    prepare_checkpoints(directory, IDENTITY, "attempt-1")
+    _train(directory, best="best-00.ckpt")
+    (directory / "best-00.ckpt").unlink()
+    plan = prepare_checkpoints(directory, IDENTITY, "attempt-2")
+    assert plan.checkpoint is None
+    assert plan.resumed_from is None
+    assert plan.refusal == "the best checkpoint is missing"
+    assert _aside(directory) == ["checkpoints-0"]
+    assert not (directory / "last.ckpt").exists()
 
 
 def test_finished_training_is_never_resumed(directory: Path) -> None:

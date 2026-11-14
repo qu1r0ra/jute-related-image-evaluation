@@ -7,7 +7,6 @@ opened. The checkpoint is the one the ``ModelCheckpoint`` callback selected on
 validation loss, and the evidence needed for a receipt is returned, not written.
 """
 
-import json
 import math
 import random
 import shutil
@@ -40,6 +39,7 @@ from jute_disease.training.logger import (
     METRICS_FILE,
     experiment_loggers,
 )
+from jute_disease.training.receipts import write_json_atomic
 from jute_disease.training.results import FitResult
 from jute_disease.training.resume import (
     CHECKPOINT_DIR,
@@ -149,7 +149,12 @@ class ProgressRecord(ModelCheckpoint):
         staging = last.with_suffix(".ckpt.tmp")
         trainer.save_checkpoint(staging)
         staging.replace(last)
-        record_progress(self.directory, self.attempt, trainer.current_epoch + 1)
+        record_progress(
+            self.directory,
+            self.attempt,
+            trainer.current_epoch + 1,
+            best=self.best_model_path or None,
+        )
 
 
 def training_callbacks(
@@ -511,5 +516,5 @@ def tune_cnn(
         "test_accessed": False,
     }
     path = attempt / "tuning.json"
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", "utf-8")
+    write_json_atomic(path, payload)
     return FitResult(payload, {"tuning": path})

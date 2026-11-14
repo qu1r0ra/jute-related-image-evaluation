@@ -707,6 +707,12 @@ def make_executor(
     """Run one fit as a child, bounded by ``timeout``, and receipt the result."""
 
     def execute(fit: FitSpec, timeout: float) -> Outcome:
+        # One writer per run directory for the whole attempt, so a second queue
+        # on the same runs is refused rather than interleaved.
+        with store.exclusive(fit.fit_id):
+            return attempt(fit, timeout)
+
+    def attempt(fit: FitSpec, timeout: float) -> Outcome:
         if fit.kind is FitKind.CLASSICAL:
             prepare = find_fit(workspace, "classical/prepare")
             if store.resolve(prepare.fit_id, identity(prepare)) is not Resume.SKIP:
