@@ -156,6 +156,7 @@ def _fit_images(
     }
 
 
+@pytest.mark.slow
 def test_resumed_datamodule_fit_matches_uninterrupted_fit_bit_for_bit(
     tmp_path: Path,
 ) -> None:
