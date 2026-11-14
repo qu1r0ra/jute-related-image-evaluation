@@ -9,6 +9,7 @@ from jute_disease.training.benchmark import (
     load_benchmark,
 )
 from jute_disease.training.inputs import DataInputs
+from jute_disease.training.lock import FileLock, FitLockedError
 from jute_disease.training.logger import (
     experiment_loggers,
     get_logger,
@@ -34,6 +35,7 @@ from jute_disease.training.queue import (
 )
 from jute_disease.training.receipts import (
     ActiveRun,
+    CompletedFitError,
     Resume,
     RunState,
     RunStore,
@@ -101,6 +103,9 @@ __all__ = [
     "run_job",
     "subprocess_launcher",
     "ActiveRun",
+    "CompletedFitError",
+    "FileLock",
+    "FitLockedError",
     "DataInputs",
     "FitResult",
     "StackError",

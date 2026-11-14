@@ -572,3 +572,130 @@ def test_lab_runner_timeout_terminates_descendant_processes(tmp_path: Path) -> N
             break
         time.sleep(0.1)
     assert marker.read_text(encoding="utf-8") == "terminated"
+
+
+# Raw, so the backslash-n escapes inside the driver's own string literals reach
+# the generated file as written instead of becoming real newlines.
+_QUEUE_DRIVER = r"""
+import subprocess
+import sys
+from pathlib import Path
+
+from jute_disease.training.process import exit_on_sigterm, run_child
+
+work = Path(sys.argv[1])
+sidecar_code = (
+    "import os, signal, sys, time\n"
+    "from pathlib import Path\n"
+    "def stop(*_):\n"
+    "    time.sleep(1.5)\n"
+    "    Path(sys.argv[2]).write_text(str(time.time()))\n"
+    "    sys.exit(0)\n"
+    "signal.signal(signal.SIGTERM, stop)\n"
+    "Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+    "time.sleep(60)\n"
+)
+fit_code = (
+    "import os, time\n"
+    "from pathlib import Path\n"
+    f"Path({str(work / 'fit.pid')!r}).write_text(str(os.getpid()))\n"
+    "time.sleep(60)\n"
+)
+exit_on_sigterm()
+# A slow-dying member of the queue's own process group, then a fit child in its
+# own session, as the queue launches them.
+subprocess.Popen(
+    [sys.executable, "-c", sidecar_code, str(work / "sidecar.pid"),
+     str(work / "sidecar.exited")]
+)
+run_child([sys.executable, "-c", fit_code], 120, work / "fit.log")
+"""
+
+
+def _is_running(pid: int) -> bool:
+    import psutil
+
+    try:
+        return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
+
+
+@pytest.mark.skipif(BASH is None, reason="Linux shell runner requires bash")
+@pytest.mark.skipif(
+    os.name == "nt", reason="Linux process-group behavior is checked in CI"
+)
+def test_a_killed_queue_leaves_no_child_and_frees_the_lock_last(
+    tmp_path: Path,
+) -> None:
+    import fcntl
+
+    driver = tmp_path / "queue_driver.py"
+    driver.write_text(_QUEUE_DRIVER, encoding="utf-8")
+    lock = tmp_path / "run.lock"
+    output = tmp_path / "owner.out"
+    with output.open("wb") as stream:
+        owner = subprocess.Popen(
+            [
+                BASH,
+                str(RUN_COMMAND),
+                str(lock),
+                "120",
+                sys.executable,
+                str(driver),
+                str(tmp_path),
+            ],
+            stdout=stream,
+            stderr=subprocess.STDOUT,
+        )
+    pids: dict[str, int] = {}
+    try:
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline and len(pids) < 2:
+            assert owner.poll() is None, (
+                "the queue process exited before both children started: "
+                + output.read_text(encoding="utf-8", errors="replace")
+            )
+            for name in ("fit", "sidecar"):
+                pid_file = tmp_path / f"{name}.pid"
+                if name not in pids and pid_file.exists():
+                    recorded = pid_file.read_text(encoding="utf-8")
+                    if recorded:
+                        pids[name] = int(recorded)
+            time.sleep(0.05)
+        assert set(pids) == {"fit", "sidecar"}, "the children never started"
+        # The signal must land on a live queue with both children running.
+        assert owner.poll() is None
+        assert _is_running(pids["fit"]) and _is_running(pids["sidecar"])
+
+        owner.send_signal(15)
+
+        held_while_a_child_lived = False
+        acquired_at = None
+        with lock.open("a") as probe:
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                try:
+                    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    if _is_running(pids["sidecar"]):
+                        held_while_a_child_lived = True
+                    time.sleep(0.02)
+                    continue
+                acquired_at = time.time()
+                break
+        assert acquired_at is not None, "the lock was never released"
+        owner.wait(timeout=20)
+
+        assert held_while_a_child_lived
+        assert not _is_running(pids["sidecar"])
+        assert not _is_running(pids["fit"])
+        exited_at = float((tmp_path / "sidecar.exited").read_text(encoding="utf-8"))
+        assert exited_at <= acquired_at
+        assert owner.returncode == 128 + 15
+    finally:
+        if owner.poll() is None:
+            owner.kill()
+        for pid in pids.values():
+            if _is_running(pid):
+                os.kill(pid, 9)

@@ -1,6 +1,7 @@
 """The shared CNN fit on tiny frozen fixtures: CPU, resnet18, 64 px, no test pixels."""
 
 import csv
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from jute_disease.training import (
     fit_cnn,
     load_benchmark,
     training_callbacks,
+    tune_cnn,
 )
 
 from ...conftest import Inputs
@@ -120,6 +122,29 @@ def test_target_fit_records_the_callback_selected_checkpoint(
     assert len(val_losses) == 2
     assert results["checkpoint"]["val_loss"] == pytest.approx(min(val_losses))
     assert results["seconds_per_epoch"] > 0
+
+
+def test_tuning_json_is_installed_atomically(
+    recipe: Recipe,
+    data: DataInputs,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installed: list[str] = []
+    replace_file = os.replace
+
+    def spy(source: str | Path, target: str | Path) -> None:
+        installed.append(Path(target).name)
+        replace_file(source, target)
+
+    monkeypatch.setattr(os, "replace", spy)
+    result = tune_cnn(
+        replace(_target(), phase="tune"), recipe, data, tmp_path, pretrained=False
+    )
+
+    assert "tuning.json" in installed
+    assert result.artifacts["tuning"].is_file()
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 def test_fit_never_opens_or_reports_the_test_partition(

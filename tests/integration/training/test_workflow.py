@@ -16,6 +16,7 @@ from jute_disease.training import (
     ChildResult,
     DataInputs,
     FitKind,
+    FitLockedError,
     FitSpec,
     Job,
     ProgressRecord,
@@ -565,6 +566,51 @@ def test_a_fit_killed_mid_run_resumes_with_matching_identity_and_lineage(
     resume_note = json.loads((run_dir / "attempt-2" / "resume.json").read_text("utf-8"))
     assert resume_note["refusal"] is None
     assert resume_note["resumed_from"] == resumed
+
+
+def test_a_resume_is_refused_when_its_best_checkpoint_is_missing(
+    inputs: Inputs, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = _three_epoch_workspace(inputs, tmp_path)
+    store = RunStore(workspace.runs_dir)
+    identity = make_identity(workspace, store)
+    launcher = _KillAfterEpoch(workspace, monkeypatch)
+    execute = make_executor(workspace, store, identity, launcher)
+    fit = _fit(workspace, "cnn/tiny_direct/seed-42")
+    checkpoints = store.run_dir(fit.fit_id) / "checkpoints"
+
+    launcher.kill_at = 2
+    assert execute(fit, 1800).state is RunState.FAILED
+    (best,) = checkpoints.glob("best-*.ckpt")
+    best.unlink()
+
+    launcher.kill_at = None
+    assert execute(fit, 1800).state is RunState.COMPLETED
+
+    assert launcher.jobs[1].resume_from is None
+    results = store.receipt(fit.fit_id)["results"]
+    assert results["training_state"]["refused"] == "the best checkpoint is missing"
+    assert results["epochs_run"] == 3
+    assert len(results["epoch_seconds"]) == 3
+    assert (store.run_dir(fit.fit_id) / "superseded" / "checkpoints-0").is_dir()
+
+
+def test_a_second_writer_to_a_fit_is_refused_before_it_starts(
+    inputs: Inputs, tmp_path: Path
+) -> None:
+    workspace = _three_epoch_workspace(inputs, tmp_path, epochs=1)
+    store = RunStore(workspace.runs_dir)
+    launcher = InProcess(workspace)
+    execute = make_executor(workspace, store, make_identity(workspace, store), launcher)
+    fit = _fit(workspace, "cnn/tiny_direct/seed-42")
+
+    with RunStore(workspace.runs_dir).exclusive(fit.fit_id):
+        with pytest.raises(FitLockedError):
+            execute(fit, 1800)
+    assert launcher.jobs == []
+    assert store.state(fit.fit_id) is RunState.PLANNED
+
+    assert execute(fit, 1800).state is RunState.COMPLETED
 
 
 def test_an_incompatible_resume_is_refused_and_trains_fresh(

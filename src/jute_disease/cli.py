@@ -8,6 +8,7 @@ import argparse
 import json
 import sys
 from collections.abc import Callable, Sequence
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -106,6 +107,7 @@ from jute_disease.training import (
 )
 from jute_disease.training.benchmark import load_benchmark
 from jute_disease.training.engines.ml import predict_ml
+from jute_disease.training.process import exit_on_sigterm
 
 Handler = Callable[[argparse.Namespace], None]
 
@@ -520,6 +522,10 @@ def _queue_status(args: argparse.Namespace) -> None:
 
 
 def _queue_run(args: argparse.Namespace) -> None:
+    # Fit children live in their own sessions, so the lab runner's group signal
+    # cannot reach them. Exiting on SIGTERM unwinds through run_child, which
+    # kills each running fit before this process goes away.
+    exit_on_sigterm()
     workspace = _workspace_from(args)
     matrix = workspace.benchmark
     if workspace.data.policy_dir is None and (
@@ -561,6 +567,55 @@ def _queue_run(args: argparse.Namespace) -> None:
 
 def _evaluate_aggregate(args: argparse.Namespace) -> None:
     aggregate_metrics(args.fit_ids, args.output, args.runs_dir)
+
+
+def _evaluate_bootstrap_coverage(args: argparse.Namespace) -> None:
+    from jute_disease.evaluation import coverage_grid, simulate_coverage
+
+    try:
+        if args.grid:
+            report = [
+                asdict(item)
+                for item in coverage_grid(
+                    replicates=args.replicates,
+                    resamples=args.resamples,
+                    seed=args.seed,
+                )
+            ]
+        else:
+            report = asdict(
+                simulate_coverage(
+                    replicates=args.replicates,
+                    resamples=args.resamples,
+                    seed=args.seed,
+                )
+            )
+    except ValueError as error:
+        raise SystemExit(f"bootstrap coverage blocked: {error}") from error
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(
+            json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+    _print_json(report)
+
+
+def _add_bootstrap_coverage(actions: argparse._SubParsersAction) -> None:
+    coverage = actions.add_parser(
+        "bootstrap-coverage",
+        help="Report the nested bootstrap's empirical coverage on synthetic data.",
+    )
+    coverage.add_argument("--replicates", type=int, default=200)
+    coverage.add_argument("--resamples", type=int, default=200)
+    coverage.add_argument("--seed", type=int, default=42)
+    coverage.add_argument(
+        "--grid",
+        action="store_true",
+        help="Report coverage over family count and split spread, for a mean "
+        "and a two-system difference, instead of one configuration.",
+    )
+    coverage.add_argument("--output", type=Path)
+    coverage.set_defaults(run=_evaluate_bootstrap_coverage)
 
 
 def _manuscript_fixture(args: argparse.Namespace) -> None:
@@ -1045,6 +1100,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     aggregate.set_defaults(run=_evaluate_aggregate)
     evaluate_actions.add_parser("predict", help="Classify one image (forwarded).")
+    _add_bootstrap_coverage(evaluate_actions)
     _add_gated_evaluator(evaluate_actions)
 
     manuscript = commands.add_parser(

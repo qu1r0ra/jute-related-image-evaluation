@@ -1,4 +1,4 @@
-"""Source screening, the Healthy image cap and the strict View 2 subset, via the CLI.
+"""Source screening, the equal Healthy image count and the strict View 2 subset, via the CLI.
 
 A small structured target is frozen with the real command (dhash-v2 grouping,
 screened against two source packages that contain planted copies of target
@@ -341,12 +341,13 @@ def test_healthy_cap_is_one_image_count_in_every_policy(
             for policy in POLICIES:
                 path = output / "C" / f"view{view}" / policy / f"draw-{draw}.json"
                 payload = json.loads(path.read_text())
+                unit = "path" if policy == "image-random" else "family"
                 kept = {
-                    row["family"]
+                    row[unit]
                     for row in payload["entries"]
                     if row["label"] == "Healthy" and row["partition"] == "train"
                 }
-                dropped = {row["family"] for row in payload["healthy_cap_excluded"]}
+                dropped = {row[unit] for row in payload["healthy_cap_excluded"]}
                 assert not kept & dropped
     again = tmp_path / "again"
     assert frozen.policies(again, "--healthy-cap", str(HEALTHY_CAP)) == receipt
@@ -359,14 +360,28 @@ def test_unreachable_healthy_cap_stops_output(frozen: Frozen, tmp_path: Path) ->
     assert not output.exists()
 
 
-def test_cap_that_does_not_bind_removes_nothing(frozen: Frozen, tmp_path: Path) -> None:
+def test_cap_above_every_policy_still_equalises_the_counts(
+    frozen: Frozen, tmp_path: Path
+) -> None:
     output = tmp_path / "loose"
-    frozen.policies(output)
+    receipt = frozen.policies(output)
     for draw in range(10):
         for view in (1, 2):
+            counts = {}
             for policy in POLICIES:
                 path = output / "C" / f"view{view}" / policy / f"draw-{draw}.json"
-                assert json.loads(path.read_text())["healthy_cap_excluded"] == []
+                payload = json.loads(path.read_text())
+                kept = payload["image_support"]["train"]["Healthy"]
+                counts[policy] = kept
+            assert len(set(counts.values())) == 1, (view, draw, counts)
+            assert max(counts.values()) <= receipt["healthy_cap"]["images"]
+    assert any(
+        json.loads((output / "C" / "view1" / policy / f"draw-{draw}.json").read_text())[
+            "healthy_cap_excluded"
+        ]
+        for policy in POLICIES
+        for draw in range(10)
+    )
 
 
 def _hashes(frozen: Frozen) -> dict[str, int]:
