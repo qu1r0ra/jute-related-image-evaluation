@@ -159,7 +159,7 @@ def test_plan_order_is_core_classical_plantvillage_then_plantdoc(benchmark) -> N
         ["mobilenet_v2_direct"] * 900 + ["efficientnet_b5_imagenet"] * 90
     )
     assert classical.fits[0].kind is FitKind.PREPARE
-    assert len(classical.fits) == 3271
+    assert len(classical.fits) == 3453
     assert pv.fits[0].fit_id == "source/tune/plantvillage"
     assert [f.fit_id for f in pv.fits[1:4]] == [
         "source/plantvillage/seed-42",
@@ -319,3 +319,33 @@ def test_the_queue_declares_no_deadline_or_budget() -> None:
         "source_seconds",
         "target_seconds",
     }
+
+
+def test_prepare_fits_are_declared_per_draw_and_classical_fits_depend_on_them(
+    benchmark,
+) -> None:
+    fits = benchmark.fits()
+    prepares = [fit for fit in fits if fit.kind is FitKind.PREPARE]
+    ids = {fit.fit_id for fit in prepares}
+    assert len(ids) == len(prepares)
+    reserves = [fit for fit in prepares if fit.phase == "tune"]
+    assert len(reserves) == len(benchmark.pools)
+    draws = len(benchmark.pools) * len(benchmark.views)
+    draws *= len(benchmark.policies) * len(benchmark.splits)
+    assert len(prepares) == len(benchmark.pools) + draws
+    for fit in fits:
+        dependency = benchmark.prepare_dependency(fit)
+        if fit.kind is not FitKind.CLASSICAL:
+            assert dependency is None
+            continue
+        assert dependency in ids
+        prepared = next(p for p in prepares if p.fit_id == dependency)
+        assert prepared.pool == fit.pool
+        if fit.phase == "tune":
+            assert prepared.phase == "tune"
+        else:
+            assert (prepared.view, prepared.policy, prepared.split) == (
+                fit.view,
+                fit.policy,
+                fit.split,
+            )

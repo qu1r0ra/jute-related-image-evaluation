@@ -1,10 +1,11 @@
 """The classical fits: deterministic features, train-only scaling, explicit weights.
 
 Features come from the same frozen train and validation partitions the CNN fits
-read, extracted once per feature set into an explicit cache. A fit scales with
-statistics from its training rows only, applies balanced sample weights where the
-estimator supports them and records where it does not, and never calibrates or
-sweeps. The test partition is never opened.
+read, extracted once per policy draw and feature set into an explicit cache that
+every classical fit requires. A fit scales with statistics from its training rows
+only, applies balanced sample weights where the estimator supports them and
+records where it does not, and never calibrates or sweeps. The test partition is
+never opened.
 """
 
 import hashlib
@@ -22,7 +23,6 @@ from jute_disease.data import (
     ManifestDataset,
     classical_pipeline,
     file_sha256,
-    load_manifest,
 )
 from jute_disease.models.ml import (
     FEATURE_EXTRACTORS,
@@ -34,7 +34,12 @@ from jute_disease.models.ml import (
     select_classical_configuration,
 )
 from jute_disease.training.benchmark import FitSpec, Recipe
-from jute_disease.training.inputs import DataInputs, target_manifest_for_fit
+from jute_disease.training.inputs import (
+    DataInputs,
+    ImageCache,
+    open_image_cache,
+    target_manifest_for_fit,
+)
 from jute_disease.training.receipts import write_json_atomic
 from jute_disease.training.results import FitResult
 
@@ -62,17 +67,23 @@ def _matrix(
     cache_dir: Path,
     require_cache: bool = False,
     pool: str = "",
-) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    images: ImageCache | None = None,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any], float]:
+    """One feature matrix, its pinned description and the seconds it took."""
     dataset = ManifestDataset(
         manifest,
         partition,
         data.target_root(pool) if pool else data.image_root,
         transform=classical_pipeline(recipe.image_size, include_mask=True),
+        cache_root=None if images is None else images.root,
+        spec=None if images is None else images.spec,
     )
     extractor = _extractor(features, recipe)
+    started = time.perf_counter()
     x, y = extract_features(
         dataset, extractor, cache_dir=cache_dir, require_cache=require_cache
     )
+    seconds = time.perf_counter() - started
     info = {
         "key": feature_cache_key(dataset.identity, extractor, len(dataset)),
         "rows": int(x.shape[0]),
@@ -80,26 +91,43 @@ def _matrix(
         "x_sha256": hashlib.sha256(np.ascontiguousarray(x)).hexdigest(),
         "y_sha256": hashlib.sha256(np.ascontiguousarray(y)).hexdigest(),
     }
-    return x, y, info
+    return x, y, info, seconds
 
 
 def prepare_features(
     fit: FitSpec, recipe: Recipe, data: DataInputs, cache_dir: Path | str
 ) -> FitResult:
-    """Extract every declared feature set for train and validation, once.
+    """Extract every declared feature set for the fit's draw, once.
 
-    The matrices are cached under ``cache_dir`` and pinned in the receipt by
-    digest, so later fits can be checked against exactly these features.
+    ``fit`` names one policy draw (or a pool's reserve), whose train and
+    validation images are extracted. The matrices are cached under ``cache_dir``
+    and pinned in the receipt by digest, so the classical fits of that draw can
+    be checked against exactly these features. The seconds spent extracting are
+    recorded, so the compute budget counts them.
+
+    Raises:
+        ImageCacheError: an image cache is configured and does not verify.
     """
     started = time.perf_counter()
     cache = Path(cache_dir)
-    manifest = load_manifest(data.target_dir)
-    features: dict[str, dict[str, Any]] = {}
+    manifest = target_manifest_for_fit(fit, recipe, data)
+    pool = fit.pool
+    images = open_image_cache(
+        data,
+        recipe,
+        manifest,
+        data.target_root(pool) if pool else data.image_root,
+        FIT_PARTITIONS,
+    )
+    features: dict[str, dict[str, Any]] = {name: {} for name in FEATURE_EXTRACTORS}
+    extraction_seconds = 0.0
     for name in FEATURE_EXTRACTORS:
-        features[name] = {
-            partition: _matrix(manifest, partition, name, recipe, data, cache)[2]
-            for partition in FIT_PARTITIONS
-        }
+        for partition in FIT_PARTITIONS:
+            _, _, info, seconds = _matrix(
+                manifest, partition, name, recipe, data, cache, pool=pool, images=images
+            )
+            features[name][partition] = info
+            extraction_seconds += seconds
     artifacts = {
         f"{name}-{partition}-{suffix}": cache / f"{entry['key']}{extension}"
         for name, partitions in features.items()
@@ -111,7 +139,9 @@ def prepare_features(
             "fit": fit.fit_id,
             "recipe": {"image_size": recipe.image_size},
             "manifest": manifest.digest(),
+            "image_cache": None if images is None else images.identity,
             "features": features,
+            "extraction_seconds": extraction_seconds,
             "seconds": time.perf_counter() - started,
             "test_accessed": False,
         },
@@ -145,7 +175,14 @@ def fit_classical(
     attempt.mkdir(parents=True, exist_ok=True)
     cache = Path(cache_dir)
     manifest = target_manifest_for_fit(fit, recipe, data)
-    x_train, y_train, train_info = _matrix(
+    images = open_image_cache(
+        data,
+        recipe,
+        manifest,
+        data.target_root(fit.pool) if fit.pool else data.image_root,
+        FIT_PARTITIONS,
+    )
+    x_train, y_train, train_info, _ = _matrix(
         manifest,
         "train",
         fit.features,
@@ -154,8 +191,9 @@ def fit_classical(
         cache,
         require_cache,
         pool=fit.pool,
+        images=images,
     )
-    x_val, y_val, val_info = _matrix(
+    x_val, y_val, val_info, _ = _matrix(
         manifest,
         "val",
         fit.features,
@@ -164,7 +202,9 @@ def fit_classical(
         cache,
         require_cache,
         pool=fit.pool,
+        images=images,
     )
+    image_cache = None if images is None else images.identity
 
     if fit.phase == "tune":
         selection = select_classical_configuration(
@@ -189,6 +229,7 @@ def fit_classical(
                 "selected_reserve_macro_f1": selection["selected_macro_f1"],
                 "configurations": selection["configurations"],
                 "reserve": train_info | {"validation": val_info},
+                "image_cache": image_cache,
                 "scaling": "train-only",
                 "test_accessed": False,
             },
@@ -223,6 +264,7 @@ def fit_classical(
             "manifest": manifest.digest(),
             "rows": {"train": train_info["rows"], "val": val_info["rows"]},
             "feature_cache": {"train": train_info, "val": val_info},
+            "image_cache": image_cache,
             "scaling": "train-only",
             "weighting": {"requested": WEIGHTING, "status": model.weighting},
             "calibration": False,
