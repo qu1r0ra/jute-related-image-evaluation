@@ -53,6 +53,16 @@ class QueueLimits:
         }[kind]
 
 
+def prepare_reserve_id(pool: str) -> str:
+    """The prepare fit of one pool's tuning reserve."""
+    return f"classical/prepare/pool-{pool}/reserve"
+
+
+def prepare_draw_id(pool: str, view: int, policy: str, split: int) -> str:
+    """The prepare fit of one policy draw."""
+    return f"classical/prepare/pool-{pool}/view-{view}/{policy}/split-{split}"
+
+
 # Learning-rate candidates of one tuning fit, as multiples of the base rate.
 LEARNING_RATE_MULTIPLIERS = (0.1, 1.0, 10.0)
 
@@ -106,6 +116,14 @@ class Benchmark:
             return None if tuning is None else tuning.fit_id
         return f"cnn/tune/{fit.system}/pool-{fit.pool}"
 
+    def prepare_dependency(self, fit: FitSpec) -> str | None:
+        """The prepare fit whose feature cache a classical ``fit`` requires."""
+        if fit.kind is not FitKind.CLASSICAL:
+            return None
+        if fit.phase == "tune":
+            return prepare_reserve_id(fit.pool)
+        return prepare_draw_id(fit.pool, fit.view, fit.policy, fit.split)
+
     def timeout(self, fit: FitSpec) -> float:
         """The limit for one attempt; a CNN tuning fit trains every candidate."""
         seconds = self.limits.timeout(fit.kind)
@@ -132,7 +150,32 @@ class Benchmark:
             len(self.pools) * len(self.policies) * len(self.views) * len(self.splits)
             == 1
         )
-        out: list[FitSpec] = [FitSpec("classical/prepare", FitKind.PREPARE, 0)]
+        out: list[FitSpec] = []
+        for pool in self.pools:
+            out.append(
+                FitSpec(
+                    prepare_reserve_id(pool),
+                    FitKind.PREPARE,
+                    0,
+                    pool=pool,
+                    phase="tune",
+                )
+            )
+        for pool in self.pools:
+            for view in self.views:
+                for policy in self.policies:
+                    for split in self.splits:
+                        out.append(
+                            FitSpec(
+                                prepare_draw_id(pool, view, policy, split),
+                                FitKind.PREPARE,
+                                0,
+                                pool=pool,
+                                view=view,
+                                policy=policy,
+                                split=split,
+                            )
+                        )
         for estimator in self.estimators:
             for features in self.features:
                 for pool in self.pools:

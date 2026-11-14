@@ -129,6 +129,11 @@ class Workspace:
                     key: str(value)
                     for key, value in (self.data.pool_roots or {}).items()
                 },
+                "image_cache_dir": (
+                    None
+                    if self.data.image_cache_dir is None
+                    else str(self.data.image_cache_dir)
+                ),
                 "sources": sources,
                 "runs_dir": str(self.runs_dir),
                 "cache_dir": str(self.cache_dir),
@@ -156,6 +161,11 @@ class Workspace:
                 pool_roots={
                     key: Path(value) for key, value in raw.get("pool_roots", {}).items()
                 },
+                image_cache_dir=(
+                    None
+                    if raw.get("image_cache_dir") is None
+                    else Path(raw["image_cache_dir"])
+                ),
             ),
             runs_dir=Path(raw["runs_dir"]),
             cache_dir=Path(raw["cache_dir"]),
@@ -211,6 +221,11 @@ def open_workspace(
                 key: Path(root).resolve()
                 for key, root in (data.pool_roots or {}).items()
             },
+            image_cache_dir=(
+                None
+                if data.image_cache_dir is None
+                else Path(data.image_cache_dir).resolve()
+            ),
         ),
         runs_dir=runs,
         cache_dir=cache,
@@ -315,11 +330,7 @@ def run_job(workspace: Workspace, job: Job) -> None:
         result = prepare_features(fit, recipe, data, workspace.cache_dir)
     elif fit.kind is FitKind.CLASSICAL:
         store = RunStore(workspace.runs_dir)
-        prepare = find_fit(workspace, "classical/prepare")
-        if (
-            store.resolve(prepare.fit_id, make_identity(workspace, store)(prepare))
-            is not Resume.SKIP
-        ):
+        if not _prepared(workspace, store, make_identity(workspace, store), fit):
             raise ValueError("Prepared feature cache has no valid compatible receipt")
         selected_parameters = tuning_selection(workspace, store, fit)
         result = fit_classical(
@@ -328,7 +339,7 @@ def run_job(workspace: Workspace, job: Job) -> None:
             data,
             job.attempt_dir,
             workspace.cache_dir,
-            require_cache=data.policy_dir is None and fit.phase != "tune",
+            require_cache=True,
             selected_parameters=selected_parameters,
         )
     else:
@@ -418,14 +429,31 @@ def _tuning_marker(workspace: Workspace, store: RunStore, fit: FitSpec) -> Any:
         return "unavailable"
 
 
+def _prepared(
+    workspace: Workspace, store: RunStore, identity: IdentityFor, fit: FitSpec
+) -> bool:
+    """Whether the prepare fit of ``fit``'s draw has a valid compatible receipt."""
+    prepare_id = workspace.benchmark.prepare_dependency(fit)
+    if prepare_id is None:
+        return True
+    prepare = find_fit(workspace, prepare_id)
+    return store.resolve(prepare.fit_id, identity(prepare)) is Resume.SKIP
+
+
 def _manifest_digests(
     workspace: Workspace, fit: FitSpec, verifier: Any
 ) -> dict[str, str]:
-    from jute_disease.data import load_manifest, load_source_manifest
+    from jute_disease.data import (
+        ImageCacheError,
+        PreprocessingSpec,
+        image_cache_identity,
+        load_manifest,
+        load_source_manifest,
+    )
 
     target = (
         target_manifest_for_fit(fit, workspace.benchmark.recipe, workspace.data)
-        if fit.kind in (FitKind.TARGET, FitKind.CLASSICAL)
+        if fit.kind in (FitKind.TARGET, FitKind.CLASSICAL, FitKind.PREPARE)
         else load_manifest(workspace.data.target_dir)
     )
     digests = {
@@ -438,6 +466,16 @@ def _manifest_digests(
             ("train", "val"),
         ),
     }
+    if workspace.data.image_cache_dir is not None and fit.kind is not FitKind.SOURCE:
+        try:
+            digests["image_cache"] = image_cache_identity(
+                workspace.data.image_cache_dir,
+                PreprocessingSpec(size=workspace.benchmark.recipe.image_size),
+                target,
+                ("train", "val"),
+            )
+        except ImageCacheError:
+            digests["image_cache"] = "unavailable"
     if fit.kind is FitKind.SOURCE:
         manifest_dir, image_root = workspace.data.sources[fit.stage]
         source = load_source_manifest(
@@ -714,8 +752,7 @@ def make_executor(
 
     def attempt(fit: FitSpec, timeout: float) -> Outcome:
         if fit.kind is FitKind.CLASSICAL:
-            prepare = find_fit(workspace, "classical/prepare")
-            if store.resolve(prepare.fit_id, identity(prepare)) is not Resume.SKIP:
+            if not _prepared(workspace, store, identity, fit):
                 return Outcome(
                     RunState.FAILED,
                     0.0,

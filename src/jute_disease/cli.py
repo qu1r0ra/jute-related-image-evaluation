@@ -37,6 +37,7 @@ from jute_disease.data import (
     TARGET_DIR,
     ColorThresholdBackend,
     FreezeBlockedError,
+    ImageCacheError,
     ImageNetExtractor,
     SceneThresholds,
     SourceMismatchError,
@@ -434,15 +435,19 @@ def _freeze_target(args: argparse.Namespace) -> None:
 
 
 def _freeze_cache(args: argparse.Namespace) -> None:
-    _print_json(
-        probe_cache(
+    try:
+        decision = probe_cache(
             args.output,
             image_root=args.image_root,
             budget_seconds=args.budget_seconds,
             max_bytes=args.max_bytes,
             workers=args.workers,
+            cache_dir=args.cache_dir,
+            image_size=args.image_size,
         )
-    )
+    except ImageCacheError as error:
+        raise SystemExit(f"image cache blocked: {error}") from error
+    _print_json(decision)
 
 
 def _freeze_policies(args: argparse.Namespace) -> None:
@@ -504,6 +509,7 @@ def _workspace_from(args: argparse.Namespace) -> Workspace:
                 )
                 if root is not None
             },
+            image_cache_dir=args.image_cache_dir,
         ),
         runs_dir=args.runs_dir,
         cache_dir=args.cache_dir,
@@ -523,7 +529,10 @@ def _train_fit(args: argparse.Namespace) -> None:
         args.checkpoint_dir,
         args.resume_from,
     )
-    run_job(Workspace.load(args.workspace), job)
+    try:
+        run_job(Workspace.load(args.workspace), job)
+    except ImageCacheError as error:
+        raise SystemExit(f"image cache refused: {error}") from error
 
 
 def _stack(args: argparse.Namespace) -> None:
@@ -905,6 +914,15 @@ def _add_workspace_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--plantdoc-root", type=Path, default=PLANTDOC_DIR)
     parser.add_argument("--runs-dir", type=Path, default=RUNS_DIR)
     parser.add_argument("--cache-dir", type=Path, default=ML_FEATURES_DIR)
+    parser.add_argument(
+        "--image-cache-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Content-hashed image cache built by `freeze cache`; every target and "
+            "classical fit reads it and is refused if it does not verify."
+        ),
+    )
     parser.add_argument("--accelerator", default="auto")
     parser.add_argument(
         "--allow-cpu",
@@ -1453,6 +1471,18 @@ def _add_freeze(commands: argparse._SubParsersAction) -> None:
     cache.add_argument("--image-root", type=Path, default=SOURCE_INVENTORY_DIR)
     cache.add_argument("--budget-seconds", type=float, default=DEFAULT_BUDGET_SECONDS)
     cache.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
+    cache.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="Where the cache is built (default: OUTPUT/image_cache).",
+    )
+    cache.add_argument(
+        "--image-size",
+        type=int,
+        default=None,
+        help="Model input size of the preprocessing spec (default: 256).",
+    )
     cache.set_defaults(run=_freeze_cache)
 
     source = actions.add_parser(

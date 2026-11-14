@@ -33,7 +33,11 @@ from jute_disease.training.benchmark import (
     FitSpec,
     Recipe,
 )
-from jute_disease.training.inputs import DataInputs, target_manifest_for_fit
+from jute_disease.training.inputs import (
+    DataInputs,
+    open_image_cache,
+    target_manifest_for_fit,
+)
 from jute_disease.training.logger import (
     METRICS_DIR,
     METRICS_FILE,
@@ -201,6 +205,7 @@ def _data_module(
         image_root = find_source_root(image_root)
         target_dir: Path | None = data.target_dir
         frozen_manifest = None
+        images = None
     else:
         frozen_manifest = target_manifest_for_fit(fit, recipe, data)
         manifest_dir, image_root, target_dir = (
@@ -208,6 +213,7 @@ def _data_module(
             data.target_root(fit.pool) if fit.pool else data.image_root,
             None,
         )
+        images = open_image_cache(data, recipe, frozen_manifest, image_root)
     module = DataModule(
         manifest_dir=manifest_dir,
         frozen_manifest=frozen_manifest,
@@ -219,12 +225,14 @@ def _data_module(
         num_workers=recipe.num_workers,
         pin_memory=pin_memory,
         image_size=recipe.image_size,
-        cache_root=None,
+        cache_root=None if images is None else images.root,
         allow_test=False,
     )
     module.setup("fit")
     assert module.manifest is not None
     manifests = {"train": module.manifest.digest()}
+    if images is not None:
+        manifests["image_cache"] = images.identity
     if target_dir is not None:
         manifests["target"] = load_manifest(target_dir).digest()
     return module, manifests

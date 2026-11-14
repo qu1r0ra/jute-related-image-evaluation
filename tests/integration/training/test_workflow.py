@@ -36,6 +36,8 @@ from jute_disease.training import (
 
 from .conftest import Inputs
 
+PREPARE_DRAW = "classical/prepare/pool-A/view-1/image-random/split-0"
+
 
 def _benchmark_json(path: Path, epochs: int = 1) -> Path:
     raw = json.loads(BENCHMARK_CONFIG.read_text(encoding="utf-8"))
@@ -198,7 +200,7 @@ def test_execute_completes_prepare_then_a_classical_fit(workspace: Workspace) ->
     identity = make_identity(workspace, store)
     execute = make_executor(workspace, store, identity, launcher)
 
-    prepare = _fit(workspace, "classical/prepare")
+    prepare = _fit(workspace, PREPARE_DRAW)
     outcome = execute(prepare, 1800)
     assert outcome.state is RunState.COMPLETED
     assert launcher.limits[-1] == 1800
@@ -218,7 +220,7 @@ def test_missing_prepared_cache_invalidates_receipt_and_blocks_fit(
     launcher = InProcess(workspace)
     identity = make_identity(workspace, store)
     execute = make_executor(workspace, store, identity, launcher)
-    prepare = _fit(workspace, "classical/prepare")
+    prepare = _fit(workspace, PREPARE_DRAW)
     assert execute(prepare, 1800).state is RunState.COMPLETED
     next(workspace.cache_dir.glob("*_X.npy")).unlink()
     assert store.state(prepare.fit_id) is RunState.INTERRUPTED
@@ -235,7 +237,7 @@ def test_missing_prepared_cache_invalidates_receipt_and_blocks_fit(
 def test_changing_cache_location_invalidates_preparation_identity(
     workspace: Workspace,
 ) -> None:
-    prepare = _fit(workspace, "classical/prepare")
+    prepare = _fit(workspace, PREPARE_DRAW)
     store = RunStore(workspace.runs_dir)
     other = replace(workspace, cache_dir=workspace.cache_dir / "other")
     assert make_identity(workspace, store)(prepare) != make_identity(other, store)(
@@ -248,7 +250,7 @@ def test_timeout_is_recorded_and_never_reused(workspace: Workspace) -> None:
     launcher = InProcess(workspace)
     identity = make_identity(workspace, store)
     execute = make_executor(workspace, store, identity, launcher)
-    fit = _fit(workspace, "classical/prepare")
+    fit = _fit(workspace, PREPARE_DRAW)
 
     launcher.override = ChildResult(1, True, 1800.0, "")
     outcome = execute(fit, 1800)
@@ -262,7 +264,7 @@ def test_a_failed_child_records_its_log_tail(workspace: Workspace) -> None:
     store = RunStore(workspace.runs_dir)
     launcher = InProcess(workspace)
     execute = make_executor(workspace, store, make_identity(workspace, store), launcher)
-    fit = _fit(workspace, "classical/prepare")
+    fit = _fit(workspace, PREPARE_DRAW)
 
     launcher.override = ChildResult(2, False, 3.0, "Traceback: boom")
     outcome = execute(fit, 1800)
@@ -276,7 +278,7 @@ def test_a_child_that_exits_zero_without_a_result_fails(workspace: Workspace) ->
     launcher = InProcess(workspace)
     execute = make_executor(workspace, store, make_identity(workspace, store), launcher)
     launcher.override = ChildResult(0, False, 1.0, "")
-    outcome = execute(_fit(workspace, "classical/prepare"), 1800)
+    outcome = execute(_fit(workspace, PREPARE_DRAW), 1800)
     assert outcome.state is RunState.FAILED
     assert "result" in outcome.reason
 
@@ -287,7 +289,7 @@ def test_an_interrupt_marks_the_run_interrupted_and_propagates(
     store = RunStore(workspace.runs_dir)
     launcher = InProcess(workspace)
     execute = make_executor(workspace, store, make_identity(workspace, store), launcher)
-    fit = _fit(workspace, "classical/prepare")
+    fit = _fit(workspace, PREPARE_DRAW)
     launcher.raises = KeyboardInterrupt()
     with pytest.raises(KeyboardInterrupt):
         execute(fit, 1800)
@@ -449,7 +451,7 @@ def test_queue_refuses_to_resume_after_target_bytes_change(
         )
 
     first = go()
-    assert first.outcomes["classical/prepare"] is RunState.COMPLETED
+    assert first.outcomes[PREPARE_DRAW] is RunState.COMPLETED
     ran = len(launcher.jobs)
     manifest = load_manifest(workspace.data.target_dir)
     path = workspace.data.image_root / manifest.partition("train")[0].path

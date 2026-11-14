@@ -47,6 +47,8 @@ CORE_PLAN = [CORE_TUNING[0], *CORE[:3], CORE_TUNING[1], *CORE[3:]]
 CLASSICAL_COMBOS = [
     f"{e}-{x}" for e in ("gnb", "knn", "lr", "svm") for x in ("raw", "crafted")
 ]
+PREPARE_RESERVE = "classical/prepare/pool-A/reserve"
+PREPARE_DRAW = "classical/prepare/pool-A/view-1/image-random/split-0"
 PLANTVILLAGE_TARGETS = [f"cnn/mobilenet_v2_plantvillage/seed-{s}" for s in SEEDS]
 PLANTDOC_TARGETS = [f"cnn/mobilenet_v2_plantvillage_plantdoc/seed-{s}" for s in SEEDS]
 
@@ -275,16 +277,17 @@ def test_runs_core_then_classical_then_plantvillage_then_plantdoc(
     ids = harness.calls
     assert len(ids) == TOTAL
     assert ids[:8] == CORE_PLAN
-    assert ids[8] == "classical/prepare"
-    assert ids[9:17] == [f"classical/tune/A/{combo}" for combo in CLASSICAL_COMBOS]
-    assert ids[17:25] == [f"classical/{combo}" for combo in CLASSICAL_COMBOS]
-    assert ids[25] == "source/tune/plantvillage"
-    assert ids[26:29] == [f"source/plantvillage/seed-{s}" for s in SEEDS]
-    assert ids[29] == "cnn/tune/mobilenet_v2_plantvillage/pool-A"
-    assert ids[30:33] == PLANTVILLAGE_TARGETS
-    assert ids[33:36] == [f"source/plantdoc/seed-{s}" for s in SEEDS]
-    assert ids[36] == "cnn/tune/mobilenet_v2_plantvillage_plantdoc/pool-A"
-    assert ids[37:] == PLANTDOC_TARGETS
+    assert ids[8] == PREPARE_RESERVE
+    assert ids[9] == PREPARE_DRAW
+    assert ids[10:18] == [f"classical/tune/A/{combo}" for combo in CLASSICAL_COMBOS]
+    assert ids[18:26] == [f"classical/{combo}" for combo in CLASSICAL_COMBOS]
+    assert ids[26] == "source/tune/plantvillage"
+    assert ids[27:30] == [f"source/plantvillage/seed-{s}" for s in SEEDS]
+    assert ids[30] == "cnn/tune/mobilenet_v2_plantvillage/pool-A"
+    assert ids[31:34] == PLANTVILLAGE_TARGETS
+    assert ids[34:37] == [f"source/plantdoc/seed-{s}" for s in SEEDS]
+    assert ids[37] == "cnn/tune/mobilenet_v2_plantvillage_plantdoc/pool-A"
+    assert ids[38:] == PLANTDOC_TARGETS
     assert report.arms == {"plantvillage": "complete", "plantdoc": "complete"}
     assert report.escalations == []
     assert harness.overlapped is False
@@ -381,7 +384,8 @@ def test_confirmatory_gate_checks_every_attempt_binding(
 def test_every_step_runs_under_its_configured_timeout(harness: Harness) -> None:
     limits = load_benchmark(BENCHMARK_CONFIG).limits
     harness.run()
-    assert harness.timeouts["classical/prepare"] == limits.prepare_seconds
+    assert harness.timeouts[PREPARE_RESERVE] == limits.prepare_seconds
+    assert harness.timeouts[PREPARE_DRAW] == limits.prepare_seconds
     assert harness.timeouts["classical/lr-raw"] == limits.classical_seconds
     assert harness.timeouts["source/plantvillage/seed-42"] == limits.source_seconds
     assert harness.timeouts[CORE[0]] == limits.target_seconds
@@ -565,7 +569,8 @@ def test_report_records_attempts_outcomes_and_arms(harness: Harness) -> None:
     harness.run()
     saved = harness.saved()
     assert saved["attempts"][CORE[0]] == 2
-    assert saved["attempts"]["classical/prepare"] == 1
+    assert saved["attempts"][PREPARE_RESERVE] == 1
+    assert saved["attempts"][PREPARE_DRAW] == 1
     assert saved["outcomes"][CORE[0]] == "completed"
     assert saved["arms"] == {"plantvillage": "complete", "plantdoc": "complete"}
     assert saved["updated_at"] == "2026-11-01T09:00:00"

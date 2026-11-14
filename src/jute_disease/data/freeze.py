@@ -416,21 +416,35 @@ def probe_cache(
     budget_seconds: float = DEFAULT_BUDGET_SECONDS,
     max_bytes: int = DEFAULT_MAX_BYTES,
     workers: int = 4,
+    cache_dir: Path | None = None,
+    image_size: int | None = None,
 ) -> dict:
-    """Build the bounded train/validation cache and record the cache decision."""
+    """Build the bounded train/validation cache and record the cache decision.
+
+    The cache lands in ``cache_dir`` (default ``output_dir/image_cache``) under
+    the digest of the preprocessing spec for ``image_size``.
+
+    Raises:
+        ImageCacheError: a source image no longer matches its frozen id.
+    """
     output_dir = Path(output_dir)
     manifest = load_manifest(output_dir / TARGET_DIR)
-    spec = PreprocessingSpec()
+    spec = (
+        PreprocessingSpec()
+        if image_size is None
+        else PreprocessingSpec(size=image_size)
+    )
+    destination = output_dir / "image_cache" if cache_dir is None else Path(cache_dir)
     report = build_image_cache(
         manifest,
         image_root,
-        output_dir / "image_cache",
+        destination,
         spec,
         budget_seconds=budget_seconds,
         workers=workers,
     )
     decision = decide_cache(report, max_bytes=max_bytes)
-    root = cache_root(output_dir / "image_cache", spec)
+    root = cache_root(destination, spec)
     write_decision(decision, root)
     return decision
 
