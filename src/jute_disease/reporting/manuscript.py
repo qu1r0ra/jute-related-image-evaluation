@@ -8,6 +8,8 @@ import os
 import re
 import subprocess
 import sys
+from collections.abc import Sequence
+from dataclasses import replace
 from datetime import datetime
 from io import StringIO
 from pathlib import Path, PurePosixPath
@@ -19,7 +21,7 @@ from jute_disease.data import (
     rebuild_partition_assignments,
     validate_partition_fractions,
 )
-from jute_disease.data.manifest import load_complete_manifest
+from jute_disease.data.manifest import Manifest, load_complete_manifest
 
 CLAIM_LIST_URL = (
     "https://github.com/qu1r0ra/jute-related-image-evaluation/issues/108"
@@ -68,6 +70,9 @@ _BASE_EXPORT_OUTPUTS = (
     "rebuild-kit.json",
 )
 _EXPORT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+_KIT_VERSION = 2
+_DRIVE_PATH = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/]")
+_TEXT_SUFFIXES = {".json", ".csv", ".tex", ".txt"}
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -88,6 +93,72 @@ def _write_json(path: Path, value: object) -> None:
         encoding="utf-8",
         newline="\n",
     )
+
+
+def _repository_path(path: Path, root: Path, description: str) -> str:
+    """Return ``path`` as a POSIX path relative to the repository root."""
+    try:
+        return Path(path).resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        raise ValueError(
+            f"{description} must be inside the repository root so that the "
+            "export records a repository-relative path"
+        ) from None
+
+
+def _resolve_repository_path(text: object, root: Path, description: str) -> Path:
+    """Resolve a recorded repository-relative path, refusing anything else."""
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError(f"{description} lineage is malformed")
+    relative = PurePosixPath(text)
+    if relative.is_absolute() or "\\" in text or ":" in text or ".." in relative.parts:
+        raise ValueError(f"{description} lineage is not a repository-relative path")
+    resolved = (root / Path(*relative.parts)).resolve()
+    if not resolved.is_relative_to(root.resolve()):
+        raise ValueError(f"{description} lineage escapes the repository root")
+    return resolved
+
+
+def _portable_command(command: str | Sequence[str], root: Path) -> str:
+    """Join a command line, rewriting absolute path arguments as relative ones."""
+    if isinstance(command, str):
+        return command
+    resolved_root = root.resolve()
+    words: list[str] = []
+    for word in command:
+        if Path(word).is_absolute() or _DRIVE_PATH.match(word):
+            absolute = Path(word)
+            try:
+                word = absolute.resolve().relative_to(resolved_root).as_posix()
+            except ValueError:
+                word = absolute.name
+        words.append(word)
+    return " ".join(words)
+
+
+def _assert_no_machine_paths(output_dir: Path, root: Path) -> None:
+    """Fail when any text output names this machine's filesystem."""
+    needles = {
+        str(root.resolve()),
+        str(output_dir.resolve()),
+        str(Path.home()),
+    }
+    needles |= {needle.replace("\\", "/") for needle in needles}
+    needles |= {needle.replace("\\", "\\\\") for needle in needles}
+    for path in sorted(output_dir.rglob("*")):
+        if not path.is_file() or path.suffix not in _TEXT_SUFFIXES:
+            continue
+        text = path.read_text(encoding="utf-8")
+        if any(needle in text for needle in needles) or _DRIVE_PATH.search(text):
+            raise ValueError(
+                f"export {path.relative_to(output_dir).as_posix()} contains a "
+                "machine path; exports record repository-relative paths only"
+            )
+
+
+def _manifest_bytes(manifest: Manifest) -> bytes:
+    """Serialize a manifest exactly as the freeze writes it."""
+    return (json.dumps(manifest.to_json(), indent=1) + "\n").encode("utf-8")
 
 
 def _label_key(label: str) -> str:
@@ -172,8 +243,13 @@ def _parse_audit_timestamp(value: object, field: str) -> datetime:
     return timestamp
 
 
-def _compute_report(runs_dir: Path) -> dict[str, Any]:
-    """Measure A100 training time from verified completion receipts."""
+def _compute_report(
+    runs_dir: Path, repository_root: Path | None = None
+) -> dict[str, Any]:
+    """Measure A100 training time from verified completion receipts.
+
+    With a repository root the report records ``runs_root`` relative to it.
+    """
     from jute_disease.training import RunStore
 
     runs_dir = Path(runs_dir).resolve()
@@ -256,7 +332,11 @@ def _compute_report(runs_dir: Path) -> dict[str, Any]:
     ]
     return {
         "status": "measured",
-        "runs_root": str(runs_dir),
+        "runs_root": (
+            str(runs_dir)
+            if repository_root is None
+            else _repository_path(runs_dir, repository_root, "training receipts")
+        ),
         "receipts": receipt_records,
         "stages": stage_rows,
         "phases": phase_rows,
@@ -357,6 +437,7 @@ def _classical_tuning_csv() -> str:
 def _evaluation_metrics(
     path: Path | None,
     runs_dir: Path | None,
+    repository_root: Path,
 ) -> tuple[dict[str, int | float], dict[str, Any] | None, bytes | None]:
     """Verify an aggregate against metrics artifacts covered by run receipts."""
     if path is None:
@@ -582,10 +663,12 @@ def _evaluation_metrics(
     return (
         values,
         {
-            "path": str(path),
+            "path": _repository_path(path, repository_root, "evaluation metrics"),
             "sha256": _sha256_bytes(raw),
             "rows": len(rows),
-            "runs_root": str(runs_root),
+            "runs_root": _repository_path(
+                runs_root, repository_root, "training receipts"
+            ),
             "fits": fit_records,
         },
         raw,
@@ -675,6 +758,7 @@ def _evaluation_artifacts(
     bundle_path: Path | None,
     configuration_sha256: str,
     manifest_digest: str,
+    repository_root: Path,
 ) -> tuple[dict[str, int | float], dict[str, Any] | None, dict[str, bytes]]:
     """Import receipt-bound evaluation JSON without opening partition images."""
     if bundle_path is None:
@@ -765,7 +849,7 @@ def _evaluation_artifacts(
         "evaluation/receipt.json": receipt_bytes,
     }
     lineage = {
-        "path": str(root),
+        "path": _repository_path(root, repository_root, "evaluation artifacts"),
         "receipt_sha256": _sha256_bytes(receipt_bytes),
         "configuration_sha256": configuration_sha256,
         "manifest_digest": manifest_digest,
@@ -791,6 +875,7 @@ def _statistics_artifacts(
     configuration_sha256: str,
     manifest_digest: str,
     evaluation_lineage: dict[str, Any] | None,
+    repository_root: Path,
 ) -> tuple[dict[str, int | float], dict[str, Any] | None, dict[str, bytes]]:
     """Import receipt-bound statistics summaries tied to one evaluation report."""
     if bundle_path is None:
@@ -834,7 +919,7 @@ def _statistics_artifacts(
         "statistics/receipt.json": receipt_bytes,
     }
     lineage = {
-        "path": str(root),
+        "path": _repository_path(root, repository_root, "statistics artifacts"),
         "receipt_sha256": _sha256_bytes(receipt_bytes),
         "configuration_sha256": configuration_sha256,
         "manifest_digest": manifest_digest,
@@ -917,13 +1002,20 @@ def export_manuscript(
     statistics_artifacts_path: Path | None = None,
     figure_sources_path: Path | None = None,
     export_id: str | None = None,
-    command: str = "jute-disease manuscript export",
+    command: str | Sequence[str] = "jute-disease manuscript export",
+    repository_root: Path | None = None,
 ) -> dict[str, Any]:
     """Write a table, figure, macro files, rebuild kit and audit template.
 
     The source freeze must already contain a matching manifest and receipt. An
-    existing non-empty output directory is never overwritten.
+    existing non-empty output directory is never overwritten. Every recorded
+    source path is relative to ``repository_root`` (the repository by default);
+    a source outside it is refused, and no machine path may reach an output.
     """
+    from jute_disease.config import ROOT_DIR
+
+    root = Path(ROOT_DIR if repository_root is None else repository_root).resolve()
+    command = _portable_command(command, root)
     freeze_dir = Path(freeze_dir)
     config_path = Path(config_path)
     output_dir = Path(output_dir)
@@ -959,7 +1051,7 @@ def export_manuscript(
     validate_figure_sources(figure_sources)
 
     evaluation_values, evaluation_source, evaluation_bytes = _evaluation_metrics(
-        evaluation_metrics_path, training_runs_dir
+        evaluation_metrics_path, training_runs_dir, root
     )
     configuration_sha256 = _sha256_bytes(config_bytes)
     (
@@ -967,7 +1059,7 @@ def export_manuscript(
         evaluation_artifact_source,
         evaluation_artifact_outputs,
     ) = _evaluation_artifacts(
-        evaluation_artifacts_path, configuration_sha256, manifest.digest()
+        evaluation_artifacts_path, configuration_sha256, manifest.digest(), root
     )
     (
         statistics_values,
@@ -978,12 +1070,13 @@ def export_manuscript(
         configuration_sha256,
         manifest.digest(),
         evaluation_artifact_source,
+        root,
     )
 
     compute_report = (
         _pending_compute_report()
         if training_runs_dir is None
-        else _compute_report(training_runs_dir)
+        else _compute_report(training_runs_dir, root)
     )
     identity_compute_report = {
         "status": compute_report["status"],
@@ -1106,12 +1199,20 @@ def export_manuscript(
         for entry in complete.entries
     ]
     kit = {
-        "version": 1,
+        "version": _KIT_VERSION,
         "seed": manifest.seed,
         "fractions": dict(manifest.fractions),
+        "manifest_digest": complete.digest(),
+        "manifest_sha256": _sha256_bytes(_manifest_bytes(complete)),
+        "manifest": complete.to_json(),
         "entries": kit_entries,
     }
-    _write_json(output_dir / "rebuild-kit.json", kit)
+    # Insertion order is kept: the manifest bytes are checked byte for byte.
+    (output_dir / "rebuild-kit.json").write_text(
+        json.dumps(kit, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
 
     manifest_ref_text = Path(
         os.path.relpath(manifest_path.resolve(), output_dir.resolve())
@@ -1129,6 +1230,7 @@ def export_manuscript(
         "schema_version": 1,
         "export_id": selected_id,
         "command": command,
+        "repository_root": Path(os.path.relpath(root, output_dir.resolve())).as_posix(),
         "configuration": config,
         "source_metadata": source_metadata,
         "configuration_file": "configuration.json",
@@ -1219,20 +1321,80 @@ def export_manuscript(
         "prohibited_claims_reference": CLAIM_LIST_URL,
     }
     _write_json(output_dir / "claim-audit.json", audit)
+    _assert_no_machine_paths(output_dir, root)
     return {"export_id": selected_id, "output_dir": str(output_dir), "macros": macros}
+
+
+def _rebuild_manifest_identity(
+    kit: dict[str, Any],
+    entries: list[dict[str, str]],
+    assignments: dict[str, str],
+) -> Manifest:
+    """Return the recorded manifest with the rebuilt split, or raise on a mismatch."""
+    recorded_digest = kit.get("manifest_digest")
+    recorded_sha256 = kit.get("manifest_sha256")
+    if any(
+        not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+        for value in (recorded_digest, recorded_sha256)
+    ) or not isinstance(kit.get("manifest"), dict):
+        raise ValueError("rebuild kit has no complete manifest identity")
+    try:
+        recorded = Manifest.from_json(kit["manifest"])
+    except (KeyError, TypeError, ValueError, AttributeError) as error:
+        raise ValueError("rebuild kit manifest is malformed") from error
+    if recorded.digest() != recorded_digest:
+        raise ValueError("rebuild kit manifest does not match its recorded digest")
+    if _sha256_bytes(_manifest_bytes(recorded)) != recorded_sha256:
+        raise ValueError("rebuild kit manifest bytes do not match their recorded hash")
+    if recorded.seed != kit["seed"] or dict(recorded.fractions) != kit["fractions"]:
+        raise ValueError("rebuild kit seed or fractions differ from its manifest")
+    by_id = {entry.image_id: entry for entry in recorded.entries}
+    if len(by_id) != len(entries) or any(
+        (found := by_id.get(entry["image_id"])) is None
+        or (found.path, found.label, found.group, found.source, found.partition)
+        != (
+            entry["path"],
+            entry["label"],
+            entry["family_id"],
+            entry["source"],
+            entry["split"],
+        )
+        for entry in entries
+    ):
+        raise ValueError("rebuild kit entries differ from its manifest")
+    rebuilt = replace(
+        recorded,
+        entries=tuple(
+            replace(entry, partition=assignments[entry.image_id])
+            for entry in recorded.entries
+        ),
+    )
+    if rebuilt.digest() != recorded_digest:
+        raise ValueError("rebuilt manifest digest differs from the recorded identity")
+    return rebuilt
 
 
 def rebuild_kit_splits(
     kit_path: Path, image_root: Path, output_path: Path
 ) -> dict[str, Any]:
-    """Verify source bytes and reproduce the kit's deterministic split map."""
+    """Verify source bytes and reproduce the kit's full manifest identity.
+
+    The deterministic split is rebuilt from the recorded families and seed, put
+    back into the recorded complete manifest, and that manifest must reproduce
+    the recorded digest and serialization byte for byte.
+    """
     kit = json.loads(Path(kit_path).read_text(encoding="utf-8"))
     if not isinstance(kit, dict):
         raise ValueError("rebuild kit must be a JSON object")
     entries = kit.get("entries")
+    if kit.get("version") == 1:
+        raise ValueError(
+            "rebuild kit version 1 records only the split map; export it again "
+            f"as version {_KIT_VERSION}"
+        )
     if (
         type(kit.get("version")) is not int
-        or kit["version"] != 1
+        or kit["version"] != _KIT_VERSION
         or type(kit.get("seed")) is not int
         or not isinstance(kit.get("fractions"), dict)
         or not isinstance(entries, list)
@@ -1292,9 +1454,12 @@ def rebuild_kit_splits(
             key for key in sorted(expected) if assignments.get(key) != expected[key]
         )
         raise ValueError(f"rebuilt split differs for image {mismatched}")
+    rebuilt_manifest = _rebuild_manifest_identity(kit, entries, assignments)
     report = {
-        "version": 1,
-        "source_manifest": str(Path(kit_path)),
+        "version": 2,
+        "source_manifest": Path(kit_path).name,
+        "manifest_digest": rebuilt_manifest.digest(),
+        "manifest_sha256": _sha256_bytes(_manifest_bytes(rebuilt_manifest)),
         "verified_images": verified_images,
         "skipped_test_images": skipped_test_images,
         "assignments": dict(sorted(assignments.items())),
@@ -1337,6 +1502,17 @@ def validate_export(output_dir: Path) -> dict[str, Any]:
     complete = load_complete_manifest(manifest_path.parent)
     if manifest.digest() != manifest_artifact.get("manifest_digest"):
         raise ValueError("export lineage manifest digest mismatch")
+    root_reference = metadata.get("repository_root")
+    if (
+        not isinstance(root_reference, str)
+        or PurePosixPath(root_reference).is_absolute()
+        or "\\" in root_reference
+        or ":" in root_reference
+    ):
+        raise ValueError("export repository root reference is not a relative path")
+    root = (output_dir / root_reference).resolve()
+    if not root.is_dir():
+        raise ValueError("export repository root reference does not exist")
     configuration_sha256 = metadata.get("configuration_sha256")
     if not isinstance(configuration_sha256, str):
         raise ValueError("export configuration SHA-256 is malformed")
@@ -1366,7 +1542,13 @@ def validate_export(output_dir: Path) -> dict[str, Any]:
         if not isinstance(evaluation_source.get("runs_root"), str):
             raise ValueError("evaluation metrics receipt lineage is malformed")
         evaluation_values, current_source, current_bytes = _evaluation_metrics(
-            Path(evaluation_source["path"]), Path(evaluation_source["runs_root"])
+            _resolve_repository_path(
+                evaluation_source["path"], root, "evaluation metrics"
+            ),
+            _resolve_repository_path(
+                evaluation_source["runs_root"], root, "training receipts"
+            ),
+            root,
         )
         if current_source != evaluation_source:
             raise ValueError("authoritative evaluation metrics changed after export")
@@ -1386,9 +1568,12 @@ def validate_export(output_dir: Path) -> dict[str, Any]:
             current_evaluation_source,
             evaluation_artifact_outputs,
         ) = _evaluation_artifacts(
-            Path(evaluation_artifact_source["path"]),
+            _resolve_repository_path(
+                evaluation_artifact_source["path"], root, "evaluation artifacts"
+            ),
             configuration_sha256,
             manifest.digest(),
+            root,
         )
         if current_evaluation_source != evaluation_artifact_source:
             raise ValueError("authoritative evaluation artifacts changed after export")
@@ -1406,10 +1591,13 @@ def validate_export(output_dir: Path) -> dict[str, Any]:
             raise ValueError("statistics artifact lineage is malformed")
         statistics_values, current_statistics_source, statistics_outputs = (
             _statistics_artifacts(
-                Path(statistics_source["path"]),
+                _resolve_repository_path(
+                    statistics_source["path"], root, "statistics artifacts"
+                ),
                 configuration_sha256,
                 manifest.digest(),
                 evaluation_artifact_source,
+                root,
             )
         )
         if current_statistics_source != statistics_source:
@@ -1430,7 +1618,8 @@ def validate_export(output_dir: Path) -> dict[str, Any]:
         runs_root = compute_report.get("runs_root")
         if not isinstance(runs_root, str) or not runs_root:
             raise ValueError("measured compute report has no receipts directory")
-        if _compute_report(Path(runs_root)) != compute_report:
+        runs_path = _resolve_repository_path(runs_root, root, "training receipts")
+        if _compute_report(runs_path, root) != compute_report:
             raise ValueError(
                 "compute report differs from authoritative training receipts"
             )
@@ -1512,6 +1701,20 @@ def validate_export(output_dir: Path) -> dict[str, Any]:
     ]
     if kit.get("entries") != expected_kit:
         raise ValueError("rebuild kit entries do not match the authoritative manifest")
+    expected_identity = {
+        "version": _KIT_VERSION,
+        "seed": complete.seed,
+        "fractions": dict(complete.fractions),
+        "manifest_digest": complete.digest(),
+        "manifest_sha256": _sha256_bytes(_manifest_bytes(complete)),
+        "manifest": complete.to_json(),
+        "entries": expected_kit,
+    }
+    if kit != expected_identity:
+        raise ValueError(
+            "rebuild kit manifest identity does not match the authoritative manifest"
+        )
+    _assert_no_machine_paths(output_dir, root)
     validate_figure_sources(
         json.loads((output_dir / "figure-sources.json").read_text(encoding="utf-8"))
     )
@@ -1776,6 +1979,7 @@ def run_manuscript_fixture(output_dir: Path) -> dict[str, Any]:
         export_dir,
         source_metadata=source_metadata,
         command="jute-disease manuscript fixture",
+        repository_root=output_dir,
     )
     rebuild = rebuild_kit_splits(
         export_dir / "rebuild-kit.json",

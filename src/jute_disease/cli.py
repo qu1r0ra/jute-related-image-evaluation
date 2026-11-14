@@ -597,7 +597,8 @@ def _manuscript_export(args: argparse.Namespace) -> None:
             statistics_artifacts_path=args.statistics_artifacts,
             figure_sources_path=args.figure_sources,
             export_id=args.export_id,
-            command="jute-disease " + " ".join(sys.argv[1:]),
+            command=["jute-disease", *sys.argv[1:]],
+            repository_root=args.repository_root,
         )
         _print_json(result)
     except (ValueError, OSError, KeyError) as error:
@@ -1050,6 +1051,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     manuscript_export.add_argument("--figure-sources", type=Path)
     manuscript_export.add_argument("--export-id")
+    manuscript_export.add_argument(
+        "--repository-root",
+        type=Path,
+        help="Root that every recorded source path is relative to (default: "
+        "this repository).",
+    )
     manuscript_export.set_defaults(run=_manuscript_export)
     manuscript_check = manuscript_actions.add_parser(
         "check", help="Check exported macros against the authoritative freeze."
