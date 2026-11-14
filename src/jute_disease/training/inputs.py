@@ -68,6 +68,23 @@ def open_image_cache(
     return ImageCache(cache_root(data.image_cache_dir, spec), spec, identity)
 
 
+def preprocessing_record(images: ImageCache | None) -> dict[str, object]:
+    """Describe how a fit's pixels were prepared, for its receipt.
+
+    Gated inference reads this to prepare test pixels the same way: a fit that
+    read the cache saw images downsized to the cache's shortest side.
+    """
+    from dataclasses import asdict
+
+    if images is None:
+        return {"source": "original"}
+    return {
+        "source": "cache",
+        "spec": asdict(images.spec),
+        "spec_digest": images.spec.digest(),
+    }
+
+
 def target_manifest_for_fit(fit: FitSpec, recipe: Recipe, data: DataInputs) -> Manifest:
     """Return the immutable target manifest selected by one declared fit."""
     from jute_disease.data import load_manifest, load_policy_manifest

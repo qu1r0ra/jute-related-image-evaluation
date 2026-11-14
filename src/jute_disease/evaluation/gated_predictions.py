@@ -21,6 +21,7 @@ from jute_disease.data import (
     DataModule,
     Manifest,
     ManifestDataset,
+    PreprocessingSpec,
     classical_pipeline,
     load_manifest,
     load_policy_complete_manifest,
@@ -153,6 +154,64 @@ def _complete_manifest(
     )
 
 
+def _recorded_image_cache(description: Mapping[str, Any]) -> object:
+    """The image-cache identity a fit's receipt records, however the engine files it."""
+    manifests = (description.get("lineage") or {}).get("manifests") or {}
+    return description.get("image_cache") or manifests.get("image_cache")
+
+
+def _preprocessing_of(
+    description: Mapping[str, Any], image_size: int
+) -> PreprocessingSpec | None:
+    """How the fit's pixels were prepared, so test pixels are prepared the same way.
+
+    ``None`` means the fit read the original images. A fit that read the image
+    cache saw every image downsized to the cache's shortest side, so inference
+    applies the same downsize in memory; it never needs a cache of the test
+    images. A receipt that records a cache without saying how the pixels were
+    prepared, or a spec this code cannot reproduce, is refused before the read
+    is logged.
+    """
+    recorded = description.get("preprocessing")
+    cached = _recorded_image_cache(description)
+    if recorded is None:
+        if cached:
+            raise TestReadRefusedError(
+                "test read refused: the fit read an image cache but its receipt "
+                "records no preprocessing"
+            )
+        return None
+    source = recorded.get("source") if isinstance(recorded, Mapping) else None
+    if source == "original":
+        if cached:
+            raise TestReadRefusedError(
+                "test read refused: the receipt records original pixels and an "
+                "image cache"
+            )
+        return None
+    if source != "cache" or not cached:
+        raise TestReadRefusedError(
+            "test read refused: the receipt's preprocessing record is inconsistent "
+            "with its image cache"
+        )
+    try:
+        spec = PreprocessingSpec(**recorded["spec"])
+    except (KeyError, TypeError) as error:
+        raise TestReadRefusedError(
+            f"test read refused: unreadable preprocessing record: {error}"
+        ) from error
+    if spec.digest() != recorded.get("spec_digest"):
+        raise TestReadRefusedError(
+            "test read refused: the preprocessing record does not match its digest"
+        )
+    if spec != PreprocessingSpec(size=image_size):
+        raise TestReadRefusedError(
+            "test read refused: the fit's preprocessing cannot be reproduced "
+            "at inference"
+        )
+    return spec
+
+
 def _extractor(features: str, image_size: int) -> BaseFeatureExtractor:
     if features not in FEATURE_EXTRACTORS:
         raise FreezeRecordError(f"unknown feature set {features!r}")
@@ -167,6 +226,7 @@ def _deep_labels(
     image_size: int,
     model_name: str,
     checkpoint: Path,
+    preprocessing: PreprocessingSpec | None,
 ) -> tuple[list[str], list[str]]:
     module = DataModule(
         frozen_manifest=manifest,
@@ -175,6 +235,7 @@ def _deep_labels(
         num_workers=0,
         pin_memory=False,
         image_size=image_size,
+        downsize_original=preprocessing is not None,
     )
     module.setup("predict")
     dataset = module.jute_predict
@@ -195,6 +256,7 @@ def _classical_labels(
     image_size: int,
     features: str,
     model_path: Path,
+    preprocessing: PreprocessingSpec | None,
 ) -> tuple[list[str], list[str]]:
     import joblib
 
@@ -203,6 +265,7 @@ def _classical_labels(
         "test",
         image_root,
         transform=classical_pipeline(image_size, include_mask=True),
+        downsize_spec=preprocessing,
     )
     x, _ = extract_features(dataset, _extractor(features, image_size), cache=False)
     predicted = joblib.load(model_path).predict(x)
@@ -284,6 +347,7 @@ def predict_test(
         body, description, fit_id, Path(target_dir), root, policy_dir
     )
     image_size = int(description["recipe"]["image_size"])
+    preprocessing = _preprocessing_of(description, image_size)
     manifest = _complete_manifest(body, description, Path(target_dir), root, policy_dir)
     pool = description.get("pool") or ""
     roots = dict(pool_roots or {})
@@ -317,6 +381,7 @@ def predict_test(
             image_size,
             str(description["model"]),
             artifact_path,
+            preprocessing,
         )
     else:
         image_ids, labels = _classical_labels(
@@ -325,6 +390,7 @@ def predict_test(
             image_size,
             str(description["features"]),
             artifact_path,
+            preprocessing,
         )
     path = run_dir / PREDICTIONS_FILE
     digest = _write_predictions(path, image_ids, labels)

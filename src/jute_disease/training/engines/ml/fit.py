@@ -38,6 +38,7 @@ from jute_disease.training.inputs import (
     DataInputs,
     ImageCache,
     open_image_cache,
+    preprocessing_record,
     target_manifest_for_fit,
 )
 from jute_disease.training.receipts import write_json_atomic
@@ -266,6 +267,7 @@ def fit_classical(
             "rows": {"train": train_info["rows"], "val": val_info["rows"]},
             "feature_cache": {"train": train_info, "val": val_info},
             "image_cache": image_cache,
+            "preprocessing": preprocessing_record(images),
             "scaling": "train-only",
             "weighting": {"requested": WEIGHTING, "status": model.weighting},
             "calibration": False,

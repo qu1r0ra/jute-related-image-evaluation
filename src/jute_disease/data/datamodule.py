@@ -59,8 +59,11 @@ class DataModule(LightningDataModule):
         fold_index: int = 0,
         image_size: int = IMAGE_SIZE,
         allow_test: bool = False,
+        downsize_original: bool = False,
     ) -> None:
         super().__init__()
+        if downsize_original and cache_root is not None:
+            raise ValueError("downsize_original and cache_root are exclusive")
         if (
             sum(
                 value is not None for value in (data_dir, manifest_dir, frozen_manifest)
@@ -135,6 +138,9 @@ class DataModule(LightningDataModule):
             transform=self._train_transform() if train else self._eval_transform(),
             cache_root=self.cache_root,
             spec=self.preprocessing,
+            downsize_spec=self.preprocessing
+            if self.hparams.downsize_original
+            else None,
         )
 
     def setup(self, stage: str | None = None) -> None:

@@ -36,6 +36,7 @@ from jute_disease.training.benchmark import (
 from jute_disease.training.inputs import (
     DataInputs,
     open_image_cache,
+    preprocessing_record,
     target_manifest_for_fit,
 )
 from jute_disease.training.logger import (
@@ -197,7 +198,7 @@ def training_callbacks(
 
 def _data_module(
     fit: FitSpec, recipe: Recipe, data: DataInputs, pin_memory: bool
-) -> tuple[DataModule, dict[str, str]]:
+) -> tuple[DataModule, dict[str, str], dict[str, object]]:
     if fit.kind is FitKind.SOURCE:
         from jute_disease.data import find_source_root
 
@@ -235,7 +236,7 @@ def _data_module(
         manifests["image_cache"] = images.identity
     if target_dir is not None:
         manifests["target"] = load_manifest(target_dir).digest()
-    return module, manifests
+    return module, manifests, preprocessing_record(images)
 
 
 def _uses_cuda(accelerator: str) -> bool:
@@ -320,7 +321,7 @@ def fit_cnn(
     seed_everything(fit.seed)
 
     cuda = _uses_cuda(accelerator)
-    module, manifests = _data_module(fit, recipe, data, cuda)
+    module, manifests, preprocessing = _data_module(fit, recipe, data, cuda)
     backbone = TimmBackbone(
         fit.model,
         pretrained=pretrained and upstream_checkpoint is None,
@@ -403,6 +404,7 @@ def fit_cnn(
     results = {
         "fit": asdict(fit),
         "recipe": asdict(recipe),
+        "preprocessing": preprocessing,
         "checkpoint": {
             "path": best.relative_to(best_root).as_posix(),
             "sha256": file_sha256(best),
