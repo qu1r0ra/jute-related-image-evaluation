@@ -1,6 +1,7 @@
 """Probe and breakdown rules that the CLI fixture is too small to reach."""
 
 import numpy as np
+import pytest
 
 from jute_disease.evaluation.breakdowns import (
     class_scene_cells,
@@ -8,6 +9,8 @@ from jute_disease.evaluation.breakdowns import (
     stratified_sample,
 )
 from jute_disease.evaluation.probes import (
+    EXCHANGEABLE_MIN_SHARE,
+    NOT_INFORMATIVE,
     border_probe,
     family_permutation,
     frame_leaf_share,
@@ -121,6 +124,14 @@ def _mixed_system(
                 groups.append(f"r{r}f{f}")
     if predicted == "truth":
         guess = tuple(truth)
+    elif predicted == "family":
+        # Near-duplicates of one family are predicted alike, whatever their
+        # labels: correlated predictions that carry no label information.
+        chosen = {g: str(rng.choice(list(CLASSES))) for g in dict.fromkeys(groups)}
+        guess = tuple(
+            chosen[g] if rng.random() < 0.8 else str(rng.choice(list(CLASSES)))
+            for g in groups
+        )
     else:
         guess = tuple(str(x) for x in rng.choice(list(CLASSES), size=len(ids)))
     return PredictionSet(
@@ -165,15 +176,22 @@ def test_family_permutation_moves_whole_label_multisets_between_families() -> No
     assert moved > 0
 
 
-def test_probe_null_has_nominal_size_on_mixed_label_families() -> None:
+@pytest.mark.parametrize(("predicted", "lowest"), [("random", 0.02), ("family", 0.01)])
+def test_probe_null_has_valid_size_on_mixed_label_families(
+    predicted: str, lowest: float
+) -> None:
+    # "family" predictions agree within a family, the correlation that makes an
+    # image-level shuffle anti-conservative and motivates the family-level null.
+    # The null never exceeds its nominal size; with correlated predictions it is
+    # conservative, since the constant strata and tied scores favor non-rejection.
     rng = np.random.default_rng(11)
-    simulations = 300
+    simulations = 400
     rejected = 0
     for k in range(simulations):
-        system = _mixed_system(rng, 2)
-        test = permutation_test(system, 99, seed=k)
+        system = _mixed_system(rng, 2, predicted)
+        test = permutation_test(system, 399, seed=k)
         rejected += test.p_value < 0.05
-    assert 0.02 <= rejected / simulations <= 0.09
+    assert lowest <= rejected / simulations <= 0.085
 
 
 def test_probe_null_detects_label_information_on_mixed_label_families() -> None:
@@ -202,6 +220,78 @@ def test_probe_decision_uses_the_permutation_p_value() -> None:
     )
     assert noise.detected == (noise.p_value < 0.05)
     assert noise.macro_f1.lower <= noise.macro_f1.estimate <= noise.macro_f1.upper
+
+
+def test_probe_reports_the_share_of_images_in_exchangeable_strata() -> None:
+    # Families of size 1 and 3 hold two distinct label multisets each, so they
+    # can swap labels; the two size-2 families are identical and cannot.
+    result = probe_result(
+        _mixed_system(np.random.default_rng(3), 1),
+        "found",
+        "none",
+        resamples=20,
+        permutations=19,
+    )
+    assert result.n == 20 and result.families == 10
+    assert result.exchangeable_images == 16
+    assert result.exchangeable_image_share == 0.8
+    assert result.exchangeable_families == 8
+    assert result.exchangeable_family_share == 0.8
+
+
+def _unique_size_system() -> PredictionSet:
+    ids, truth, groups = [], [], []
+    for size in range(1, 9):
+        for j in range(size):
+            ids.append(f"s{size}i{j}")
+            truth.append(CLASSES[size % 2])
+            groups.append(f"fam{size}")
+    return PredictionSet(
+        CLASSES,
+        tuple(ids),
+        tuple(truth),
+        tuple(groups),
+        tuple("src" for _ in ids),
+        {0: tuple(truth)},
+    )
+
+
+def test_probe_with_no_exchangeable_families_is_not_informative() -> None:
+    # Every family has its own size and one label throughout, so no label ever
+    # moves: the observed score equals the null in every draw and the test cannot
+    # say anything.
+    result = probe_result(
+        _unique_size_system(), "found", "none", resamples=20, permutations=49
+    )
+    assert result.exchangeable_image_share == 0.0
+    assert not result.detected
+    assert result.statement == NOT_INFORMATIVE
+    assert "not informative at this exchangeable share" in result.statement
+
+
+def test_not_informative_wording_is_kept_for_a_low_share_without_detection() -> None:
+    assert 0 < EXCHANGEABLE_MIN_SHARE < 1
+    enough = probe_result(
+        _mixed_system(np.random.default_rng(4), 4),
+        "found",
+        "none",
+        resamples=20,
+        permutations=99,
+    )
+    assert enough.exchangeable_image_share >= EXCHANGEABLE_MIN_SHARE
+    assert enough.statement == ("found" if enough.detected else "none")
+
+
+def test_p_value_reports_its_monte_carlo_standard_error() -> None:
+    result = probe_result(
+        _mixed_system(np.random.default_rng(3), 4),
+        "found",
+        "none",
+        resamples=20,
+        permutations=399,
+    )
+    p = result.p_value
+    assert result.p_value_standard_error == (p * (1 - p) / 399) ** 0.5
 
 
 def test_scene_macro_f1_needs_thirty_per_class() -> None:

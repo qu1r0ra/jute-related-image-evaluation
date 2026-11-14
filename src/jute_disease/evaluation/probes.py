@@ -23,8 +23,13 @@ from jute_disease.training.benchmark import PROBE_SYSTEM, Benchmark, is_probe_ba
 __all__ = ["FRAME_WIDTH_PX", "PROBE_SYSTEM", "frame_mask", "frame_only_image"]
 
 LEAF_CUTOFF = 0.05
-PERMUTATIONS = 1000
+PERMUTATIONS = 9_999
 DETECTION_ALPHA = 0.05
+# Prespecified judgment, not an estimate: below this share of test images in
+# exchangeable strata the null moves too few labels for a miss to mean anything,
+# so the report says "not informative" instead of "no detectable information".
+EXCHANGEABLE_MIN_SHARE = 0.5
+NOT_INFORMATIVE = "not informative at this exchangeable share"
 MIN_RETAINED_PER_CLASS = 50
 NO_BORDER = "no detectable border information at this frame width"
 NO_BACKGROUND = "no detectable background information at this setting"
@@ -57,7 +62,10 @@ def probe_fits(benchmark: Benchmark, variant: str) -> tuple[ProbeFit, ...]:
 
 
 def pad_cue_fits(benchmark: Benchmark) -> tuple[ProbeFit, ...]:
-    """Pad-fraction and aspect-ratio-only baseline fits, one per matrix cell."""
+    """Pad-fraction and aspect-ratio-only baseline fits, one per matrix cell.
+
+    Classical only: the inputs are two scalars, so a MobileNetV2 adds nothing.
+    """
     return tuple(
         ProbeFit(fit.fit_id, "pad_cue", fit.fit_id) for fit in benchmark.pad_cue_fits()
     )
@@ -126,6 +134,33 @@ def _family_strata(system: PredictionSet) -> list[tuple[np.ndarray, np.ndarray]]
     return strata
 
 
+@dataclass(frozen=True)
+class Exchangeable:
+    """Images and families in strata whose label multisets can differ.
+
+    A stratum of same-size families is exchangeable when it holds at least two
+    distinct label multisets. Families in any other stratum keep their labels in
+    every draw, so they add the same amount to the observed score and to the
+    null: the test stays valid but loses power in proportion to what they hold.
+    """
+
+    images: int
+    families: int
+    total_images: int
+    total_families: int
+
+
+def exchangeable_share(strata: list[tuple[np.ndarray, np.ndarray]]) -> Exchangeable:
+    images = families = total_images = total_families = 0
+    for index, labels in strata:
+        total_images += index.size
+        total_families += index.shape[0]
+        if len(np.unique(labels, axis=0)) >= 2:
+            images += index.size
+            families += index.shape[0]
+    return Exchangeable(images, families, total_images, total_families)
+
+
 def family_permutation(
     system: PredictionSet,
     rng: np.random.Generator,
@@ -162,6 +197,7 @@ class PermutationTest:
     observed: float
     null: np.ndarray
     p_value: float
+    exchangeable: Exchangeable
 
 
 def permutation_test(
@@ -182,7 +218,9 @@ def permutation_test(
     for i in range(permutations):
         null[i] = _macro_f1(family_permutation(system, rng, strata), predicted, k)
     exceed = int(np.count_nonzero(null >= observed - 1e-12))
-    return PermutationTest(observed, null, (exceed + 1) / (permutations + 1))
+    return PermutationTest(
+        observed, null, (exceed + 1) / (permutations + 1), exchangeable_share(strata)
+    )
 
 
 def permutation_null(
@@ -197,16 +235,25 @@ class ProbeResult:
     """Macro-F1 and accuracy against the chance baselines.
 
     ``detected`` follows the permutation p-value alone; the bootstrap intervals
-    are reported for the reader and do not decide.
+    are reported for the reader and do not decide. ``p_value_standard_error`` is
+    the Monte Carlo error of the p-value from the finite number of draws. The
+    exchangeable fields say how much of the test set the null could permute: a
+    miss below ``EXCHANGEABLE_MIN_SHARE`` is reported as not informative.
     """
 
     n: int
+    families: int
     macro_f1: Interval
     accuracy: Interval
     majority_accuracy: float
     null_p95: float
     p_value: float
+    p_value_standard_error: float
     permutations: int
+    exchangeable_images: int
+    exchangeable_image_share: float
+    exchangeable_families: int
+    exchangeable_family_share: float
     detected: bool
     statement: str
 
@@ -227,16 +274,32 @@ def probe_result(
     counts = np.bincount(system.truth_index(), minlength=len(system.classes))
     test = permutation_test(system, permutations, seed)
     detected = test.p_value < DETECTION_ALPHA
+    share = test.exchangeable
+    image_share = share.images / share.total_images
+    if detected:
+        statement = detected_statement
+    elif image_share < EXCHANGEABLE_MIN_SHARE:
+        statement = NOT_INFORMATIVE
+    else:
+        statement = none_statement
     return ProbeResult(
         n=len(system.image_ids),
+        families=share.total_families,
         macro_f1=macro,
         accuracy=accuracy,
         majority_accuracy=float(counts.max() / counts.sum()),
         null_p95=float(np.percentile(test.null, 95)),
         p_value=test.p_value,
+        p_value_standard_error=float(
+            np.sqrt(test.p_value * (1 - test.p_value) / permutations)
+        ),
         permutations=permutations,
+        exchangeable_images=share.images,
+        exchangeable_image_share=image_share,
+        exchangeable_families=share.families,
+        exchangeable_family_share=share.families / share.total_families,
         detected=detected,
-        statement=detected_statement if detected else none_statement,
+        statement=statement,
     )
 
 

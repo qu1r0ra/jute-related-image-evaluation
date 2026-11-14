@@ -59,6 +59,7 @@ from jute_disease.evaluation.freeze_record import (
     RunEntry,
 )
 from jute_disease.evaluation.probes import (
+    PERMUTATIONS,
     background_probe,
     border_probe,
     subset,
@@ -122,7 +123,7 @@ def evaluate_test(
     frame_leaf_share: Mapping[str, float] | None = None,
     sample_size: int = LEAF_SAMPLE_SIZE,
     resamples: int = 10_000,
-    permutations: int = 1000,
+    permutations: int = PERMUTATIONS,
     seed: int = 42,
 ) -> dict[str, Any]:
     """Score the authorized fits on the test partition and run every analysis."""

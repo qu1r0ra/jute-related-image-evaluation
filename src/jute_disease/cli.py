@@ -85,6 +85,7 @@ from jute_disease.evaluation import (
     write_freeze_record,
     write_run_record,
 )
+from jute_disease.evaluation.probes import PERMUTATIONS
 from jute_disease.reporting import (
     export_manuscript,
     run_manuscript_fixture,
@@ -1428,7 +1429,7 @@ def _add_gated_evaluator(actions: argparse._SubParsersAction) -> None:
     test.add_argument("--reads-log", type=Path)
     test.add_argument("--sample-size", type=int, default=2000)
     test.add_argument("--resamples", type=int, default=10_000)
-    test.add_argument("--permutations", type=int, default=1000)
+    test.add_argument("--permutations", type=int, default=PERMUTATIONS)
     test.set_defaults(run=_evaluate_test)
 
     diagnostics = actions.add_parser(

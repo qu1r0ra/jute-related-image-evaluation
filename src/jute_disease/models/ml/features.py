@@ -163,7 +163,10 @@ class PadCueFeatureExtractor(BaseFeatureExtractor):
     """Letterbox geometry alone: the pad fraction and aspect ratio of the image.
 
     The pad-cue baseline asks how much of a label the shape of the original photo
-    already carries, so it reads the validity mask and never a pixel.
+    already carries, so it reads the validity mask and never a pixel. Its features
+    derive from two scalars, the pad fraction and the aspect ratio, so it is
+    classical only: a MobileNetV2 on them would add nothing a classical fit does
+    not already show, and no MobileNetV2 pad-cue fit exists.
     """
 
     dimensions = 7

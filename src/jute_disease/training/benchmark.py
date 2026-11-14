@@ -128,7 +128,9 @@ class Benchmark:
         """The pad-cue baseline, one classical fit per matrix cell and seed.
 
         It sees only how the letterbox padded the image, so it has no tuning and
-        no feature preparation of its own.
+        no feature preparation of its own. It is classical only: its inputs are
+        two scalars, the pad fraction and the aspect ratio, so a MobileNetV2 on
+        them would add nothing a classical fit does not already show.
         """
         return tuple(
             FitSpec(
