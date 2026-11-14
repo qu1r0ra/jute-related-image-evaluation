@@ -32,6 +32,7 @@ def test_a_failing_child_is_reported_not_raised(tmp_path: Path) -> None:
     assert "boom" in result.tail
 
 
+@pytest.mark.serial
 def test_a_child_past_its_limit_is_killed_with_its_children(tmp_path: Path) -> None:
     pid_file = tmp_path / "grandchild.pid"
     code = (
@@ -81,6 +82,7 @@ def test_an_interrupted_wait_kills_the_child(
         run_child(_python("import time; time.sleep(60)"), 60, tmp_path / "c.log")
 
 
+@pytest.mark.serial
 def test_sigterm_while_waiting_kills_the_child_and_exits(tmp_path: Path) -> None:
     import signal
     import threading

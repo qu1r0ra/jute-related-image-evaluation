@@ -151,6 +151,7 @@ def test_a_missing_index_or_image_is_refused(
         image_cache_identity(cache, spec, frozen, ("train", "val", "test"))
 
 
+@pytest.mark.serial
 def test_concurrent_builders_leave_one_valid_cache(
     frozen: Manifest, synthetic: SyntheticPlan, tmp_path: Path
 ) -> None:
@@ -171,6 +172,7 @@ def test_concurrent_builders_leave_one_valid_cache(
     assert {report.index_sha256 for report in reports} == {reports[0].index_sha256}
 
 
+@pytest.mark.serial
 def test_index_lock_excludes_a_second_holder_until_released(tmp_path: Path) -> None:
     with _index_lock(tmp_path):
         with pytest.raises(ImageCacheError, match="Timed out"):
