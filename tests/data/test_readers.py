@@ -1,5 +1,6 @@
 """Manifest-backed datasets and partition readers."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from jute_disease.data import (
     build_image_cache,
     cache_root,
     open_partition,
+    readers,
 )
 from jute_disease.data.manifest import write_manifest
 
@@ -48,6 +50,66 @@ def test_a_manifest_reader_rejects_changed_image_bytes(
         path.write_bytes(original + b"changed")
         with pytest.raises(ValueError, match="content hash"):
             ManifestDataset(frozen, "train", synthetic.root)
+    finally:
+        path.write_bytes(original)
+
+
+def test_the_verifier_reuses_a_signature_match_off_windows(
+    frozen: Manifest,
+    synthetic: SyntheticPlan,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hashed: list[Path] = []
+    real = readers.file_sha256
+    monkeypatch.setattr(readers.sys, "platform", "linux")
+    monkeypatch.setattr(
+        readers, "file_sha256", lambda path: hashed.append(path) or real(path)
+    )
+    verifier = readers.ManifestContentVerifier()
+
+    verifier.verify(frozen, synthetic.root, ("train",))
+    verifier.verify(frozen, synthetic.root, ("train",))
+
+    assert len(hashed) == len(frozen.partition("train"))
+
+
+def test_the_verifier_never_trusts_a_stat_key_on_windows(
+    frozen: Manifest,
+    synthetic: SyntheticPlan,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hashed: list[Path] = []
+    real = readers.file_sha256
+    monkeypatch.setattr(readers.sys, "platform", "win32")
+    monkeypatch.setattr(
+        readers, "file_sha256", lambda path: hashed.append(path) or real(path)
+    )
+    verifier = readers.ManifestContentVerifier()
+
+    verifier.verify(frozen, synthetic.root, ("train",))
+    verifier.verify(frozen, synthetic.root, ("train",))
+
+    assert len(hashed) == 2 * len(frozen.partition("train"))
+
+
+def test_the_verifier_catches_same_size_bytes_with_a_restored_mtime(
+    frozen: Manifest,
+    synthetic: SyntheticPlan,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(readers.sys, "platform", "win32")
+    verifier = readers.ManifestContentVerifier()
+    verifier.verify(frozen, synthetic.root, ("train",))
+    entry = frozen.partition("train")[0]
+    path = synthetic.root / entry.path
+    original = path.read_bytes()
+    stamp = path.stat()
+    try:
+        path.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+        os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+
+        with pytest.raises(ValueError, match="content hash"):
+            verifier.verify(frozen, synthetic.root, ("train",))
     finally:
         path.write_bytes(original)
 

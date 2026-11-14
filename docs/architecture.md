@@ -52,7 +52,11 @@ family, is keyed by export ID in both macro files. Compute totals use verified
 training receipts and their recorded attempt times. The classical tuning
 budget is nine configurations per family. No latency or edge-device benchmarks
 are reported. `export.json` records the command, embedded configuration and
-its SHA-256, plus the manifest and receipt paths and hashes.
+its SHA-256, plus the manifest and receipt paths and hashes. Every recorded
+source path is relative to the repository root (`repository_root` in
+`export.json`, overridable with `--repository-root`); a source outside it is
+refused, and the export fails if any text output names this machine's
+filesystem.
 `jute-disease manuscript check EXPORT_DIR` recomputes the counts from the
 authoritative frozen manifest and rejects changed macro values, source
 artifacts, table values, training receipt totals, or generated files.
@@ -62,7 +66,11 @@ SHA-256, family ID, split and label for every retained image. Run
 `uv run --locked python scripts/rebuild_splits.py --kit-manifest EXPORT_DIR/rebuild-kit.json --image-root IMAGE_ROOT --output rebuilt-splits.json`
 to verify train and validation source bytes and reconstruct family-level split
 assignments. Test entries contribute their recorded IDs and labels to the split
-rebuild, but the source image files are not opened.
+rebuild, but the source image files are not opened. The kit (version 2) also
+embeds the complete manifest, its digest and the SHA-256 of its serialized
+bytes. The rebuild puts the reconstructed split back into that manifest and
+must reproduce the digest and the bytes, so the kit proves the full manifest
+identity and not only the split map. A version 1 kit is rejected.
 `jute-disease manuscript fixture --output DIR` exercises synthetic image
 creation, target freeze, table/figure and macro export, split reconstruction,
 and the mechanical macro check without real-data training or scoring. Its

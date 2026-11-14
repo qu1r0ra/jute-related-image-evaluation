@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import stat
 import unicodedata
@@ -64,6 +65,26 @@ def _insert_entry(
     keys[key] = relative_path
 
 
+def _signature(info: os.stat_result) -> tuple[int, int, int]:
+    """Return the fields that change when a file is written."""
+    return info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+def _stable_digest(path: Path, before: os.stat_result) -> str:
+    """Hash one file and fail if it changed while it was being read."""
+    with path.open("rb") as handle:
+        opened = os.fstat(handle.fileno())
+        digest = hashlib.file_digest(handle, "sha256").hexdigest()
+        closed = os.fstat(handle.fileno())
+    after = path.lstat()
+    if not (
+        _signature(before) == _signature(opened) == _signature(closed)
+        and _signature(before) == _signature(after)
+    ):
+        raise ValueError(f"Transfer file changed while hashing: {path.name}")
+    return digest
+
+
 def inventory(root: Path) -> dict[str, str]:
     """Hash every regular file and reject unsafe paths and filesystem objects."""
     if root.is_symlink():
@@ -90,8 +111,7 @@ def inventory(root: Path) -> dict[str, str]:
         if info.st_nlink != 1:
             raise ValueError("Transfer batches may not contain hard-linked files")
         relative_path = path.relative_to(resolved_root).as_posix()
-        with path.open("rb") as handle:
-            digest = hashlib.file_digest(handle, "sha256").hexdigest()
+        digest = _stable_digest(path, info)
         _insert_entry(result, keys, relative_path, digest)
     if not result:
         raise ValueError("Transfer batch is empty")

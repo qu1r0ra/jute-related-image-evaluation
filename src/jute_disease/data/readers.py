@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,12 @@ from jute_disease.data.transforms import PreprocessingSpec
 
 
 class ManifestContentVerifier:
-    """Verify manifest files, rehashing any path whose file signature changes."""
+    """Verify manifest files, rehashing any path whose file signature changes.
+
+    On Windows the inode and change time are not stable file identity (the
+    inode may be unset and the change time is the creation time), so a stat
+    signature is never trusted there and every file is rehashed.
+    """
 
     def __init__(self) -> None:
         self._verified: dict[Path, tuple[tuple[int, int, int, int], str]] = {}
@@ -54,7 +60,7 @@ class ManifestContentVerifier:
                 before.st_ctime_ns,
                 before.st_ino,
             )
-            cached = self._verified.get(path)
+            cached = None if sys.platform == "win32" else self._verified.get(path)
             if cached is not None and cached[0] == signature:
                 observed = cached[1]
             else:
