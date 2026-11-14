@@ -10,10 +10,10 @@ in all. The plan fixes in advance:
   together;
 * two one-sided equivalence tests (TOST), one each for Pools A and B, at the
   recorded margin ``EQUIVALENCE_MARGIN``;
-* a leakage claim on the strict View 2 subset of each redraw, framed as
-  expected to be conservative for Pool C (an assumption, not a proved bound) and
-  computed with a paired test, because View 2 is one protected test set per pool
-  and redraw, shared by the policies;
+* a leakage claim on the strict View 2 subset of each redraw, with Pool C's
+  effect framed as a lower bound under a stated, untested assumption
+  (``LEAKAGE_FRAMING``) and computed with a paired test, because View 2 is one
+  protected test set per pool and redraw, shared by the policies;
 * every other policy contrast as an exploratory row for the forest plot.
 """
 
@@ -67,6 +67,9 @@ class Contrast:
         )
 
 
+SPLIT_COUNT = 10
+"""Split means per cell: ADR 0004 fixes ten splits, so every cell has exactly ten."""
+
 IMAGENET_ROUTE = "mobilenet_v2_direct"
 
 PRIMARY_CONTRAST = Contrast("C", 1, IMAGENET_ROUTE, "image-random", "near-duplicate")
@@ -114,13 +117,29 @@ def is_prespecified(contrast: Contrast) -> bool:
     )
 
 
+# Why "lower bound" is kept, and what it rests on (#185 and #179 story 25 require
+# Pool C's effect to be framed as a lower bound; a statistics review asked that it
+# not be worded as a guarantee). The near-duplicate policy still leaks (Pool C
+# under-merges), and residual leakage can only raise that policy's score. The
+# image-random minus near-duplicate gap D therefore understates the leakage
+# effect L (the gap to a leak-free policy), D = L - r with r >= 0, so D is a lower
+# bound on L as a population quantity. That needs an assumption the data cannot
+# check: that residual leakage is the only thing separating the two policies on
+# the strict subset, and that it never lowers the near-duplicate score. The
+# sampling error of D is separate: a confidence interval for D has its lower
+# limit as a lower confidence limit for L only under the same assumption. The
+# wording below keeps the ticket's framing and states the assumption; whether to
+# accept it is the owner's decision, and this module does not claim it is met.
 LEAKAGE_FRAMING = (
-    "The strict View 2 subset keeps only images with no near-duplicate partner "
-    "across the split, so the estimated image-random minus near-duplicate gap is "
-    "expected to be conservative for the leakage effect in Pool C. That is an "
-    "assumption, not a proved bound: the estimate is not a lower bound, and the "
-    "interval's lower limit is not that bound either; it is the lower limit of a "
-    "confidence interval for the strict-subset difference."
+    "Pool C's leakage effect is framed as a lower bound: the near-duplicate "
+    "policy still leaks, and residual leakage can only raise its score, so the "
+    "estimated image-random minus near-duplicate gap on the strict View 2 subset "
+    "is expected to understate the leakage effect. That rests on an assumption "
+    "that is not tested here: that residual leakage is the only difference "
+    "between the policies on those images and never lowers the near-duplicate "
+    "score. The estimate also carries sampling error, and the interval's lower "
+    "limit is a lower limit for the strict-subset gap, so it bounds the leakage "
+    "effect only if the assumption holds."
 )
 
 EQUIVALENCE_NOTE = (
@@ -243,8 +262,8 @@ def leakage_claim(
     strict subset belongs to a split: ``strict_images`` maps each split to the
     image ids of its own strict subset, taken from the policy receipt. Both
     policies are scored on exactly those images in that split, one macro-F1 per
-    split, and the per-split differences go to a paired t test. The estimate is
-    expected to be conservative for Pool C (``LEAKAGE_FRAMING``).
+    split, and the per-split differences go to a paired t test. Pool C's effect
+    is framed as a lower bound, under an assumption stated in ``LEAKAGE_FRAMING``.
     """
     if set(image_random) != set(near_duplicate) or len(image_random) < 2:
         raise ValueError("leakage claim needs the same two or more splits per policy")
@@ -309,6 +328,35 @@ def _compare(
     raise ValueError(f"unknown view {contrast.view}")
 
 
+def _check_cells(cells: Mapping[Cell, Sequence[float]]) -> None:
+    """Refuse cells that are not ten split means each, balanced across policies.
+
+    The generic tests accept any two or more values, so this is the boundary that
+    holds the plan to ADR 0004: a cell with a missing or extra split would still
+    produce a p-value. Policies of one pool, view and route are compared with
+    each other, so a group whose policies differ in length is refused first, and
+    every cell, prespecified or exploratory, must then have exactly ten means.
+    """
+    groups: dict[tuple[str, int, str], dict[str, int]] = {}
+    for cell, values in cells.items():
+        groups.setdefault((cell.pool, cell.view, cell.route), {})[cell.policy] = len(
+            values
+        )
+    for (pool, view, route), counts in groups.items():
+        if len(set(counts.values())) > 1:
+            raise ValueError(
+                f"split means must be balanced across policies for pool {pool}, "
+                f"view {view}, route {route}: {dict(sorted(counts.items()))}"
+            )
+    for cell, values in cells.items():
+        if len(values) != SPLIT_COUNT:
+            raise ValueError(
+                f"pool {cell.pool}, view {cell.view}, route {cell.route}, policy "
+                f"{cell.policy} needs exactly {SPLIT_COUNT} split means, "
+                f"got {len(values)}"
+            )
+
+
 def analyze_split_means(
     cells: Mapping[Cell, Sequence[float]],
     leakage: LeakageClaim,
@@ -316,10 +364,13 @@ def analyze_split_means(
 ) -> AnalysisReport:
     """Run the prespecified analysis on per-split macro-F1 means.
 
-    ``cells`` maps each pool, view, route and policy to its split means.
+    ``cells`` maps each pool, view, route and policy to its split means; every
+    cell must hold exactly ``SPLIT_COUNT`` (ten) means and the policies of a
+    pool, view and route must agree in count, or ``ValueError`` is raised.
     ``validation`` optionally holds the two policies' split means on validation
     draws, from which the power statement for the 2-point effect is computed.
     """
+    _check_cells(cells)
     primary = _compare(cells, PRIMARY_CONTRAST)
     raw = {name: _compare(cells, c) for name, c in SECONDARY_CONTRASTS.items()}
     raw_p = {name: result.p_value for name, result in raw.items()}
@@ -342,7 +393,7 @@ def analyze_split_means(
     secondary[LEAKAGE_TEST] = SecondaryResult(
         LEAKAGE_TEST,
         "strict View 2 subset: image-random minus near-duplicate "
-        "(expected to be conservative)",
+        "(framed as a lower bound, under an untested assumption)",
         leakage.method,
         leakage.estimate,
         leakage.statistic,

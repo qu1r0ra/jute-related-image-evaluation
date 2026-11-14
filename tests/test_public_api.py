@@ -293,6 +293,8 @@ def test_evaluation_analysis_plan_api() -> None:
         "is_prespecified",
         "LEAKAGE_TEST",
         "SECONDARY_CONTRASTS",
+        "PRESPECIFIED_CONTRASTS",
+        "SPLIT_COUNT",
         "PRIMARY_CONTRAST",
         "SECONDARY_TESTS",
         "EQUIVALENCE_MARGIN",

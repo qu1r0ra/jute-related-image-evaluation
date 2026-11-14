@@ -9,8 +9,10 @@ from jute_disease.data.policies import POLICIES
 from jute_disease.evaluation import (
     EQUIVALENCE_MARGIN,
     LEAKAGE_TEST,
+    PRESPECIFIED_CONTRASTS,
     PRIMARY_CONTRAST,
     SECONDARY_TESTS,
+    SPLIT_COUNT,
     Cell,
     Contrast,
     LeakageClaim,
@@ -167,6 +169,46 @@ def test_a_missing_prespecified_cell_is_refused() -> None:
         analyze_split_means(cells, _claim())
 
 
+def test_every_prespecified_cell_needs_exactly_the_ten_split_means() -> None:
+    assert SPLIT_COUNT == 10
+    for contrast in PRESPECIFIED_CONTRASTS:
+        for policy in (contrast.minuend, contrast.subtrahend):
+            cell = Cell(contrast.pool, contrast.view, contrast.route, policy)
+            for count in (2, 9, 11):
+                # Every policy of the group gets the same count, so only the
+                # exact-ten rule can refuse it, not the balance rule.
+                cells = _cells({})
+                for other in POLICIES:
+                    key = Cell(cell.pool, cell.view, cell.route, other)
+                    cells[key] = _ten(0.9)[:1] * count
+                with pytest.raises(ValueError, match="exactly 10"):
+                    analyze_split_means(cells, _claim())
+
+
+def test_cells_must_be_balanced_across_policies() -> None:
+    cells = _cells({})
+    cells[Cell("C", 1, ROUTE, "near-duplicate")] = _ten(0.86)[:8]
+    with pytest.raises(ValueError, match="balanced across policies"):
+        analyze_split_means(cells, _claim())
+
+
+def test_an_exploratory_cell_with_the_wrong_count_is_refused_too() -> None:
+    cells = _cells({})
+    # Pool A view 2 is outside the prespecified cells; its group is still checked.
+    for policy in POLICIES:
+        cells[Cell("A", 2, OTHER_ROUTE, policy)] = _ten(0.9)[:7]
+    with pytest.raises(ValueError, match="exactly 10"):
+        analyze_split_means(cells, _claim())
+
+
+def test_non_finite_split_means_are_refused() -> None:
+    for bad in (math.nan, math.inf):
+        cells = _cells({})
+        cells[Cell("C", 1, ROUTE, "image-random")] = [bad, *_ten(0.9)[1:]]
+        with pytest.raises(ValueError, match="finite"):
+            analyze_split_means(cells, _claim())
+
+
 def test_split_mean_scores_average_macro_f1_over_seeds_per_split() -> None:
     def system(predictions) -> PredictionSet:
         return PredictionSet(
@@ -245,14 +287,21 @@ def test_leakage_claim_restricts_each_split_to_its_own_strict_subset() -> None:
     assert claim.p_value == pytest.approx(reference.p_value)
 
 
-def test_leakage_claim_is_worded_as_expected_to_be_conservative_not_a_bound() -> None:
+def test_leakage_claim_is_framed_as_a_lower_bound_under_a_stated_assumption() -> None:
+    # #185 and #179 (story 25) frame Pool C's effect as a lower bound. The
+    # wording keeps that framing and states what it rests on, so the criterion is
+    # not claimed as a statistical guarantee.
     claim = _claim()
-    assert "expected to be conservative" in claim.framing
-    assert "not a lower bound" in claim.framing
+    assert "lower bound" in claim.framing
+    assert "not a lower bound" not in claim.framing
+    assert "assumption" in claim.framing
+    assert "residual leakage" in claim.framing
+    assert "not tested" in claim.framing
     assert "lower limit" in claim.framing
     report = analyze_split_means(_cells({}), claim)
-    assert "conservative" in report.secondary[LEAKAGE_TEST].label
-    assert "lower bound" not in report.secondary[LEAKAGE_TEST].label
+    label = report.secondary[LEAKAGE_TEST].label
+    assert "lower bound" in label
+    assert "assumption" in label
 
 
 def test_leakage_claim_refuses_a_subset_it_cannot_score() -> None:
