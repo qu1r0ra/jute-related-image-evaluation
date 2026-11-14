@@ -70,6 +70,11 @@ jobs:
         run: uv run --locked python scripts/audit_dependencies.py
 
       - name: Run tests in parallel
+        # One torch thread per worker: parallel workers otherwise oversubscribe
+        # the runner's cores and training tests slow down unpredictably.
+        env:
+          OMP_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
         run: uv run pytest -m "not serial" -n auto --durations=40
 
       - name: Run serial tests
