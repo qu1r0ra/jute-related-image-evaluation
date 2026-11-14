@@ -167,6 +167,8 @@ def evaluate_test(
     }
     if authorization.post_hoc:
         report["note"] = "freeze record created after a test read; results are post-hoc"
+    report["missing_fit_ids"] = list(authorization.missing_fit_ids)
+    report["confirmatory"] = not authorization.missing_fit_ids
     scenes = dict(scenes or {})
     full_systems = sorted(s for s, v in runs if v == "full")
     for system in full_systems:

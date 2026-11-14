@@ -476,6 +476,125 @@ def evaluate_masks_audit(
     return report
 
 
+def _at_least(value: object, threshold: float) -> bool:
+    return (
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and value >= threshold
+    )
+
+
+def _at_most(value: object, limit: float) -> bool:
+    return (
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and value <= limit
+    )
+
+
+def _check_report_counts(
+    report: dict[str, Any], manifest: dict[str, Any], fail_rate: dict[str, Any]
+) -> None:
+    """The report's counts must be the ones the audit manifest implies."""
+    records = manifest.get("records")
+    if not isinstance(records, list) or not records:
+        raise ValueError("mask audit manifest has no records")
+    sampled = Counter(str(row["predicted_scene"]) for row in records)
+    population = {
+        str(row["predicted_scene"]): int(row["stratum_population"]) for row in records
+    }
+    counts = report.get("rating_counts")
+    agent = counts.get("agent_mask") if isinstance(counts, dict) else None
+    owner = counts.get("owner_mask") if isinstance(counts, dict) else None
+    consistent = (
+        fail_rate.get("sampled") == len(records)
+        and fail_rate.get("sampled_by_scene") == dict(sampled)
+        and fail_rate.get("population_by_scene") == population
+        and fail_rate.get("population") == sum(population.values())
+        and isinstance(agent, dict)
+        and sum(agent.values()) == len(records)
+        and isinstance(owner, dict)
+        and sum(owner.values()) == manifest.get("owner_count")
+    )
+    if not consistent:
+        raise ValueError("mask audit report counts disagree with its audit manifest")
+
+
+def audit_report_outcome(
+    report: dict[str, Any], manifest: dict[str, Any]
+) -> dict[str, Any]:
+    """Verify an evaluation report against its audit manifest and derive its outcome.
+
+    The report's own digest must match its content and its ``audit_manifest_digest``
+    must be the digest of ``manifest``, so an edited report or a report for a
+    different sample is rejected. A fixture report is never accepted. The gate
+    outcome is recomputed here from the kappa lower bounds and the fail-rate upper
+    bound against the module thresholds; a stored ``gate_pass`` that disagrees is
+    refused, and no operator-written value is trusted.
+
+    Raises:
+        ValueError: the report is not a clean, genuine, untampered report of
+            ``manifest``.
+    """
+    if not isinstance(report, dict) or report.get("schema") != EVALUATION_SCHEMA:
+        raise ValueError("unsupported mask audit evaluation report")
+    if not isinstance(manifest, dict) or manifest.get("schema") != AUDIT_SCHEMA:
+        raise ValueError("unsupported mask audit manifest")
+    if report.get("fixture_mode") or manifest.get("fixture_mode"):
+        raise ValueError(
+            "a fixture mask audit is not evidence and cannot be bound to a freeze"
+        )
+    digest = report.get("digest")
+    if not isinstance(digest, str) or digest != _canonical_digest(report):
+        raise ValueError("mask audit report digest does not match its content")
+    audit_digest = report.get("audit_manifest_digest")
+    if audit_digest != _canonical_digest(manifest):
+        raise ValueError("mask audit report does not belong to the audit manifest")
+    backend = report.get("mask_backend")
+    recorded = manifest.get("mask_backend")
+    if (
+        not isinstance(backend, dict)
+        or not isinstance(recorded, dict)
+        or backend
+        != {
+            "model": str(recorded.get("model")),
+            "version": str(recorded.get("version")),
+        }
+    ):
+        raise ValueError("mask audit report records a different mask backend")
+    require_colour_threshold(
+        str(backend.get("model", "")), str(backend.get("version", ""))
+    )
+    check = report.get("partition_check")
+    if (
+        not isinstance(check, dict)
+        or check.get("overlaps") != 0
+        or check != manifest.get("partition_check")
+    ):
+        raise ValueError("mask audit report has no clean test-partition check")
+    quality = report.get("mask_quality")
+    scene = report.get("scene_tag")
+    fail_rate = quality.get("fail_rate") if isinstance(quality, dict) else None
+    if not all(isinstance(gate, dict) for gate in (quality, scene, fail_rate)):
+        raise ValueError("mask audit report is missing a gate")
+    _check_report_counts(report, manifest, fail_rate)
+    fail_ok = _at_most(fail_rate.get("upper_95"), MASK_FAIL_RATE_LIMIT)
+    mask_ok = _at_least(quality.get("lower_95"), KAPPA_THRESHOLD) and fail_ok
+    scene_ok = _at_least(scene.get("lower_95"), KAPPA_THRESHOLD)
+    stored = (
+        (fail_rate.get("gate_pass"), fail_ok),
+        (quality.get("gate_pass"), mask_ok),
+        (scene.get("gate_pass"), scene_ok),
+    )
+    if any(flag is not expected for flag, expected in stored):
+        raise ValueError("mask audit report gate flags disagree with its numbers")
+    return {
+        "digest": digest,
+        "audit_manifest_digest": audit_digest,
+        "passed": mask_ok and scene_ok,
+    }
+
+
 def run_masks_fixture(output_dir: Path, *, seed: int = 42) -> dict[str, Any]:
     """Run the full calibration, sample, rating and evaluation path without weights."""
     output_dir = Path(output_dir)

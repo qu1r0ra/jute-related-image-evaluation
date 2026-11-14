@@ -10,7 +10,6 @@ import pytest
 from jute_disease import cli
 from jute_disease.cli import build_parser, main
 
-# evaluate predict is forwarded by main() without argparse.
 FIT_ARGS = [
     "--workspace",
     "w.json",
@@ -31,6 +30,18 @@ RESOLVABLE_COMMANDS = [
     ["queue", "status"],
     ["queue", "run"],
     ["evaluate", "aggregate", "--exp-names", "a"],
+    [
+        "evaluate",
+        "predict-test",
+        "--fit-id",
+        "f",
+        "--run-store",
+        "s",
+        "--target-dir",
+        "t",
+        "--image-root",
+        "i",
+    ],
     ["freeze", "target"],
     ["freeze", "cache", "--budget-seconds", "5"],
     [
@@ -57,11 +68,10 @@ def test_command_resolves_to_handler(argv: list[str]) -> None:
     assert callable(args.run)
 
 
-def test_evaluate_predict_forwards_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
-    mock_predict = MagicMock()
-    monkeypatch.setattr(cli, "predict_ml", mock_predict)
-    main(["evaluate", "predict", "leaf.jpg", "--classifier", "knn"])
-    mock_predict.assert_called_once_with(["leaf.jpg", "--classifier", "knn"])
+def test_ungated_evaluate_predict_is_gone() -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        build_parser().parse_args(["evaluate", "predict", "leaf.jpg"])
+    assert excinfo.value.code == 2
 
 
 @pytest.mark.parametrize(

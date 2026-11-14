@@ -7,7 +7,7 @@ from pathlib import (
     PureWindowsPath,
     WindowsPath,
 )
-from typing import Any
+from typing import Any, BinaryIO
 
 import timm
 import torch
@@ -42,11 +42,13 @@ def state_digest(module: nn.Module) -> str:
     return digest.hexdigest()
 
 
-def read_checkpoint_state(path: Path | str) -> dict[str, Any]:
+def read_checkpoint_state(path: Path | str | BinaryIO) -> dict[str, Any]:
     """Read a checkpoint's tensors without executing pickled code.
 
-    Lightning checkpoints also store the data module's path hyperparameters, so
-    path classes are the only extra types allowed.
+    ``path`` may be an open binary stream, so a caller that verified a digest
+    can load the very bytes it hashed. Lightning checkpoints also store the
+    data module's path hyperparameters, so path classes are the only extra types
+    allowed.
     """
     with torch.serialization.safe_globals(
         [Path, PosixPath, WindowsPath, PurePosixPath, PureWindowsPath]

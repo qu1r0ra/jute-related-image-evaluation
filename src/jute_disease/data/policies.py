@@ -203,6 +203,153 @@ def load_policy_manifest(
     )
 
 
+def _receipt(root: Path) -> dict:
+    try:
+        receipt = json.loads((root / "receipt.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ValueError(f"Policy receipt is unreadable in {root}") from error
+    files = receipt.get("files") if isinstance(receipt, dict) else None
+    if not isinstance(files, dict) or not files:
+        raise ValueError("Policy receipt lists no files")
+    return receipt
+
+
+def _draw_name(pool: str, view: int, policy: str, draw: int, *, test: bool) -> str:
+    suffix = ".protected-test.json" if test else ".json"
+    return f"{pool}/view{view}/{policy}/draw-{draw}{suffix}"
+
+
+def policy_matrix_binding(
+    policy_dir: Path | str,
+    *,
+    pools: tuple[str, ...] | None = None,
+    views: tuple[int, ...] = (1, 2),
+    policies: tuple[str, ...] = POLICIES,
+    draws: tuple[int, ...] = tuple(range(10)),
+) -> dict:
+    """Verify a whole policy matrix against its receipt and return its digests.
+
+    Every fit and protected-test file of every pool, view, policy and draw must
+    be listed in the receipt and match its digest, so one record can bind all of
+    them. The returned mapping is what a freeze record stores and later re-checks.
+
+    Raises:
+        ValueError: the receipt is unreadable, a file is missing, unlisted or
+            changed, or the matrix is incomplete.
+    """
+    root = Path(policy_dir).resolve()
+    receipt = _receipt(root)
+    files: dict = receipt["files"]
+    if pools is None:
+        pools = tuple(sorted({name.split("/", 1)[0] for name in files if "/" in name}))
+    if not pools:
+        raise ValueError("Policy receipt covers no pool")
+    wanted = {
+        _draw_name(pool, view, policy, draw, test=test)
+        for pool in pools
+        for view in views
+        for policy in policies
+        for draw in draws
+        for test in (False, True)
+    } | {f"{pool}/reserve.json" for pool in pools}
+    unlisted = sorted(wanted - set(files))
+    if unlisted:
+        raise ValueError(
+            f"Policy matrix is incomplete: {len(unlisted)} files are not in the "
+            f"receipt, first {unlisted[0]}"
+        )
+    bound: dict[str, str] = {}
+    for name in sorted(wanted):
+        path = root / name
+        try:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as error:
+            raise ValueError(f"Policy file is missing: {name}") from error
+        if digest != files[name]:
+            raise ValueError(f"Policy file does not match its receipt: {name}")
+        bound[name] = digest
+    return {
+        "receipt_sha256": hashlib.sha256(
+            (root / "receipt.json").read_bytes()
+        ).hexdigest(),
+        "config_digest": str(receipt.get("config_digest", "")),
+        "files": bound,
+    }
+
+
+def load_policy_complete_manifest(
+    policy_dir: Path | str,
+    *,
+    pool: str,
+    view: int,
+    policy: str,
+    draw: int,
+    image_size: int = IMAGE_SIZE,
+) -> Manifest:
+    """Reassemble the fit and protected-test partitions of one draw.
+
+    Both files must match the receipt, and the test file must describe the same
+    draw as the fit file. Callers pass the evaluator gate first.
+    """
+    fit = load_policy_manifest(
+        policy_dir,
+        pool=pool,
+        view=view,
+        policy=policy,
+        draw=draw,
+        image_size=image_size,
+    )
+    root = Path(policy_dir).resolve()
+    name = _draw_name(pool, view, policy, draw, test=True)
+    encoded = (root / name).read_bytes()
+    if _receipt(root)["files"].get(name) != hashlib.sha256(encoded).hexdigest():
+        raise ValueError(f"Policy artifact is not covered by its receipt: {name}")
+    payload = json.loads(encoded)
+    fit_dependencies = dict(fit.dependencies)
+    if (
+        any(
+            payload.get(key) != value
+            for key, value in (
+                ("pool", pool),
+                ("view", view),
+                ("policy", policy),
+                ("draw", draw),
+            )
+        )
+        or str(payload.get("config_digest", "")) != fit_dependencies["config"]
+    ):
+        raise ValueError("Protected-test artifact does not match its fit draw")
+    rows = payload.get("entries")
+    if (
+        not isinstance(rows, list)
+        or not rows
+        or any(row.get("partition") != "test" for row in rows)
+    ):
+        raise ValueError("Protected-test artifact must contain only test entries")
+    test = [_manifest_entry(row, "test", image_size) for row in rows]
+    overlap = {entry.image_id for entry in test} & {
+        entry.image_id for entry in fit.entries
+    }
+    if overlap:
+        raise ValueError("Protected-test images overlap the fit partitions")
+    return Manifest(
+        seed=fit.seed,
+        fractions=fit.fractions,
+        entries=tuple(
+            sorted(
+                (*fit.entries, *test),
+                key=lambda entry: (entry.partition, entry.image_id),
+            )
+        ),
+        excluded=(),
+        merged=(),
+        quarantined=(),
+        constraints=(),
+        dependencies=fit.dependencies,
+        version=2,
+    )
+
+
 def _manifest_entry(row: dict, partition: str, image_size: int) -> ManifestEntry:
     try:
         width, height = int(row["width"]), int(row["height"])
@@ -219,8 +366,8 @@ def _manifest_entry(row: dict, partition: str, image_size: int) -> ManifestEntry
         )
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError("Policy entry is missing valid manifest fields") from error
-    if partition not in ("train", "val") or width < 1 or height < 1:
-        raise ValueError("Policy entry has an invalid fit partition or dimensions")
+    if partition not in PARTITIONS or width < 1 or height < 1:
+        raise ValueError("Policy entry has an invalid partition or dimensions")
     if len(entry.image_id) != 64:
         raise ValueError("Policy entry needs a SHA-256 image identity")
     return entry
