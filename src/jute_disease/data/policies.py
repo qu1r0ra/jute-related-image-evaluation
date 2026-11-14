@@ -7,6 +7,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from jute_disease.config import IMAGE_SIZE
+from jute_disease.data.gates import REFREEZE_TARGETS, gate_outcomes
 from jute_disease.data.inventory import inventory_digest, read_inventory
 from jute_disease.data.manifest import (
     Manifest,
@@ -263,26 +264,58 @@ def _neighbours(grouping: dict, by_path: dict) -> dict:
     return {"threshold": record["threshold"], "neighbours": lookup}
 
 
-def _pool(root: Path) -> tuple[list[dict], dict[str, str], dict]:
+def _check_gates(grouping: dict, name: str, inventory: str | None) -> None:
+    """Refuse a pool until every gate has passed for it, bound to this freeze."""
+    record = grouping.get("agreement_results")
+    if not isinstance(record, dict) or record.get("status") == "pending":
+        raise ValueError("grouping gate outcomes have not passed: no gate record")
+    if grouping.get("pool") != name:
+        raise ValueError(
+            f"freeze is not Pool {name}; its gate is bound to another pool"
+        )
+    try:
+        recomputed = gate_outcomes(
+            record,
+            pool=name,
+            grouping_version=grouping.get("algorithm_version"),
+            threshold=grouping.get("parameters", {}).get("threshold"),
+            inventory=inventory,
+        )
+    except ValueError as error:
+        raise ValueError(f"grouping gate outcomes have not passed: {error}") from error
+    recorded = grouping.get("gate_outcomes", {})
+    if (
+        not isinstance(recorded, dict)
+        or {key: value for key, value in recorded.items() if key != "threshold_change"}
+        != recomputed
+    ):
+        raise ValueError("grouping gate outcomes do not match the gate record")
+    if recorded.get("threshold_change") not in ("not_requested", "applied"):
+        raise ValueError("grouping gate outcomes have not passed: threshold change")
+    open_gates = {
+        k: v for k, v in recomputed.items() if v not in ("pass", "not_required")
+    }
+    if open_gates:
+        raise ValueError(
+            f"grouping gate outcomes have not passed for Pool {name}: {open_gates}"
+        )
+    if grouping.get("algorithm_version") in REFREEZE_TARGETS and not isinstance(
+        grouping.get("refreeze"), dict
+    ):
+        raise ValueError("a re-freeze version needs its re-freeze record")
+
+
+def _pool(root: Path, name: str) -> tuple[list[dict], dict[str, str], dict]:
     target = root / "target"
     manifest = load_complete_manifest(target)
     dependencies = dict(manifest.dependencies)
     if "grouping" not in dependencies:
         raise ValueError("A frozen grouping receipt is required")
     grouping = json.loads((target / "grouping.json").read_text(encoding="utf-8"))
-    outcomes = grouping.get("gate_outcomes", {})
-    if (
-        not isinstance(outcomes, dict)
-        or outcomes.get("agreement") != "pass"
-        or any(
-            outcome not in ("pass", "not_requested", "applied")
-            for outcome in outcomes.values()
-        )
-    ):
-        raise ValueError("grouping gate outcomes have not passed")
     inventory = read_inventory(root / "inventory.jsonl")
     if inventory_digest(inventory) != dependencies.get("inventory"):
         raise ValueError("inventory does not match the frozen manifest")
+    _check_gates(grouping, name, dependencies["inventory"])
     by_path = {record.path: record for record in inventory}
     source_by_sha = {entry.image_id: entry.source for entry in manifest.entries}
     rows = []
@@ -453,7 +486,7 @@ def write_policy_manifests(
     grouping_digests: dict[str, str] = {}
     audit_thresholds: dict[str, int] = {}
     for name, path in sorted(pools.items()):
-        rows, lineage, audit = _pool(Path(path))
+        rows, lineage, audit = _pool(Path(path), name)
         neighbours = audit["neighbours"]
         grouping_digests[name] = lineage["grouping_digest"]
         audit_thresholds[name] = audit["threshold"]

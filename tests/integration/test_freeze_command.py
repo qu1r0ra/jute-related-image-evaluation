@@ -17,6 +17,8 @@ from jute_disease.data import (
 )
 from jute_disease.data.manifest import load_complete_manifest
 
+from .gate_records import gate_record
+
 pytestmark = pytest.mark.slow
 
 
@@ -45,6 +47,14 @@ def inputs(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
         "reviews": base / "reviews.json",
         "base": base,
     }
+
+
+@pytest.fixture(scope="module")
+def inventory(inputs: dict[str, Path]) -> str:
+    """The inventory digest every freeze of the synthetic images carries."""
+    _, result = _freeze(inputs, "inventory-probe")
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)["receipt"]["dependencies"]["inventory"]
 
 
 def _freeze(
@@ -251,26 +261,22 @@ def test_dhash_grouping_receipt_is_verified_before_loading(
         load_manifest(out / "target")
 
 
-def test_grouped_freeze_records_ratings_and_agreement(inputs: dict[str, Path]) -> None:
+def test_grouped_freeze_records_ratings_and_agreement(
+    inputs: dict[str, Path], inventory: str
+) -> None:
     ratings = inputs["base"] / "ratings.csv"
     ratings.write_text("image_a,image_b,verdict\n", encoding="utf-8")
     agreement = inputs["base"] / "agreement.json"
     agreement.write_text(
-        json.dumps(
-            {
-                "kappa_interval": [0.7, 0.9],
-                "threshold": 0.6,
-                "pass": True,
-                "method": "bootstrap",
-            }
-        ),
-        encoding="utf-8",
+        json.dumps(gate_record(inventory, version="dhash-v1")), encoding="utf-8"
     )
     out, result = _freeze(
         inputs,
         "grouped-inputs",
         "--grouping-version",
         "dhash-v1",
+        "--pool",
+        "C",
         "--no-merge-ratings",
         str(ratings),
         "--agreement-results",
@@ -280,7 +286,13 @@ def test_grouped_freeze_records_ratings_and_agreement(inputs: dict[str, Path]) -
     receipt = json.loads((out / "target" / "grouping.json").read_text())
     assert receipt["no_merge_ratings"] == []
     assert receipt["agreement_results"]["method"] == "bootstrap"
-    assert receipt["gate_outcomes"]["agreement"] == "pass"
+    assert receipt["agreement_results"]["inventory_digests"] == {"C": inventory}
+    assert receipt["gate_outcomes"] == {
+        "agreement": "pass",
+        "wrong_merge": "pass",
+        "false_split": "pass",
+        "threshold_change": "not_requested",
+    }
 
 
 def test_grouped_freeze_rejects_invalid_agreement(inputs: dict[str, Path]) -> None:
@@ -291,6 +303,8 @@ def test_grouped_freeze_rejects_invalid_agreement(inputs: dict[str, Path]) -> No
         "bad-agreement",
         "--grouping-version",
         "dhash-v1",
+        "--pool",
+        "C",
         "--agreement-results",
         str(agreement),
     )
@@ -402,7 +416,9 @@ def test_grouped_manifest_rejects_missing_grouping_dependency(
         load_manifest(out / "target")
 
 
-def test_freeze_accepts_audit_cli_gate_projection(inputs: dict[str, Path]) -> None:
+def test_freeze_accepts_audit_cli_gate_record(
+    inputs: dict[str, Path], inventory: str
+) -> None:
     audit_dir = inputs["base"] / "rating-fixture"
     fixture = _run(
         "data",
@@ -411,6 +427,7 @@ def test_freeze_accepts_audit_cli_gate_projection(inputs: dict[str, Path]) -> No
         str(audit_dir),
         "--grouping-version",
         "dhash-v1",
+        *(f"--inventory-digest={pool}={inventory}" for pool in "ABC"),
     )
     assert fixture.returncode == 0, fixture.stderr
     gate = inputs["base"] / "projected-gate.json"
@@ -423,43 +440,50 @@ def test_freeze_accepts_audit_cli_gate_projection(inputs: dict[str, Path]) -> No
         str(gate),
     )
     assert rating.returncode == 0, rating.stderr
-    assert set(json.loads(gate.read_text())) == {
+    record = json.loads(gate.read_text())
+    assert set(record) == {
+        "cohort_digest",
+        "grouping_version",
+        "hamming_threshold",
+        "inventory_digests",
         "kappa_interval",
         "threshold",
         "pass",
         "method",
+        "wrong_merge",
+        "false_split",
     }
+    assert record["inventory_digests"] == dict.fromkeys("ABC", inventory)
     out, result = _freeze(
         inputs,
         "projected-gate",
         "--grouping-version",
         "dhash-v1",
+        "--pool",
+        "A",
         "--agreement-results",
         str(gate),
     )
     assert result.returncode == 0, result.stderr
     receipt = json.loads((out / "target" / "grouping.json").read_text())
     assert receipt["gate_outcomes"]["agreement"] == "pass"
+    assert receipt["gate_outcomes"]["wrong_merge"] == "not_required"
 
 
-def test_freeze_records_undefined_kappa_as_failed_gate(inputs: dict[str, Path]) -> None:
+def test_freeze_records_undefined_kappa_as_failed_gate(
+    inputs: dict[str, Path], inventory: str
+) -> None:
+    record = gate_record(inventory, version="dhash-v1")
+    record |= {"kappa_interval": None, "pass": False, "method": "Cohen kappa undefined"}
     gate = inputs["base"] / "undefined-gate.json"
-    gate.write_text(
-        json.dumps(
-            {
-                "kappa_interval": None,
-                "threshold": 0.6,
-                "pass": False,
-                "method": "Cohen kappa undefined",
-            }
-        ),
-        encoding="utf-8",
-    )
+    gate.write_text(json.dumps(record), encoding="utf-8")
     out, result = _freeze(
         inputs,
         "undefined-gate",
         "--grouping-version",
         "dhash-v1",
+        "--pool",
+        "C",
         "--agreement-results",
         str(gate),
     )

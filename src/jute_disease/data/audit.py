@@ -26,6 +26,7 @@ from jute_disease.data.audit_sampling import (
     grouping_threshold,
     sample_edges,
 )
+from jute_disease.data.gates import KAPPA_THRESHOLD
 from jute_disease.data.grouping import flip_canonical_dhash, union_find_components
 from jute_disease.evaluation import (
     Interval,
@@ -37,7 +38,6 @@ from jute_disease.evaluation import (
 )
 
 RUBRIC = {"exact": 1, "near-duplicate": 1, "very similar": 0, "different": 0}
-KAPPA_THRESHOLD = 0.6
 
 
 def feature_neighbors(
@@ -332,6 +332,7 @@ def prepare_cohort(
         "denominators": denominators,
         "grouping_version": version,
         "threshold": threshold,
+        "inventory_digests": samples.get("inventory_digests", {}),
         "agent": {"name": agent["name"], "version": agent["version"]},
         "dataset_quality": samples["dataset_quality"],
         "selection": {
@@ -531,6 +532,7 @@ def cohort_digest(cohort: dict[str, Any]) -> str:
         "denominators": cohort["denominators"],
         "grouping_version": cohort["grouping_version"],
         "threshold": cohort["threshold"],
+        "inventory_digests": cohort.get("inventory_digests", {}),
         "agent": cohort["agent"],
     }
     return hashlib.sha256(
@@ -646,9 +648,16 @@ def evaluate_ratings(
             for key in sorted(denominators)
         ]
     )
+    rates = _error_rates(ordered, second, denominators)
+    if round_number == 2:
+        # The false-split rule is evaluated once, on the first round's ratings.
+        if "false_split" not in previous:
+            raise ValueError("the first round lacks its false-split evaluation")
+        rates["false_split"] = previous["false_split"]
     return {
         "grouping_version": cohort["grouping_version"],
         "hamming_threshold": cohort["threshold"],
+        "inventory_digests": cohort.get("inventory_digests", {}),
         "agent": cohort["agent"],
         "dataset_quality": cohort.get("dataset_quality"),
         "cohort_digest": digest,
@@ -661,7 +670,8 @@ def evaluate_ratings(
         "positive_agreement": _specific_agreement(first, second)["positive"],
         "negative_agreement": _specific_agreement(first, second)["negative"],
         "specific_agreement_by_pool": by_pool,
-        **_error_rates(ordered, second, denominators),
+        **rates,
+        "false_split_evaluated_round": 1,
         "agent_owner_disagreement": _upper(disagreement),
         "very_similar": similar,
         "round": round_number,
@@ -673,8 +683,16 @@ def evaluate_ratings(
     }
 
 
-def fixture_round(output: Path, grouping_version: str) -> dict[str, Any]:
-    """Create and import a synthetic blind rating round without model weights."""
+def fixture_round(
+    output: Path,
+    grouping_version: str,
+    inventory_digests: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Create and import a synthetic blind rating round without model weights.
+
+    ``inventory_digests`` binds the round's gate to a freeze; by default each pool
+    gets the digest of its own name, which matches no real freeze.
+    """
     grouping_threshold(grouping_version)
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
@@ -697,7 +715,13 @@ def fixture_round(output: Path, grouping_version: str) -> dict[str, Any]:
         for _ in range(100)
     ]
     samples = {
-        "edges": sample_edges(hashes, DEFAULT_DESIGN, grouping_version),
+        "edges": sample_edges(
+            hashes,
+            DEFAULT_DESIGN,
+            grouping_version,
+            inventory_digests=inventory_digests
+            or {pool: hashlib.sha256(pool.encode()).hexdigest() for pool in "ABC"},
+        ),
         "features": feature_neighbors(paths, extractor),
         "feature_provenance": {"kind": "synthetic", "version": "fixture-v1"},
         "residual": residual_sample(
