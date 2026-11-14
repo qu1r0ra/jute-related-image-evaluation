@@ -273,3 +273,32 @@ def test_evaluation_statistics_api() -> None:
     )
     assert len(set(evaluation.__all__)) == len(evaluation.__all__)
     assert all(hasattr(evaluation, name) for name in evaluation.__all__)
+
+
+def test_evaluation_analysis_plan_api() -> None:
+    from jute_disease import evaluation
+
+    for name in (
+        "welch_test",
+        "paired_test",
+        "holm_adjust",
+        "equivalence_test",
+        "split_power",
+        "require_class_support",
+        "analyze_split_means",
+        "leakage_claim",
+        "simulate_coverage",
+        "coverage_grid",
+        "GRID_TOLERANCE",
+        "is_prespecified",
+        "LEAKAGE_TEST",
+        "SECONDARY_CONTRASTS",
+        "PRESPECIFIED_CONTRASTS",
+        "SPLIT_COUNT",
+        "PRIMARY_CONTRAST",
+        "SECONDARY_TESTS",
+        "EQUIVALENCE_MARGIN",
+        "SMALLEST_EFFECT_OF_INTEREST",
+    ):
+        assert name in evaluation.__all__
+        assert getattr(evaluation, name) is not None
