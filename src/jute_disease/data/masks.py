@@ -1,4 +1,4 @@
-"""Leaf-mask generation, local SAM 2 refinement and scene calibration."""
+"""Colour-threshold leaf masks and scene calibration."""
 
 from __future__ import annotations
 
@@ -230,106 +230,12 @@ class ColorThresholdBackend:
         )
 
 
-class Sam2Refiner:
-    """Refine a color mask with SAM 2 from a local-only Transformers checkpoint."""
-
-    def __init__(self, checkpoint: Path) -> None:
-        checkpoint = Path(checkpoint).expanduser().resolve()
-        if not checkpoint.is_dir():
-            raise ValueError("SAM 2 checkpoint must be an existing local directory")
-        config_path = checkpoint / "config.json"
-        if not config_path.is_file():
-            raise ValueError("SAM 2 checkpoint must include config.json")
-        weight_files = sorted(
-            path
-            for pattern in ("*.safetensors", "*.bin", "*.pt", "*.pth")
-            for path in checkpoint.glob(pattern)
-            if path.is_file()
-        )
-        if not weight_files:
-            raise ValueError("SAM 2 checkpoint must include local model weights")
-        weights_digest = hashlib.sha256()
-        for weight_path in weight_files:
-            relative_path = weight_path.relative_to(checkpoint).as_posix()
-            weights_digest.update(relative_path.encode("utf-8"))
-            weights_digest.update(_sha256_file(weight_path).encode("ascii"))
-        self.checkpoint_sha256 = weights_digest.hexdigest()
-        try:
-            import torch
-            import transformers
-            from transformers import Sam2Model, Sam2Processor
-        except ImportError as error:
-            raise ImportError(
-                "SAM 2 refinement requires the optional 'masks' extra"
-            ) from error
-        self._torch = torch
-        self._model = (
-            Sam2Model.from_pretrained(
-                str(checkpoint), local_files_only=True, trust_remote_code=False
-            )
-            .to("cpu")
-            .eval()
-        )
-        self._processor = Sam2Processor.from_pretrained(
-            str(checkpoint), local_files_only=True, trust_remote_code=False
-        )
-        self.checkpoint_config_sha256 = hashlib.sha256(
-            config_path.read_bytes()
-        ).hexdigest()
-        self.version = f"{transformers.__version__}+{self.checkpoint_sha256[:12]}"
-        self.model = "excess-green-otsu-largest-component+Sam2Model"
-        self._color = ColorThresholdBackend()
-
-    def predict(self, image: Image.Image) -> MaskPrediction:
-        initial = self._color.predict(image)
-        if not initial.mask.any():
-            return initial.with_mask(
-                initial.mask,
-                model=self.model,
-                diagnostics={
-                    **initial.diagnostics,
-                    "sam2_refined": False,
-                    "sam2_skip_reason": "color mask is empty",
-                    "threshold_sam_iou": 0.0,
-                    "threshold_sam_iou_defined": False,
-                    "checkpoint_config_sha256": self.checkpoint_config_sha256,
-                    "checkpoint_sha256": self.checkpoint_sha256,
-                },
-            )
-        y, x = np.argwhere(initial.mask).mean(axis=0)
-        height, width = initial.mask.shape
-        points = [
-            [[[float(np.clip(x, 0, width - 1)), float(np.clip(y, 0, height - 1))]]]
-        ]
-        labels = [[[1]]]
-        inputs = self._processor(
-            images=image.convert("RGB"),
-            input_points=points,
-            input_labels=labels,
-            return_tensors="pt",
-        )
-        with self._torch.inference_mode():
-            outputs = self._model(**inputs)
-        masks = self._processor.post_process_masks(
-            outputs.pred_masks.cpu(), inputs["original_sizes"].cpu()
-        )[0]
-        scores = outputs.iou_scores.reshape(-1)
-        best = int(scores.argmax().item())
-        refined = masks[0, best].detach().cpu().numpy() > 0
-        intersection = int(np.logical_and(initial.mask, refined).sum())
-        union = int(np.logical_or(initial.mask, refined).sum())
-        return MaskPrediction(
-            refined,
-            self.model,
-            {
-                **initial.diagnostics,
-                "sam2_refined": True,
-                "sam2_iou_score": float(scores[best].item()),
-                "threshold_sam_iou": intersection / union if union else 0.0,
-                "threshold_sam_iou_defined": union > 0,
-                "checkpoint_config_sha256": self.checkpoint_config_sha256,
-                "checkpoint_sha256": self.checkpoint_sha256,
-            },
+def require_colour_threshold(model: str, version: str) -> None:
+    """Refuse any recorded mask backend but the colour-threshold backend."""
+    if model != ColorThresholdBackend.model or not version:
+        raise ValueError(
+            f"only the colour-threshold mask backend ({ColorThresholdBackend.model}) "
+            f"is audited; got {model!r} version {version!r}"
         )
 
 
@@ -515,14 +421,6 @@ def _cutoff_candidates(values: np.ndarray) -> list[float]:
     ordered = np.unique(np.clip(values.astype(float), 0, 1))
     midpoints = (ordered[:-1] + ordered[1:]) / 2
     return sorted({0.0, 1.0, *(float(value) for value in midpoints)})
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _macro_f1(truth: np.ndarray, predicted: np.ndarray, categories: int) -> float:

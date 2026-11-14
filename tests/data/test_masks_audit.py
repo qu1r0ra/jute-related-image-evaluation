@@ -1,7 +1,6 @@
 import csv
 import hashlib
 import json
-from contextlib import nullcontext
 from pathlib import Path
 
 import numpy as np
@@ -9,12 +8,19 @@ import pytest
 from PIL import Image
 
 from jute_disease.cli import main
-from jute_disease.data.masks import SCENE_TAGS, SceneThresholds
+from jute_disease.data.masks import SCENE_TAGS, ColorThresholdBackend, SceneThresholds
 from jute_disease.data.masks_audit import (
     CandidateImage,
-    FixtureMaskBackend,
+    ProtectedTestImages,
     evaluate_masks_audit,
     run_masks_audit,
+)
+
+PROTECTED = ProtectedTestImages(
+    "b" * 64,
+    frozenset(
+        hashlib.sha256(f"test-{index}".encode()).hexdigest() for index in range(3)
+    ),
 )
 
 
@@ -31,8 +37,8 @@ def _thresholds() -> SceneThresholds:
         development_sources=sources,
         development_digest="a" * 64,
         score=1.0,
-        mask_model=FixtureMaskBackend.model,
-        mask_version=FixtureMaskBackend.version,
+        mask_model=ColorThresholdBackend.model,
+        mask_version=ColorThresholdBackend.version,
     )
 
 
@@ -103,13 +109,20 @@ def test_stratified_audit_oversamples_rare_scenes_and_blinds_sheets(
     manifest = run_masks_audit(
         _candidates(tmp_path),
         _thresholds(),
-        FixtureMaskBackend(),
+        ColorThresholdBackend(),
         tmp_path / "audit",
+        PROTECTED,
         sample_count=12,
         owner_count=6,
         seed=10,
     )
 
+    assert manifest["partition_check"]["overlaps"] == 0
+    assert manifest["partition_check"]["target_manifest_digest"] == "b" * 64
+    assert manifest["mask_backend"] == {
+        "model": ColorThresholdBackend.model,
+        "version": ColorThresholdBackend.version,
+    }
     assert manifest["sampling"]["population_by_scene"] == {
         "clean-background": 10,
         "field": 6,
@@ -135,8 +148,8 @@ def test_stratified_audit_oversamples_rare_scenes_and_blinds_sheets(
     metadata = json.loads(
         (tmp_path / "audit" / manifest["records"][0]["metadata_path"]).read_text()
     )
-    assert metadata["model"] == FixtureMaskBackend.model
-    assert metadata["model_version"] == FixtureMaskBackend.version
+    assert metadata["model"] == ColorThresholdBackend.model
+    assert metadata["model_version"] == ColorThresholdBackend.version
     assert metadata["rubric"]["version"] == "leaf-mask-v1"
 
     _fill_ratings(manifest, tmp_path / "audit")
@@ -153,6 +166,8 @@ def test_stratified_audit_oversamples_rare_scenes_and_blinds_sheets(
     assert all(len(row) == 3 for row in confusion["counts"])
     assert sum(map(sum, confusion["counts"])) == 6
     assert report["mask_quality"]["fail_rate"]["population"] == 20
+    assert len(report["digest"]) == 64
+    assert report["mask_backend"] == manifest["mask_backend"]
 
 
 @pytest.mark.parametrize("rating", ["", "invalid"])
@@ -162,8 +177,9 @@ def test_evaluation_rejects_invalid_unpaired_agent_rating(
     manifest = run_masks_audit(
         _candidates(tmp_path),
         _thresholds(),
-        FixtureMaskBackend(),
+        ColorThresholdBackend(),
         tmp_path / "audit",
+        PROTECTED,
         sample_count=12,
         owner_count=6,
         seed=10,
@@ -204,8 +220,9 @@ def test_audit_sample_includes_each_nonempty_stratum(tmp_path: Path) -> None:
         run_masks_audit(
             _candidates(tmp_path),
             _thresholds(),
-            FixtureMaskBackend(),
+            ColorThresholdBackend(),
             tmp_path / "audit",
+            PROTECTED,
             sample_count=2,
             owner_count=1,
         )
@@ -234,138 +251,132 @@ def test_audit_rejects_development_image_content_overlap(tmp_path: Path) -> None
         run_masks_audit(
             candidates,
             thresholds,
-            FixtureMaskBackend(),
+            ColorThresholdBackend(),
             tmp_path / "audit",
+            PROTECTED,
             sample_count=3,
             owner_count=1,
         )
 
 
-def test_sam2_loader_is_local_only_and_fixture_never_loads_sam(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def test_audit_refuses_inventory_overlapping_the_test_partition(
+    tmp_path: Path,
 ) -> None:
-    import sys
-    import types
+    candidates = _candidates(tmp_path)
+    leaked = hashlib.sha256(candidates[0].path.read_bytes()).hexdigest()
+    protected = ProtectedTestImages("b" * 64, frozenset({leaked}))
 
-    calls = []
-    processor_inputs = []
+    with pytest.raises(ValueError, match="test partition"):
+        run_masks_audit(
+            candidates,
+            _thresholds(),
+            ColorThresholdBackend(),
+            tmp_path / "audit",
+            protected,
+            sample_count=12,
+            owner_count=6,
+        )
 
-    class FakeTensor:
-        def __init__(self, value: np.ndarray | None = None) -> None:
-            self.value = value
 
-        def cpu(self) -> FakeTensor:
-            return self
-
-        def detach(self) -> FakeTensor:
-            return self
-
-        def numpy(self) -> np.ndarray:
-            assert self.value is not None
-            return self.value
-
-    class FakeScalar:
-        def item(self) -> float:
-            return 0.91
-
-    class FakeScores:
-        def reshape(self, *_: object) -> FakeScores:
-            return self
-
-        def argmax(self) -> FakeScalar:
-            return FakeScalar()
-
-        def __getitem__(self, index: int) -> FakeScalar:
-            assert index == 0
-            return FakeScalar()
-
-    class FakeMasks:
-        def __getitem__(self, index: tuple[int, int]) -> FakeTensor:
-            assert index == (0, 0)
-            return FakeTensor(np.ones((8, 8), dtype=np.uint8))
-
-    class FakeModel:
-        @classmethod
-        def from_pretrained(cls, path: str, **kwargs: object) -> FakeModel:
-            calls.append(("model", path, kwargs))
-            return cls()
-
-        def to(self, device: str) -> FakeModel:
-            assert device == "cpu"
-            return self
-
-        def eval(self) -> FakeModel:
-            return self
-
-        def __call__(self, **_: object) -> object:
-            return types.SimpleNamespace(
-                pred_masks=FakeTensor(), iou_scores=FakeScores()
-            )
-
-    class FakeProcessor:
-        @classmethod
-        def from_pretrained(cls, path: str, **kwargs: object) -> FakeProcessor:
-            calls.append(("processor", path, kwargs))
-            return cls()
-
-        def __call__(self, **kwargs: object) -> dict[str, FakeTensor]:
-            processor_inputs.append(kwargs)
-            return {"original_sizes": FakeTensor()}
-
-        def post_process_masks(
-            self, masks: FakeTensor, original_sizes: FakeTensor
-        ) -> list[FakeMasks]:
-            assert isinstance(masks, FakeTensor)
-            assert isinstance(original_sizes, FakeTensor)
-            return [FakeMasks()]
-
-    checkpoint = tmp_path / "sam"
-    checkpoint.mkdir()
-    (checkpoint / "config.json").write_text("{}", encoding="utf-8")
-    (checkpoint / "model.safetensors").write_bytes(b"fixture weights")
-    transformer_stub = types.ModuleType("transformers")
-    transformer_stub.__version__ = "fixture-version"
-    transformer_stub.Sam2Model = FakeModel
-    transformer_stub.Sam2Processor = FakeProcessor
-    monkeypatch.setitem(sys.modules, "transformers", transformer_stub)
-    torch_stub = types.ModuleType("torch")
-    torch_stub.inference_mode = nullcontext
-    monkeypatch.setitem(sys.modules, "torch", torch_stub)
-
-    from jute_disease.data.masks import Sam2Refiner
-
-    backend = Sam2Refiner(checkpoint)
-    assert backend.version.startswith("fixture-version+")
-    assert (
-        backend.checkpoint_sha256
-        == hashlib.sha256(
-            b"model.safetensors"
-            + hashlib.sha256(b"fixture weights").hexdigest().encode()
-        ).hexdigest()
+def test_audit_refuses_development_set_overlapping_the_test_partition(
+    tmp_path: Path,
+) -> None:
+    thresholds = _thresholds()
+    protected = ProtectedTestImages(
+        "b" * 64, frozenset({thresholds.development_sources[7][1]})
     )
-    assert len(calls) == 2
-    assert all(call[1] == str(checkpoint.resolve()) for call in calls)
-    assert all(call[2]["local_files_only"] is True for call in calls)
-    assert all(call[2]["trust_remote_code"] is False for call in calls)
 
-    pixels = np.full((8, 8, 3), (200, 150, 100), dtype=np.uint8)
-    pixels[2:6, 2:6] = (0, 180, 0)
-    prediction = backend.predict(Image.fromarray(pixels))
-    assert processor_inputs[0]["input_points"] == [[[[3.5, 3.5]]]]
-    assert processor_inputs[0]["input_labels"] == [[[1]]]
-    assert prediction.diagnostics["threshold_sam_iou"] == pytest.approx(0.25)
-    assert prediction.diagnostics["checkpoint_sha256"] == backend.checkpoint_sha256
+    with pytest.raises(ValueError, match="calibration development set.*test partition"):
+        run_masks_audit(
+            _candidates(tmp_path),
+            thresholds,
+            ColorThresholdBackend(),
+            tmp_path / "audit",
+            protected,
+            sample_count=12,
+            owner_count=6,
+        )
 
-    def forbidden(*args: object, **kwargs: object) -> None:
-        raise AssertionError("weight-free fixture must not construct SAM2")
 
-    monkeypatch.setattr("jute_disease.cli.Sam2Refiner", forbidden)
-    report = main(["data", "masks-fixture", "--output", str(tmp_path / "fixture")])
-    assert report is None
-    fixture_report = json.loads(capsys.readouterr().out)
-    assert fixture_report["fixture_mode"] is True
-    assert (
-        fixture_report["evidence_status"]
-        == "synthetic fixture only; not an audit result"
+@pytest.mark.parametrize("model", ["fixture-green-pixel-mask-stub", "sam2-refiner"])
+def test_audit_refuses_a_backend_other_than_colour_threshold(
+    tmp_path: Path, model: str
+) -> None:
+    class Other:
+        version = "1"
+
+        def predict(self, image: Image.Image) -> None:
+            raise AssertionError("an unaudited backend must never run")
+
+    Other.model = model
+    with pytest.raises(ValueError, match="colour-threshold"):
+        run_masks_audit(
+            _candidates(tmp_path),
+            _thresholds(),
+            Other(),
+            tmp_path / "audit",
+            PROTECTED,
+            sample_count=12,
+            owner_count=6,
+        )
+
+
+def _rate(manifest: dict, tmp_path: Path, fails: int) -> dict:
+    """Evaluate an audit in which exactly ``fails`` sampled masks are failures."""
+    out = tmp_path / "audit"
+    _fill_ratings(manifest, out)
+    with (out / "agent.csv").open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    for index, row in enumerate(rows):
+        row["mask_quality"] = "fail" if index < fails else "pass"
+    with (out / "agent.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle, fieldnames=("audit_id", "overlay_path", "mask_quality")
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+    return evaluate_masks_audit(
+        manifest,
+        out / "agent.csv",
+        out / "owner.csv",
+        resamples=200,
+        agent_rater={"name": "fixture-agent", "version": "test"},
+    )["mask_quality"]["fail_rate"]
+
+
+def test_fail_rate_gate_uses_the_exact_upper_bound_not_the_point_estimate(
+    tmp_path: Path,
+) -> None:
+    manifest = run_masks_audit(
+        _candidates(tmp_path),
+        _thresholds(),
+        ColorThresholdBackend(),
+        tmp_path / "audit",
+        PROTECTED,
+        sample_count=12,
+        owner_count=6,
+        seed=10,
     )
-    assert fixture_report["rating_counts"]["owner_scene"]
+
+    clean = _rate(manifest, tmp_path, fails=0)
+    assert clean["estimate"] == 0.0
+    assert clean["upper_95"] > clean["estimate"]
+    # A clean small sample still cannot certify a 10% limit.
+    assert clean["gate_pass"] is False
+
+    failing = _rate(manifest, tmp_path, fails=2)
+    assert failing["estimate"] < failing["upper_95"] <= 1.0
+    assert failing["gate_pass"] is False
+    assert "Clopper-Pearson" in failing["method"]
+
+
+def test_fixture_command_reports_digest_and_backend(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    main(["data", "masks-fixture", "--output", str(tmp_path / "fixture")])
+    report = json.loads(capsys.readouterr().out)
+    assert report["fixture_mode"] is True
+    assert report["evidence_status"] == "synthetic fixture only; not an audit result"
+    assert report["mask_backend"]["model"] == ColorThresholdBackend.model
+    assert len(report["digest"]) == 64
+    assert report["rating_counts"]["owner_scene"]
