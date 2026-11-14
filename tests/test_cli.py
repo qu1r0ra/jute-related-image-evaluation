@@ -191,7 +191,7 @@ def test_queue_run_hands_the_queue_its_executor_and_identity(
 
     _stub_queue(monkeypatch, tmp_path, fake_queue)
     main(["queue", "run"])
-    assert set(captured) == {"clock", "execute", "identity_for", "report_path"}
+    assert set(captured) == {"clock", "execute", "identity_for", "plan", "report_path"}
     assert captured["report_path"] == tmp_path / "queue.json"
 
 
