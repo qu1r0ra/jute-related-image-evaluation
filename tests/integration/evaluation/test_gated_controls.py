@@ -17,6 +17,7 @@ from jute_disease.data.manifest import (
 )
 from jute_disease.training import RunStore, load_benchmark
 
+from .conftest import audit_manifest_of
 from .test_gated_evaluator import (
     FIT,
     LEAF_FIT,
@@ -24,6 +25,7 @@ from .test_gated_evaluator import (
     _cli,
     _complete_fit,
     _freeze,
+    _issue_receipts,
     _leaf_run,
     _outcomes,
     _probe_ids,
@@ -54,6 +56,8 @@ def test_freeze_record_needs_recorded_validation_outcomes(
         policy_dir,
         "--mask-audit-report",
         mask_audit_report,
+        "--mask-audit-manifest",
+        audit_manifest_of(mask_audit_report),
     ]
     with pytest.raises(SystemExit, match="validation outcomes"):
         _cli(*base, "--output", tmp_path / "none.json")
@@ -94,6 +98,8 @@ def test_freeze_record_must_list_every_probe_fit(
             policy_dir,
             "--mask-audit-report",
             mask_audit_report,
+            "--mask-audit-manifest",
+            audit_manifest_of(mask_audit_report),
         )
 
 
@@ -146,6 +152,7 @@ def _setup_runs(
         tmp_path / "runs" / "runs.json",
         [full, _leaf_run(store, target, leaf, FIT.format(0), 0, 2)],
     )
+    _issue_receipts(store, record)
     run_record = tmp_path / "runs" / "run-record.json"
     _cli(
         "evaluate",
@@ -533,6 +540,7 @@ def test_all_analyses_run_through_the_evaluator(
         run = _complete_fit(store, target, fit_id, 0, 5, system=system)
         runs.append({**run, "variant": variant, "of": None})
     _write(tmp_path / "runs" / "runs.json", runs)
+    _issue_receipts(store, record)
     run_record = tmp_path / "runs" / "run-record.json"
     _cli(
         "evaluate",
@@ -592,6 +600,7 @@ def test_two_runs_for_one_system_and_seed_are_refused(
         _complete_fit(store, target, "fixture/dup", 0, 3),
     ]
     _write(tmp_path / "runs" / "runs.json", runs)
+    _issue_receipts(store, record)
     run_record = tmp_path / "runs" / "run-record.json"
     _cli(
         "evaluate",

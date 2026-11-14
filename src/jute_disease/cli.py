@@ -188,12 +188,29 @@ def _audit_sample(args: argparse.Namespace) -> None:
                 if not built:
                     built.append(_pinned_extractor(args))
                 extractor = built[0]
+                pool = next(
+                    (
+                        name
+                        for name, images in data["protected_test"].items()
+                        if paths and paths[0] in images
+                    ),
+                    "",
+                )
+                # The row names the pool, the exact images read and the weights,
+                # so the freeze record can list it instead of exempting a string.
                 log_test_read(
                     default_reads_log_path(args.root),
                     source_digest,
                     [],
                     operation=RESIDUAL_AUDIT_OPERATION,
                     additional_logs=extra_logs,
+                    details={
+                        "pool": pool,
+                        "sample_ids_sha256": hashlib.sha256(
+                            json.dumps(list(paths)).encode("utf-8")
+                        ).hexdigest(),
+                        "weights_sha256": args.weights_sha256,
+                    },
                 )
                 return extractor(paths)
 
@@ -711,6 +728,7 @@ def _evaluate_freeze_record(args: argparse.Namespace) -> None:
             target_dir=args.target_dir,
             policy_dir=args.policy_dir,
             mask_audit_report=args.mask_audit_report,
+            mask_audit_manifest=args.mask_audit_manifest,
             matrix={
                 "pools": benchmark.pools,
                 "views": benchmark.views,
@@ -1266,7 +1284,13 @@ def _add_gated_evaluator(actions: argparse._SubParsersAction) -> None:
         "--mask-audit-report",
         type=Path,
         required=True,
-        help="Mask audit evaluation report; its digest is bound, not an operator flag.",
+        help="Mask audit evaluation report; its gates are recomputed, not trusted.",
+    )
+    record.add_argument(
+        "--mask-audit-manifest",
+        type=Path,
+        required=True,
+        help="The #183 audit manifest the report's audit_manifest_digest names.",
     )
     record.add_argument("--benchmark", type=Path, default=BENCHMARK_CONFIG)
     record.add_argument("--root", type=Path, default=ROOT_DIR)

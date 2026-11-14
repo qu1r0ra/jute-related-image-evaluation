@@ -138,11 +138,83 @@ def read_reads_log(path: Path | None) -> list[dict[str, Any]]:
     ]
 
 
-def _label_reads(entries: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Keep the reads that can steer a fit; the residual audit reads pixels only."""
-    return [
-        entry for entry in entries if entry.get("operation") != RESIDUAL_AUDIT_OPERATION
-    ]
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(char in "0123456789abcdef" for char in value)
+    )
+
+
+def _is_audit_read(entry: Mapping[str, Any]) -> bool:
+    """A residual-audit row that names its pool, sample IDs and pinned weights.
+
+    The operation string alone never exempts a read: the row must read no fit and
+    carry the digests that let a reviewer re-derive what was opened.
+    """
+    details = entry.get("details")
+    return (
+        entry.get("operation") == RESIDUAL_AUDIT_OPERATION
+        and entry.get("fit_ids") == []
+        and isinstance(details, dict)
+        and isinstance(details.get("pool"), str)
+        and bool(details["pool"])
+        and _is_sha256(details.get("sample_ids_sha256"))
+        and _is_sha256(details.get("weights_sha256"))
+    )
+
+
+def _split_reads(
+    entries: Iterable[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Separate reads that can steer a fit from the listed residual-audit reads.
+
+    The residual audit opens pixels only and reads no label, score or prediction,
+    so a well-formed audit row is listed in the record but leaves it ground-truth
+    clean. Anything else, including a row that only claims the audit operation, is
+    a label read.
+    """
+    labels: list[dict[str, Any]] = []
+    audits: list[dict[str, Any]] = []
+    for entry in entries:
+        (audits if _is_audit_read(entry) else labels).append(entry)
+    return labels, audits
+
+
+def _merged_reads(
+    root: Path | str, reads_log: Path | str | None
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Every distinct logged read from the project ledger and any custom log."""
+    default_log = default_reads_log_path(root)
+    logs = [default_log]
+    if reads_log is not None and Path(reads_log).resolve() != default_log.resolve():
+        logs.append(Path(reads_log))
+    seen: set[str] = set()
+    merged: list[dict[str, Any]] = []
+    for log in logs:
+        for entry in read_reads_log(log):
+            key = canonical_hash(entry)
+            if key not in seen:
+                seen.add(key)
+                merged.append(entry)
+    return _split_reads(merged)
+
+
+def _portable(path: Path | str, root: Path | str) -> str:
+    """Store ``path`` relative to the project root when it lies inside it."""
+    resolved = Path(path).resolve()
+    try:
+        return resolved.relative_to(Path(root).resolve()).as_posix()
+    except ValueError:
+        return str(resolved)
+
+
+def bound_path(stored: object, root: Path | str) -> Path:
+    """Resolve a path a record stored, relative to ``root`` unless absolute."""
+    if not isinstance(stored, str) or not stored:
+        raise TestReadRefusedError("freeze record stores an invalid path")
+    path = Path(stored)
+    return path if path.is_absolute() else (Path(root) / path).resolve()
 
 
 def _unique_strings(value: object, name: str) -> list[str]:
@@ -219,25 +291,39 @@ def _check_border(border: object) -> None:
         )
 
 
-def _bind_mask_audit(report_path: Path | str) -> dict[str, Any]:
-    """Read an evaluation report and bind its digest and derived outcome."""
-    path = Path(report_path).resolve()
+def _read_audit_files(report: Path, manifest: Path) -> tuple[bytes, bytes, dict]:
+    """Read the report and its audit manifest and derive the outcome."""
+    raw = report.read_bytes()
+    raw_manifest = manifest.read_bytes()
+    outcome = audit_report_outcome(json.loads(raw), json.loads(raw_manifest))
+    return raw, raw_manifest, outcome
+
+
+def _bind_mask_audit(
+    report_path: Path | str, manifest_path: Path | str, root: Path | str
+) -> dict[str, Any]:
+    """Bind a genuine evaluation report, its audit manifest and the derived outcome."""
+    report = Path(report_path).resolve()
+    manifest = Path(manifest_path).resolve()
     try:
-        raw = path.read_bytes()
-        outcome = audit_report_outcome(json.loads(raw))
-    except (OSError, ValueError) as error:
-        raise FreezeRecordError(f"cannot bind mask audit report {path}: {error}") from (
-            error
-        )
+        raw, raw_manifest, outcome = _read_audit_files(report, manifest)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise FreezeRecordError(
+            f"cannot bind mask audit report {report}: {error}"
+        ) from error
     return {
         **outcome,
-        "report": str(path),
+        "report": _portable(report, root),
         "report_sha256": hashlib.sha256(raw).hexdigest(),
+        "audit_manifest": _portable(manifest, root),
+        "audit_manifest_sha256": hashlib.sha256(raw_manifest).hexdigest(),
     }
 
 
 def _bind_policy_matrix(
-    policy_dir: Path | str, matrix: Mapping[str, Sequence[Any]] | None
+    policy_dir: Path | str,
+    matrix: Mapping[str, Sequence[Any]] | None,
+    root: Path | str,
 ) -> dict[str, Any]:
     """Verify every policy file against its receipt and return the binding."""
     requested = dict(matrix or {})
@@ -261,7 +347,7 @@ def _bind_policy_matrix(
     found = sorted({name.split("/", 1)[0] for name in binding["files"]})
     return {
         "schema": 1,
-        "path": str(Path(policy_dir).resolve()),
+        "path": _portable(policy_dir, root),
         **binding,
         "matrix": {
             "pools": sorted(pools) if pools else found,
@@ -295,6 +381,7 @@ def write_freeze_record(
     target_dir: Path | str,
     policy_dir: Path | str,
     mask_audit_report: Path | str,
+    mask_audit_manifest: Path | str,
     matrix: Mapping[str, Sequence[Any]] | None = None,
     required_fit_ids: Iterable[str] = (),
     reads_log: Path | str | None = None,
@@ -302,9 +389,11 @@ def write_freeze_record(
     """Write the hashed matrix-freeze record; never replaces an existing file.
 
     The one record binds the target manifests, every policy-matrix file (and so
-    every draw's protected-test manifest), the mask audit report digest and the
-    diagnostic pool, view and policy. The mask-audit outcome is derived from the
-    report, so a spec that carries its own is refused.
+    every draw's protected-test manifest), the mask audit report and its audit
+    manifest by digest, and the diagnostic pool, view and policy. The mask-audit
+    outcome is derived from the report, so a spec that carries its own is refused,
+    and a fixture report is never accepted. Earlier label reads make the record
+    post hoc; well-formed residual-audit reads are listed as ``audit_reads``.
     """
     if "mask_audit" in spec:
         raise FreezeRecordError(
@@ -326,26 +415,19 @@ def write_freeze_record(
         )
     if not isinstance(spec["selections"], dict) or not spec["selections"]:
         raise FreezeRecordError("selections must list the validation-selected choices")
-    mask_audit = _bind_mask_audit(mask_audit_report)
-    policy_binding = _bind_policy_matrix(policy_dir, matrix)
+    mask_audit = _bind_mask_audit(mask_audit_report, mask_audit_manifest, root)
+    policy_binding = _bind_policy_matrix(policy_dir, matrix, root)
     _check_diagnostic(spec["diagnostic"], policy_binding["matrix"])
     _check_border(spec["border_probe"])
     _check_outcomes(spec, validation_outcomes, mask_audit)
     manifests = _manifest_binding(target_dir)
-    default_log = default_reads_log_path(root)
-    prior_reads = _label_reads(read_reads_log(default_log))
-    if reads_log is not None and Path(reads_log).resolve() != default_log.resolve():
-        known_reads = {canonical_hash(entry) for entry in prior_reads}
-        for entry in _label_reads(read_reads_log(Path(reads_log))):
-            entry_hash = canonical_hash(entry)
-            if entry_hash not in known_reads:
-                prior_reads.append(entry)
-                known_reads.add(entry_hash)
+    prior_reads, audit_reads = _merged_reads(root, reads_log)
     body = {
         **{key: spec[key] for key in REQUIRED_KEYS},
         "fit_ids": sorted(fit_ids),
         "analysis_ids": sorted(analysis_ids),
         "invalidated_reads": prior_reads,
+        "audit_reads": audit_reads,
         "mask_audit": mask_audit,
         "policy_binding": policy_binding,
         "manifest_binding": manifests,
@@ -443,9 +525,140 @@ class RunEntry:
     split: int | None = None
     seed_index: int | None = None
     assignment_table_sha256: str | None = None
+    prediction_receipt_sha256: str | None = None
 
 
 VARIANTS = ("full", "leaf_only", "background_only", "border", "pad_cue")
+PREDICTION_RECEIPT_SCHEMA = 1
+
+
+def training_description(
+    receipt: Mapping[str, Any], fit_id: str
+) -> tuple[dict[str, Any], str, dict[str, Any]]:
+    """Return a fit's description, artifact kind and artifact entry from its receipt.
+
+    Deep fits carry a ``checkpoint`` artifact and a fit-description mapping;
+    classical fits carry a ``model`` artifact and a fit ID string.
+
+    Raises:
+        FreezeRecordError: the receipt is malformed or binds no checkpoint or model.
+    """
+    results = receipt.get("results")
+    artifacts = receipt.get("artifacts")
+    if not isinstance(results, dict) or not isinstance(artifacts, dict):
+        raise FreezeRecordError(f"training receipt of {fit_id} is malformed")
+    fit = results.get("fit")
+    if isinstance(fit, dict):
+        description: dict[str, Any] = {**results, **fit}
+    elif isinstance(fit, str):
+        description = {"fit_id": fit, **results}
+    else:
+        raise FreezeRecordError(f"training receipt has no fit metadata for {fit_id}")
+    kind = "checkpoint" if "checkpoint" in artifacts else "model"
+    artifact = artifacts.get(kind)
+    if (
+        not isinstance(artifact, dict)
+        or "path" not in artifact
+        or not _is_sha256(artifact.get("sha256"))
+    ):
+        raise FreezeRecordError(
+            f"training receipt of {fit_id} binds no checkpoint or model"
+        )
+    return description, kind, artifact
+
+
+def training_receipt_digest(run_dir: Path) -> str:
+    """SHA-256 of the receipt file the run store wrote for one fit."""
+    try:
+        return _file_hash(run_dir / "receipt.json")
+    except OSError as error:
+        raise FreezeRecordError(
+            f"cannot read the training receipt in {run_dir}"
+        ) from error
+
+
+def receipt_manifest_digest(description: Mapping[str, Any]) -> str:
+    """The digest of the manifest a fit trained on, as its receipt recorded it.
+
+    A classical receipt records ``manifest``; a deep receipt records the train
+    manifest under ``lineage.manifests``.
+    """
+    direct = description.get("manifest")
+    lineage = description.get("lineage")
+    manifests = lineage.get("manifests") if isinstance(lineage, dict) else None
+    train = manifests.get("train") if isinstance(manifests, dict) else None
+    digest = direct if isinstance(direct, str) else train
+    if not _is_sha256(digest):
+        raise FreezeRecordError("training receipt records no train manifest digest")
+    return str(digest)
+
+
+def prediction_receipt_path(run_dir: Path, record_hash: str) -> Path:
+    """Where the gate writes the receipt of predictions made under one record."""
+    return run_dir / f"predictions.{record_hash}.receipt.json"
+
+
+def write_prediction_receipt(
+    run_dir: Path,
+    *,
+    record_hash: str,
+    fit_id: str,
+    training_receipt_sha256: str,
+    artifact_kind: str,
+    artifact_sha256: str,
+    fit_manifest_sha256: str,
+    predictions_sha256: str,
+) -> str:
+    """Write the digest-bound receipt of one gated prediction and return its SHA-256.
+
+    It binds the freeze record, the training receipt, the checkpoint or model, the
+    manifest the fit trained on and the predictions, so a run record can tell the
+    predictions of this fit from another fit's or a hand-written file.
+    """
+    body = {
+        "schema": PREDICTION_RECEIPT_SCHEMA,
+        "freeze_record_hash": record_hash,
+        "fit_id": fit_id,
+        "training_receipt_sha256": training_receipt_sha256,
+        "artifact": {"kind": artifact_kind, "sha256": artifact_sha256},
+        "fit_manifest_sha256": fit_manifest_sha256,
+        "predictions_sha256": predictions_sha256,
+    }
+    data = (
+        json.dumps({"hash": canonical_hash(body), "body": body}, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    path = prediction_receipt_path(run_dir, record_hash)
+    if path.exists() and path.read_bytes() != data:
+        raise FreezeRecordError(
+            f"prediction receipt already exists and differs: {path}"
+        )
+    path.write_bytes(data)
+    return hashlib.sha256(data).hexdigest()
+
+
+def read_prediction_receipt(
+    run_dir: Path, record_hash: str, fit_id: str
+) -> tuple[dict[str, Any], str]:
+    """Return a verified prediction receipt body and its file SHA-256."""
+    path = prediction_receipt_path(run_dir, record_hash)
+    try:
+        raw = path.read_bytes()
+        payload = json.loads(raw)
+    except (OSError, ValueError) as error:
+        raise FreezeRecordError(
+            f"no prediction receipt for {fit_id} under this freeze record; "
+            "run evaluate predict-test"
+        ) from error
+    body = payload.get("body") if isinstance(payload, dict) else None
+    if (
+        not isinstance(body, dict)
+        or payload.get("hash") != canonical_hash(body)
+        or body.get("schema") != PREDICTION_RECEIPT_SCHEMA
+        or body.get("freeze_record_hash") != record_hash
+        or body.get("fit_id") != fit_id
+    ):
+        raise FreezeRecordError(f"prediction receipt of {fit_id} does not verify")
+    return body, hashlib.sha256(raw).hexdigest()
 
 
 def _inside(base: Path, relative: str | Path) -> Path:
@@ -457,35 +670,26 @@ def _inside(base: Path, relative: str | Path) -> Path:
 
 
 def _fit_lineage(
-    store: RunStore, base: Path, fit_id: str, run: Mapping[str, Any]
-) -> dict[str, Any]:
-    """Bind one fit's receipt and its checkpoint or model by digest.
+    store: RunStore,
+    base: Path,
+    fit_id: str,
+    run: Mapping[str, Any],
+    record_hash: str,
+) -> tuple[dict[str, Any], str]:
+    """Bind one fit's receipt, artifact and gated prediction receipt by digest.
 
-    Deep fits carry a ``checkpoint`` artifact and a fit-description mapping;
-    classical fits carry a ``model`` artifact and a fit ID string. Both are
-    accepted, and a fit without a verified receipt is refused.
+    Returns the lineage entry and the predictions digest the prediction receipt
+    pins. A fit without a verified training receipt, or whose predictions were not
+    produced by ``evaluate predict-test`` under this record from this very receipt
+    and checkpoint or model, is refused.
     """
     receipt = store.receipt(fit_id, missing_ok=True)
     if receipt is None:
         raise FreezeRecordError(f"no verified training receipt for {fit_id}")
     run_dir = store.run_dir(fit_id)
-    try:
-        raw_receipt = (run_dir / "receipt.json").read_bytes()
-    except OSError as error:
-        raise FreezeRecordError(f"cannot read the training receipt of {fit_id}") from (
-            error
-        )
-    results = receipt.get("results")
-    artifacts = receipt.get("artifacts")
-    if not isinstance(results, dict) or not isinstance(artifacts, dict):
-        raise FreezeRecordError(f"training receipt of {fit_id} is malformed")
-    fit = results.get("fit")
-    if isinstance(fit, str):
-        description: dict[str, Any] = {"fit_id": fit, **results}
-    elif isinstance(fit, dict):
-        description = fit
-    else:
-        raise FreezeRecordError(f"training receipt has no fit metadata for {fit_id}")
+    receipt_sha256 = training_receipt_digest(run_dir)
+    results = receipt["results"] if isinstance(receipt.get("results"), dict) else {}
+    description, kind, artifact = training_description(receipt, fit_id)
     if description.get("fit_id", fit_id) != fit_id:
         raise FreezeRecordError(f"training receipt fit ID does not match {fit_id}")
     if description.get("seed") != int(run["seed"]):
@@ -496,12 +700,6 @@ def _fit_lineage(
     if system is not None and system != run["system"]:
         raise FreezeRecordError(
             f"training receipt system does not match run record for {fit_id}"
-        )
-    kind = "checkpoint" if "checkpoint" in artifacts else "model"
-    artifact = artifacts.get(kind)
-    if not isinstance(artifact, dict) or not isinstance(artifact.get("sha256"), str):
-        raise FreezeRecordError(
-            f"training receipt of {fit_id} binds no checkpoint or model"
         )
     try:
         path = _inside(base, run_dir.relative_to(base) / str(artifact["path"]))
@@ -514,13 +712,26 @@ def _fit_lineage(
         raise FreezeRecordError(
             f"{kind} artifact does not match training receipt for {fit_id}"
         )
+    prediction, prediction_receipt_sha256 = read_prediction_receipt(
+        run_dir, record_hash, fit_id
+    )
+    if (
+        prediction.get("training_receipt_sha256") != receipt_sha256
+        or prediction.get("artifact") != {"kind": kind, "sha256": observed}
+        or prediction.get("fit_manifest_sha256") != receipt_manifest_digest(description)
+    ):
+        raise FreezeRecordError(
+            f"prediction receipt of {fit_id} was made from a different fit; "
+            "run evaluate predict-test again"
+        )
     metrics = results.get("metrics")
     metrics = metrics if isinstance(metrics, dict) else {}
     score = metrics.get("val_f1", metrics.get("val_macro_f1"))
     entry: dict[str, Any] = {
         kind: path.relative_to(base).as_posix(),
         f"{kind}_sha256": observed,
-        "training_receipt_sha256": hashlib.sha256(raw_receipt).hexdigest(),
+        "training_receipt_sha256": receipt_sha256,
+        "prediction_receipt_sha256": prediction_receipt_sha256,
         "lineage_fit_id": fit_id,
     }
     if isinstance(score, int | float) and not isinstance(score, bool):
@@ -535,7 +746,7 @@ def _fit_lineage(
     digest = assignment.get("sha256") if isinstance(assignment, dict) else None
     if isinstance(digest, str):
         entry["assignment_table_sha256"] = digest
-    return entry
+    return entry, str(prediction["predictions_sha256"])
 
 
 def write_run_record(
@@ -549,7 +760,11 @@ def write_run_record(
     ``run_store`` is the run-store root, wherever ``output`` is written. Every
     run, including a probe variant, binds the receipt of the fit whose weights
     produced its predictions (the ``of`` fit for a leaf-only run) together with
-    that fit's checkpoint or model digest and the predictions digest.
+    that fit's checkpoint or model digest, the gated prediction receipt and the
+    predictions digest. A fit's predictions must be the ones ``predict-test`` wrote
+    for that fit under this record; another fit's file or a hand-written one is
+    refused. Leaf-only predictions have no gated producer, so they are bound by
+    digest and by the prediction receipt of the full fit they were made from.
     """
     record = load_freeze_record(freeze_record)
     listed = set(record["body"]["fit_ids"])
@@ -579,6 +794,12 @@ def write_run_record(
             digest = _file_hash(path)
         except OSError as error:
             raise FreezeRecordError(f"cannot read predictions: {path}") from error
+        lineage, gated_digest = _fit_lineage(store, base, source, run, record["hash"])
+        if variant != "leaf_only" and digest != gated_digest:
+            raise FreezeRecordError(
+                f"predictions of {fit_id} are not the ones predict-test wrote "
+                "for that fit under this freeze record"
+            )
         entries[fit_id] = {
             "system": run["system"],
             "seed": int(run["seed"]),
@@ -586,7 +807,7 @@ def write_run_record(
             "predictions": path.relative_to(base).as_posix(),
             "predictions_sha256": digest,
             "of": run.get("of"),
-            **_fit_lineage(store, base, source, run),
+            **lineage,
         }
     if not entries:
         raise FreezeRecordError("a run record needs at least one run")
@@ -605,27 +826,42 @@ class Authorization:
     runs: tuple[RunEntry, ...]
     body: Mapping[str, Any]
 
+    @property
+    def missing_fit_ids(self) -> tuple[str, ...]:
+        """Frozen fits with no authorized run; a read without them is not the matrix."""
+        covered = {run.fit_id for run in self.runs}
+        return tuple(sorted(set(self.body.get("fit_ids", ())) - covered))
 
-def _verify_mask_audit(bound: object) -> None:
-    """The bound report must still exist, unchanged, with the same outcome."""
-    if not isinstance(bound, dict) or not isinstance(bound.get("report"), str):
+
+def _verify_mask_audit(bound: object, root: Path | str) -> None:
+    """The bound report and audit manifest must be unchanged and still genuine."""
+    if (
+        not isinstance(bound, dict)
+        or not isinstance(bound.get("report"), str)
+        or not isinstance(bound.get("audit_manifest"), str)
+    ):
         raise TestReadRefusedError("freeze record binds no mask audit report")
     try:
-        raw = Path(bound["report"]).read_bytes()
-        outcome = audit_report_outcome(json.loads(raw))
-    except (OSError, ValueError) as error:
+        raw, raw_manifest, outcome = _read_audit_files(
+            bound_path(bound["report"], root),
+            bound_path(bound["audit_manifest"], root),
+        )
+    except (OSError, ValueError, KeyError, TypeError) as error:
         raise TestReadRefusedError(
-            "bound mask audit report is missing or invalid"
+            f"bound mask audit report is missing or invalid: {error}"
         ) from error
-    if hashlib.sha256(raw).hexdigest() != bound.get("report_sha256") or any(
-        bound.get(key) != value for key, value in outcome.items()
+    if (
+        hashlib.sha256(raw).hexdigest() != bound.get("report_sha256")
+        or hashlib.sha256(raw_manifest).hexdigest()
+        != bound.get("audit_manifest_sha256")
+        or any(bound.get(key) != value for key, value in outcome.items())
     ):
         raise TestReadRefusedError(
             "bound mask audit report changed since the freeze record"
         )
 
 
-def _verify_policy_binding(bound: object) -> None:
+def _verify_policy_binding(bound: object, root: Path | str) -> None:
     """Every bound policy file must still match the record, byte for byte."""
     matrix = bound.get("matrix") if isinstance(bound, dict) else None
     if (
@@ -636,7 +872,7 @@ def _verify_policy_binding(bound: object) -> None:
     ):
         raise TestReadRefusedError("freeze record has no supported policy binding")
     try:
-        current = policy_matrix_binding(bound["path"], **matrix)
+        current = policy_matrix_binding(bound_path(bound["path"], root), **matrix)
     except (OSError, ValueError, TypeError) as error:
         raise TestReadRefusedError(
             f"bound policy matrix no longer verifies: {error}"
@@ -663,8 +899,8 @@ def verify_freeze_record(
         )
     if body["environment_lock_hash"] != environment_lock_hash(root):
         raise TestReadRefusedError("environment lock changed since the freeze record")
-    _verify_mask_audit(body.get("mask_audit"))
-    _verify_policy_binding(body.get("policy_binding"))
+    _verify_mask_audit(body.get("mask_audit"), root)
+    _verify_policy_binding(body.get("policy_binding"), root)
     binding = body.get("manifest_binding")
     if not isinstance(binding, dict) or binding.get("schema") != 1:
         raise TestReadRefusedError("freeze record has no supported manifest binding")
@@ -759,14 +995,22 @@ def log_test_read(
     *,
     operation: str = "evaluate_test",
     additional_logs: Sequence[Path | str] = (),
+    details: Mapping[str, Any] | None = None,
 ) -> None:
-    """Append a test read so a later record can be flagged post-hoc."""
-    line = {
+    """Append a test read so a later record can be flagged post-hoc.
+
+    ``details`` names what the read used (training receipt and artifact digests for
+    a prediction; pool, sample IDs and weights for a residual audit), so the
+    ledger row can be checked later rather than trusted by its operation string.
+    """
+    line: dict[str, Any] = {
         "time": datetime.now(UTC).isoformat(),
         "record_hash": record_hash,
         "fit_ids": list(fit_ids),
         "operation": operation,
     }
+    if details is not None:
+        line["details"] = dict(details)
     encoded = json.dumps(line, sort_keys=True) + "\n"
     paths = [Path(reads_log), *(Path(path) for path in additional_logs)]
     seen: set[Path] = set()
@@ -806,18 +1050,34 @@ def _append_durably(path: Path, text: str) -> None:
         lock.release()
 
 
-def invalidated_reads(
-    reads_log: Path | str | None, record_hash: str
-) -> list[dict[str, Any]]:
-    """Earlier reads made under a different record; they no longer stand.
+def refuse_conflicting_repeat(
+    logs: Iterable[Path | str],
+    record_hash: str,
+    fit_id: str,
+    operation: str,
+    details: Mapping[str, Any],
+) -> None:
+    """Refuse a second read of one fit under one record from a different fit state.
 
-    The residual-contamination audit is logged but never invalidates: it opens
-    protected-test pixels to look for near-duplicates of training images and
-    reads no label, score or prediction, so nothing it sees can steer a fit.
+    A repeat read may reproduce the same predictions, but the ledger must not
+    show one record reading two different checkpoints or training receipts for
+    the same fit ID.
+
+    Raises:
+        TestReadRefusedError: an earlier row for this record and fit carries
+            different details.
     """
-    return [
-        entry
-        for entry in read_reads_log(None if reads_log is None else Path(reads_log))
-        if entry["record_hash"] != record_hash
-        and entry.get("operation") != RESIDUAL_AUDIT_OPERATION
-    ]
+    for log in logs:
+        for entry in read_reads_log(Path(log)):
+            earlier = entry.get("details")
+            if (
+                entry.get("record_hash") == record_hash
+                and entry.get("fit_ids") == [fit_id]
+                and entry.get("operation") == operation
+                and isinstance(earlier, dict)
+                and any(earlier.get(key) != value for key, value in details.items())
+            ):
+                raise TestReadRefusedError(
+                    f"test read refused: {fit_id} was already read under this "
+                    "freeze record with a different training receipt or artifact"
+                )

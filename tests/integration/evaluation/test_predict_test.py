@@ -8,14 +8,15 @@ from pathlib import Path
 
 import pytest
 
-from jute_disease.config import BENCHMARK_CONFIG
-from jute_disease.data import load_manifest
+from jute_disease.config import BENCHMARK_CONFIG, CURATION_RULES_PATH
+from jute_disease.data import freeze_target, load_manifest, make_synthetic_data
 from jute_disease.data.manifest import load_protected_test_manifest
 from jute_disease.evaluation import gated_predictions as predict_module
 from jute_disease.training import (
     DataInputs,
     FitKind,
     FitSpec,
+    Recipe,
     RunStore,
     fit_classical,
     fit_cnn,
@@ -36,6 +37,10 @@ DEEP = FitSpec(
 CLASSICAL = FitSpec(
     "classical/lr-raw", FitKind.CLASSICAL, 42, estimator="lr", features="raw"
 )
+FOREIGN = FitSpec(
+    "classical/lr-foreign", FitKind.CLASSICAL, 42, estimator="lr", features="raw"
+)
+OUTSIDE = "classical/lr-outside-the-matrix"
 FITS = {"deep": DEEP, "classical": CLASSICAL}
 
 
@@ -44,18 +49,67 @@ def image_root(target: Path) -> Path:
     return target.parents[1] / "images"
 
 
-@pytest.fixture(scope="module")
-def trained(
-    target: Path, image_root: Path, tmp_path_factory: pytest.TempPathFactory
-) -> Path:
-    """A run store holding one real deep fit and one real classical fit."""
-    recipe = replace(
+def _recipe() -> Recipe:
+    return replace(
         load_benchmark(BENCHMARK_CONFIG).recipe,
         image_size=64,
         max_epochs=1,
         precision="32-true",
         num_workers=0,
     )
+
+
+def _train_classical(
+    spec: FitSpec, store: RunStore, target: Path, image_root: Path
+) -> None:
+    """Train and record one real classical fit of the synthetic target."""
+    run = store.start(spec.fit_id, "synthetic identity")
+    result = fit_classical(
+        spec,
+        _recipe(),
+        DataInputs(image_root=image_root, target_dir=target, sources={}),
+        run.attempt_dir,
+        run.attempt_dir.parent / "feature-cache",
+    )
+    run.complete(result.results, result.artifacts)
+
+
+@pytest.fixture(scope="module")
+def foreign(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A store holding a classical fit trained on another frozen target."""
+    base = tmp_path_factory.mktemp("foreign")
+    plan = make_synthetic_data(base / "images", per_class=24, size=64)
+    rules = json.loads(CURATION_RULES_PATH.read_text(encoding="utf-8"))
+    rules["min_support"] = 2
+    (base / "rules.json").write_text(json.dumps(rules), encoding="utf-8")
+    freeze_target(
+        base / "freeze",
+        image_root=plan.root,
+        rules_path=base / "rules.json",
+        reviews_path=None,
+        workers=2,
+    )
+    store = RunStore(base / "store")
+    _train_classical(FOREIGN, store, base / "freeze" / "target", plan.root)
+    return store.root
+
+
+@pytest.fixture(scope="module")
+def retrained(
+    target: Path, image_root: Path, tmp_path_factory: pytest.TempPathFactory
+) -> Path:
+    """The same fit ID retrained with another seed, so its receipt and model differ."""
+    store = RunStore(tmp_path_factory.mktemp("retrained"))
+    _train_classical(replace(CLASSICAL, seed=7), store, target, image_root)
+    return store.root
+
+
+@pytest.fixture(scope="module")
+def trained(
+    target: Path, image_root: Path, tmp_path_factory: pytest.TempPathFactory
+) -> Path:
+    """A run store holding one real deep fit and one real classical fit."""
+    recipe = _recipe()
     data = DataInputs(image_root=image_root, target_dir=target, sources={})
     store = RunStore(tmp_path_factory.mktemp("trained"))
     deep = store.start(DEEP.fit_id, "synthetic identity")
@@ -109,6 +163,7 @@ def _predict(
     target: Path,
     image_root: Path,
     root: Path,
+    *extra: object,
 ) -> dict[str, object]:
     capsys.readouterr()
     arguments: list[object] = [
@@ -127,7 +182,7 @@ def _predict(
     ]
     if freeze is not None:
         arguments += ["--freeze-record", freeze]
-    _cli(*arguments)
+    _cli(*arguments, *extra)
     return json.loads(capsys.readouterr().out)
 
 
@@ -201,6 +256,214 @@ def test_predict_test_authorises_logs_and_writes_digested_predictions(
         fit_id
     ]
     assert entry["predictions_sha256"] == digest
+
+
+def test_a_custom_reads_log_never_replaces_the_project_ledger(
+    freeze: Path,
+    store: Path,
+    target: Path,
+    image_root: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    custom = tmp_path / "elsewhere" / "reads.jsonl"
+    _predict(
+        capsys,
+        freeze,
+        CLASSICAL.fit_id,
+        store,
+        target,
+        image_root,
+        root,
+        "--reads-log",
+        custom,
+    )
+    assert len(_rows(root)) == 1
+    assert len(custom.read_text().splitlines()) == 1
+
+    later = _freeze(
+        tmp_path,
+        target,
+        root,
+        policy_dir,
+        mask_audit_report,
+        capsys,
+        [DEEP.fit_id, CLASSICAL.fit_id],
+        name="later-freeze.json",
+    )
+    assert json.loads(later.read_text(encoding="utf-8"))["body"]["post_hoc"] is True
+
+
+def _run_record(
+    freeze: Path, store: Path, fit_id: str, tmp_path: Path, name: str = "rr.json"
+) -> None:
+    system = DEEP.system if fit_id == DEEP.fit_id else "classical"
+    runs = _write(
+        tmp_path / f"{name}.runs.json",
+        [
+            {
+                "fit_id": fit_id,
+                "system": system,
+                "seed": 42,
+                "predictions": f"{fit_id}/predictions.json",
+            }
+        ],
+    )
+    _cli(
+        "evaluate",
+        "run-record",
+        "--freeze-record",
+        freeze,
+        "--runs",
+        runs,
+        "--run-store",
+        store,
+        "--output",
+        tmp_path / name,
+    )
+
+
+def test_handwritten_predictions_cannot_enter_a_run_record(
+    freeze: Path, store: Path, tmp_path: Path
+) -> None:
+    _write(
+        store / DEEP.fit_id / "predictions.json",
+        {"image_ids": [], "predictions": []},
+    )
+    with pytest.raises(SystemExit, match="no prediction receipt"):
+        _run_record(freeze, store, DEEP.fit_id, tmp_path)
+    assert not (tmp_path / "rr.json").exists()
+
+
+def test_swapped_predictions_cannot_enter_a_run_record(
+    freeze: Path,
+    store: Path,
+    target: Path,
+    image_root: Path,
+    root: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fit_id = CLASSICAL.fit_id
+    _predict(capsys, freeze, fit_id, store, target, image_root, root)
+    path = store / fit_id / "predictions.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["predictions"] = payload["predictions"][::-1]
+    _write(path, payload)
+    with pytest.raises(SystemExit, match="not the ones predict-test wrote"):
+        _run_record(freeze, store, fit_id, tmp_path)
+
+
+def test_predictions_from_another_freeze_record_are_not_accepted(
+    freeze: Path,
+    store: Path,
+    target: Path,
+    image_root: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fit_id = CLASSICAL.fit_id
+    _predict(capsys, freeze, fit_id, store, target, image_root, root)
+    later = _freeze(
+        tmp_path,
+        target,
+        root,
+        policy_dir,
+        mask_audit_report,
+        capsys,
+        [DEEP.fit_id, CLASSICAL.fit_id],
+        name="later-freeze.json",
+    )
+    with pytest.raises(SystemExit, match="no prediction receipt"):
+        _run_record(later, store, fit_id, tmp_path)
+
+
+def test_a_fit_trained_on_another_manifest_is_refused_before_any_read(
+    tmp_path: Path,
+    target: Path,
+    image_root: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+    foreign: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    freeze = _freeze(
+        tmp_path,
+        target,
+        root,
+        policy_dir,
+        mask_audit_report,
+        capsys,
+        [FOREIGN.fit_id],
+    )
+    with pytest.raises(SystemExit, match="not trained on the manifest"):
+        _predict(capsys, freeze, FOREIGN.fit_id, foreign, target, image_root, root)
+    assert _rows(root) == []
+    assert not (foreign / FOREIGN.fit_id / "predictions.json").exists()
+
+
+def test_a_fit_outside_the_frozen_matrix_is_refused_before_any_read(
+    tmp_path: Path,
+    target: Path,
+    image_root: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    freeze = _freeze(
+        tmp_path, target, root, policy_dir, mask_audit_report, capsys, [OUTSIDE]
+    )
+    store = RunStore(tmp_path / "outside-store")
+    run = store.start(OUTSIDE, "synthetic identity")
+    model = run.attempt_dir / "model.joblib"
+    model.write_bytes(b"synthetic model")
+    run.complete(
+        {
+            "fit": OUTSIDE,
+            "seed": 42,
+            "pool": "Z",
+            "view": 1,
+            "policy": "near-duplicate",
+            "split": 0,
+            "recipe": {"image_size": 64},
+            "features": "raw",
+            "manifest": "c" * 64,
+        },
+        {"model": model},
+    )
+    with pytest.raises(SystemExit, match="outside the frozen matrix"):
+        _predict(capsys, freeze, OUTSIDE, store.root, target, image_root, root)
+    assert _rows(root) == []
+
+
+def test_a_repeat_with_a_different_training_receipt_is_refused(
+    freeze: Path,
+    store: Path,
+    retrained: Path,
+    target: Path,
+    image_root: Path,
+    root: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fit_id = CLASSICAL.fit_id
+    _predict(capsys, freeze, fit_id, store, target, image_root, root)
+    row = _rows(root)[0]
+    receipt = hashlib.sha256((store / fit_id / "receipt.json").read_bytes()).hexdigest()
+    assert row["details"]["training_receipt_sha256"] == receipt
+    assert row["details"]["artifact_kind"] == "model"
+    assert len(row["details"]["artifact_sha256"]) == 64
+
+    with pytest.raises(SystemExit, match="already read under this freeze record"):
+        _predict(capsys, freeze, fit_id, retrained, target, image_root, root)
+    assert len(_rows(root)) == 1
 
 
 def test_a_repeat_read_is_logged_again_and_writes_the_same_predictions(

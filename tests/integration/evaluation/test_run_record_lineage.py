@@ -8,11 +8,19 @@ import pytest
 
 from jute_disease.evaluation import (
     FreezeRecordError,
+    authorize_test_read,
+    receipt_manifest_digest,
+    training_description,
+    training_receipt_digest,
     write_freeze_record,
+    write_prediction_receipt,
     write_run_record,
 )
 from jute_disease.training import RunStore
 
+from .conftest import audit_manifest_of
+
+MANIFEST = "b" * 64
 FIT = "cnn/mobilenet_v2_direct/pool-A/view-1/near-duplicate/split-0/seed-42"
 ANALYSES = [
     "background-probe",
@@ -53,8 +61,29 @@ def freeze(
         target_dir=target,
         policy_dir=policy_dir,
         mask_audit_report=mask_audit_report,
+        mask_audit_manifest=audit_manifest_of(mask_audit_report),
     )
     return tmp_path / "freeze.json"
+
+
+def _issue(freeze: Path, runs: Path, fit_id: str = FIT) -> Path:
+    """Write the receipt ``evaluate predict-test`` writes for a fit's predictions."""
+    store = RunStore(runs)
+    description, kind, artifact = training_description(store.receipt(fit_id), fit_id)
+    run_dir = store.run_dir(fit_id)
+    write_prediction_receipt(
+        run_dir,
+        record_hash=json.loads(freeze.read_text(encoding="utf-8"))["hash"],
+        fit_id=fit_id,
+        training_receipt_sha256=training_receipt_digest(run_dir),
+        artifact_kind=kind,
+        artifact_sha256=artifact["sha256"],
+        fit_manifest_sha256=receipt_manifest_digest(description),
+        predictions_sha256=hashlib.sha256(
+            (runs / "predictions.json").read_bytes()
+        ).hexdigest(),
+    )
+    return run_dir
 
 
 def _complete_deep(store: RunStore, *, seed: int = 42) -> Path:
@@ -74,6 +103,7 @@ def _complete_deep(store: RunStore, *, seed: int = 42) -> Path:
                 "seed_index": 0,
             },
             "metrics": {"val_macro_f1": 0.6},
+            "lineage": {"manifests": {"train": MANIFEST}},
         },
         {"checkpoint": checkpoint},
         metadata={"assignment_table": {"sha256": "a" * 64}},
@@ -97,6 +127,7 @@ def test_run_record_binds_checkpoint_validation_and_assignment_receipt(
     runs = tmp_path / "runs"
     checkpoint = _complete_deep(RunStore(runs))
     (runs / "predictions.json").write_text('{"predictions":[]}', encoding="utf-8")
+    _issue(freeze, runs)
 
     record = write_run_record(freeze, [_run()], runs, tmp_path / "run-record.json")
 
@@ -124,6 +155,7 @@ def test_a_record_written_outside_the_run_store_still_finds_the_receipts(
     runs = tmp_path / "runs"
     _complete_deep(RunStore(runs))
     (runs / "predictions.json").write_text('{"predictions":[]}', encoding="utf-8")
+    _issue(freeze, runs)
     elsewhere = tmp_path / "somewhere" / "else" / "run-record.json"
     elsewhere.parent.mkdir(parents=True)
 
@@ -147,10 +179,12 @@ def test_a_classical_receipt_binds_its_model(tmp_path: Path, freeze: Path) -> No
             "policy": "near-duplicate",
             "split": 0,
             "metrics": {"val_macro_f1": 0.4},
+            "manifest": MANIFEST,
         },
         {"model": model},
     )
     (runs / "predictions.json").write_text('{"predictions":[]}', encoding="utf-8")
+    _issue(freeze, runs)
 
     record = write_run_record(freeze, [_run()], runs, tmp_path / "run-record.json")
 
@@ -168,6 +202,7 @@ def test_a_probe_variant_takes_the_lineage_of_the_fit_it_was_made_from(
     runs = tmp_path / "runs"
     checkpoint = _complete_deep(RunStore(runs))
     (runs / "predictions.json").write_text('{"predictions":[]}', encoding="utf-8")
+    _issue(freeze, runs)
 
     record = write_run_record(
         freeze,
@@ -187,6 +222,22 @@ def test_a_probe_variant_takes_the_lineage_of_the_fit_it_was_made_from(
     )
 
 
+def test_frozen_fits_missing_from_the_run_record_are_surfaced(
+    tmp_path: Path, freeze: Path, root: Path, target: Path
+) -> None:
+    runs = tmp_path / "runs"
+    _complete_deep(RunStore(runs))
+    (runs / "predictions.json").write_text('{"predictions":[]}', encoding="utf-8")
+    _issue(freeze, runs)
+    run_record = tmp_path / "run-record.json"
+    write_run_record(freeze, [_run()], runs, run_record)
+
+    authorization = authorize_test_read(freeze, run_record, root, target_dir=target)
+
+    assert [run.fit_id for run in authorization.runs] == [FIT]
+    assert authorization.missing_fit_ids == (f"{FIT}-leaf",)
+
+
 def test_a_fit_without_a_verified_receipt_is_refused(
     tmp_path: Path, freeze: Path
 ) -> None:
@@ -201,3 +252,44 @@ def test_a_fit_without_a_verified_receipt_is_refused(
     with pytest.raises(FreezeRecordError, match="no verified training receipt"):
         write_run_record(freeze, [_run()], runs, tmp_path / "run-record.json")
     assert not (tmp_path / "run-record.json").exists()
+
+
+def test_handwritten_predictions_without_a_gate_receipt_are_refused(
+    tmp_path: Path, freeze: Path
+) -> None:
+    runs = tmp_path / "runs"
+    _complete_deep(RunStore(runs))
+    (runs / "predictions.json").write_text('{"predictions":[]}', encoding="utf-8")
+
+    with pytest.raises(FreezeRecordError, match="no prediction receipt"):
+        write_run_record(freeze, [_run()], runs, tmp_path / "run-record.json")
+    assert not (tmp_path / "run-record.json").exists()
+
+
+def test_predictions_swapped_after_the_gate_are_refused(
+    tmp_path: Path, freeze: Path
+) -> None:
+    runs = tmp_path / "runs"
+    _complete_deep(RunStore(runs))
+    (runs / "predictions.json").write_text('{"predictions":[]}', encoding="utf-8")
+    _issue(freeze, runs)
+    (runs / "predictions.json").write_text('{"predictions":["x"]}', encoding="utf-8")
+
+    with pytest.raises(FreezeRecordError, match="not the ones predict-test wrote"):
+        write_run_record(freeze, [_run()], runs, tmp_path / "run-record.json")
+
+
+def test_a_prediction_receipt_edited_after_the_gate_is_refused(
+    tmp_path: Path, freeze: Path
+) -> None:
+    runs = tmp_path / "runs"
+    _complete_deep(RunStore(runs))
+    (runs / "predictions.json").write_text('{"predictions":[]}', encoding="utf-8")
+    run_dir = _issue(freeze, runs)
+    receipt = next(run_dir.glob("predictions.*.receipt.json"))
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+    payload["body"]["training_receipt_sha256"] = "c" * 64
+    receipt.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(FreezeRecordError, match="does not verify"):
+        write_run_record(freeze, [_run()], runs, tmp_path / "run-record.json")

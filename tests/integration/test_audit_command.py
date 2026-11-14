@@ -410,7 +410,7 @@ def test_residual_audit_logs_its_test_reads_before_opening_images(
             "--weights",
             str(tmp_path / "w.pt"),
             "--weights-sha256",
-            "abc",
+            "a" * 64,
             "--root",
             str(tmp_path),
         ]
@@ -419,8 +419,13 @@ def test_residual_audit_logs_its_test_reads_before_opening_images(
     assert [entry["operation"] for entry in entries] == ["residual_audit"]
     assert len(entries[0]["record_hash"]) == 64
     assert seen_at_open and '"residual_audit"' in seen_at_open[0]
+    assert entries[0]["fit_ids"] == []
+    details = entries[0]["details"]
+    assert details["pool"] == "A"
+    assert details["weights_sha256"] == "a" * 64
+    assert len(details["sample_ids_sha256"]) == 64
     report = json.loads(capsys.readouterr().out)
-    assert report["feature_provenance"] == {"weights_file_sha256": "abc"}
+    assert report["feature_provenance"] == {"weights_file_sha256": "a" * 64}
 
 
 def test_residual_audit_refuses_unpinned_weights_without_logging_a_read(

@@ -21,6 +21,8 @@ from jute_disease.evaluation import (
 from jute_disease.evaluation import freeze_record as freeze_module
 from jute_disease.training import FileLock
 
+from .conftest import audit_manifest_of, redigest
+
 FIT = "cnn/mobilenet_v2_direct/pool-A/view-1/near-duplicate/split-0/seed-42"
 ANALYSES = [
     "background-probe",
@@ -69,6 +71,7 @@ def _write(
     name: str = "freeze.json",
     **extra: Any,
 ) -> Path:
+    extra.setdefault("mask_audit_manifest", audit_manifest_of(report))
     write_freeze_record(
         spec or _spec(),
         outcomes or _outcomes(),
@@ -86,11 +89,12 @@ def _body(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))["body"]
 
 
-def _redigest(report: dict[str, Any]) -> dict[str, Any]:
-    body = {key: value for key, value in report.items() if key != "digest"}
-    report["digest"] = hashlib.sha256(
-        json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+def _copy_audit(source: Path, directory: Path) -> Path:
+    """Copy a report and its audit manifest so a test can edit either."""
+    directory.mkdir(parents=True, exist_ok=True)
+    report = directory / "report.json"
+    shutil.copyfile(source, report)
+    shutil.copyfile(audit_manifest_of(source), audit_manifest_of(report))
     return report
 
 
@@ -156,10 +160,10 @@ def test_a_report_edited_to_pass_is_refused_at_write(
     policy_dir: Path,
     mask_audit_report: Path,
 ) -> None:
-    report = json.loads(mask_audit_report.read_text(encoding="utf-8"))
+    edited = _copy_audit(mask_audit_report, tmp_path / "audit")
+    report = json.loads(edited.read_text(encoding="utf-8"))
     for gate in ("mask_quality", "scene_tag"):
         report[gate]["gate_pass"] = True
-    edited = tmp_path / "edited.json"
     edited.write_text(json.dumps(report), encoding="utf-8")
     with pytest.raises(FreezeRecordError, match="digest does not match"):
         _write(tmp_path, target, root, policy_dir, edited)
@@ -172,20 +176,119 @@ def test_the_gate_refuses_a_report_that_changed_after_the_freeze(
     policy_dir: Path,
     passing_mask_audit_report: Path,
 ) -> None:
-    report = tmp_path / "report.json"
-    shutil.copyfile(passing_mask_audit_report, report)
+    report = _copy_audit(passing_mask_audit_report, tmp_path / "audit")
     freeze = _write(tmp_path, target, root, policy_dir, report)
     verify_freeze_record(freeze, root, target)
 
     edited = json.loads(report.read_text(encoding="utf-8"))
-    edited["scene_tag"]["gate_pass"] = False
-    report.write_text(json.dumps(_redigest(edited)), encoding="utf-8")
+    edited["scene_tag"]["lower_95"] = 0.95
+    report.write_text(json.dumps(redigest(edited)), encoding="utf-8")
     with pytest.raises(TestReadRefusedError, match="changed since"):
         verify_freeze_record(freeze, root, target)
 
     report.unlink()
     with pytest.raises(TestReadRefusedError, match="missing or invalid"):
         verify_freeze_record(freeze, root, target)
+
+
+def test_the_gate_refuses_an_audit_manifest_that_changed_after_the_freeze(
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+) -> None:
+    report = _copy_audit(mask_audit_report, tmp_path / "audit")
+    freeze = _write(tmp_path, target, root, policy_dir, report)
+    manifest = audit_manifest_of(report)
+    manifest.write_bytes(manifest.read_bytes() + b" ")
+    with pytest.raises(TestReadRefusedError, match="changed since"):
+        verify_freeze_record(freeze, root, target)
+
+
+def test_a_fixture_mask_audit_is_not_evidence(
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+) -> None:
+    report = _copy_audit(mask_audit_report, tmp_path / "audit")
+    edited = json.loads(report.read_text(encoding="utf-8"))
+    edited["fixture_mode"] = True
+    report.write_text(json.dumps(redigest(edited)), encoding="utf-8")
+    with pytest.raises(FreezeRecordError, match="fixture mask audit"):
+        _write(tmp_path, target, root, policy_dir, report)
+    assert not (tmp_path / "freeze.json").exists()
+
+
+def test_a_gate_flag_edited_to_pass_is_refused_even_with_a_redone_digest(
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+) -> None:
+    report = _copy_audit(mask_audit_report, tmp_path / "audit")
+    edited = json.loads(report.read_text(encoding="utf-8"))
+    for gate in ("mask_quality", "scene_tag"):
+        edited[gate]["gate_pass"] = True
+    edited["mask_quality"]["fail_rate"]["gate_pass"] = True
+    report.write_text(json.dumps(redigest(edited)), encoding="utf-8")
+    with pytest.raises(FreezeRecordError, match="disagree with its numbers"):
+        _write(tmp_path, target, root, policy_dir, report)
+
+
+def test_the_outcome_is_recomputed_from_the_numbers(
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    passing_mask_audit_report: Path,
+) -> None:
+    report = _copy_audit(passing_mask_audit_report, tmp_path / "audit")
+    edited = json.loads(report.read_text(encoding="utf-8"))
+    edited["mask_quality"]["fail_rate"]["upper_95"] = 0.5
+    edited["mask_quality"]["fail_rate"]["gate_pass"] = False
+    edited["mask_quality"]["gate_pass"] = False
+    report.write_text(json.dumps(redigest(edited)), encoding="utf-8")
+    body = _body(_write(tmp_path, target, root, policy_dir, report))
+    assert body["mask_audit"]["passed"] is False
+
+
+def test_a_report_for_another_audit_manifest_is_refused(
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+) -> None:
+    report = _copy_audit(mask_audit_report, tmp_path / "audit")
+    other = json.loads(audit_manifest_of(report).read_text(encoding="utf-8"))
+    other["owner_count"] = other["owner_count"] + 1
+    audit_manifest_of(report).write_text(json.dumps(other), encoding="utf-8")
+    with pytest.raises(
+        FreezeRecordError, match="does not belong to the audit manifest"
+    ):
+        _write(tmp_path, target, root, policy_dir, report)
+
+
+def test_paths_inside_the_root_are_stored_relative_to_it(
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+) -> None:
+    inside = _copy_audit(mask_audit_report, root / "evidence")
+    matrix = root / "matrix"
+    shutil.copytree(policy_dir, matrix)
+    freeze = _write(tmp_path, target, root, matrix, inside)
+    body = _body(freeze)
+    assert body["mask_audit"]["report"] == "evidence/report.json"
+    assert body["mask_audit"]["audit_manifest"] == "evidence/audit-manifest.json"
+    assert body["policy_binding"]["path"] == "matrix"
+    verify_freeze_record(freeze, root, target)
 
 
 def test_the_record_binds_every_policy_draw_and_the_gate_rechecks_them(
@@ -311,12 +414,22 @@ def test_a_residual_audit_read_does_not_make_a_record_post_hoc(
     mask_audit_report: Path,
 ) -> None:
     log = freeze_module.default_reads_log_path(root)
+    details = {
+        "pool": "A",
+        "sample_ids_sha256": "a" * 64,
+        "weights_sha256": "b" * 64,
+    }
     log_test_read(
-        log, "none", ["pool-A"], operation=freeze_module.RESIDUAL_AUDIT_OPERATION
+        log,
+        "none",
+        [],
+        operation=freeze_module.RESIDUAL_AUDIT_OPERATION,
+        details=details,
     )
     clean = _body(_write(tmp_path, target, root, policy_dir, mask_audit_report))
     assert clean["post_hoc"] is False
     assert clean["invalidated_reads"] == []
+    assert [row["details"] for row in clean["audit_reads"]] == [details]
 
     log_test_read(log, "earlier-record", [FIT], operation="predict_test")
     flagged = _body(
@@ -326,6 +439,51 @@ def test_a_residual_audit_read_does_not_make_a_record_post_hoc(
     assert [row["operation"] for row in flagged["invalidated_reads"]] == [
         "predict_test"
     ]
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        {"fit_ids": ["pool-A"], "details": {"pool": "A"}},
+        {"fit_ids": []},
+        {"fit_ids": [], "details": {"pool": "A", "sample_ids_sha256": "a" * 64}},
+        {
+            "fit_ids": [],
+            "details": {
+                "pool": "",
+                "sample_ids_sha256": "a" * 64,
+                "weights_sha256": "b" * 64,
+            },
+        },
+        {
+            "fit_ids": [FIT],
+            "details": {
+                "pool": "A",
+                "sample_ids_sha256": "a" * 64,
+                "weights_sha256": "b" * 64,
+            },
+        },
+    ],
+)
+def test_a_row_that_only_claims_the_audit_operation_makes_the_record_post_hoc(
+    row: dict[str, Any],
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+) -> None:
+    log_test_read(
+        freeze_module.default_reads_log_path(root),
+        "forged",
+        row["fit_ids"],
+        operation=freeze_module.RESIDUAL_AUDIT_OPERATION,
+        details=row.get("details"),
+    )
+    body = _body(_write(tmp_path, target, root, policy_dir, mask_audit_report))
+    assert body["post_hoc"] is True
+    assert body["audit_reads"] == []
+    assert [entry["record_hash"] for entry in body["invalidated_reads"]] == ["forged"]
 
 
 def test_the_read_log_is_appended_under_a_lock_and_flushed(

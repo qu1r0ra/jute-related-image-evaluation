@@ -1,5 +1,6 @@
 """The gated evaluator through the ``jute-disease`` CLI on the synthetic fixture."""
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -10,7 +11,15 @@ from jute_disease.cli import main
 from jute_disease.config import BENCHMARK_CONFIG
 from jute_disease.data import load_manifest
 from jute_disease.data.manifest import load_protected_test_manifest
+from jute_disease.evaluation import (
+    receipt_manifest_digest,
+    training_description,
+    training_receipt_digest,
+    write_prediction_receipt,
+)
 from jute_disease.training import RunStore, load_benchmark
+
+from .conftest import audit_manifest_of
 
 LABEL_COUNT = 2
 SYSTEM = "mobilenet_v2_direct"
@@ -104,6 +113,8 @@ def _freeze(
         policy_dir,
         "--mask-audit-report",
         mask_audit_report,
+        "--mask-audit-manifest",
+        audit_manifest_of(mask_audit_report),
     ]
     if reads_log is not None:
         arguments += ["--reads-log", reads_log]
@@ -130,17 +141,28 @@ def _receipt(
     store: RunStore,
     fit_id: str,
     seed: int,
+    manifest: str,
     *,
     classical: bool = False,
     system: str = SYSTEM,
 ) -> None:
-    """Record a completed fit the way the trainer does, with a real artifact."""
+    """Record a completed fit the way the trainer does, with a real artifact.
+
+    ``manifest`` is the digest of the train manifest the fit trained on, recorded
+    where the trainers record it: ``manifest`` for a classical fit and
+    ``lineage.manifests.train`` for a deep fit.
+    """
     run = store.start(fit_id, "identity")
     if classical:
         artifact = run.attempt_dir / "model.joblib"
         artifact.write_bytes(f"model-{fit_id}".encode())
         run.complete(
-            {"fit": fit_id, "seed": seed, "metrics": {"val_macro_f1": 0.5}},
+            {
+                "fit": fit_id,
+                "seed": seed,
+                "manifest": manifest,
+                "metrics": {"val_macro_f1": 0.5},
+            },
             artifacts={"model": artifact},
         )
         return
@@ -149,10 +171,39 @@ def _receipt(
     run.complete(
         {
             "fit": {"fit_id": fit_id, "system": system, "seed": seed},
+            "lineage": {"manifests": {"train": manifest}},
             "metrics": {"val_f1": 0.5},
         },
         artifacts={"checkpoint": artifact},
     )
+
+
+def _issue_receipts(store: RunStore, freeze: Path) -> None:
+    """Write the prediction receipt ``predict-test`` writes, for each fit with a file.
+
+    The fixtures write predictions straight into the store, so this stands in for
+    the gate: one receipt per full fit, under the given freeze record. A
+    leaf-only run has no training receipt of its own and is skipped.
+    """
+    record_hash = json.loads(freeze.read_text(encoding="utf-8"))["hash"]
+    for receipt_file in sorted(store.root.rglob("receipt.json")):
+        run_dir = receipt_file.parent
+        predictions = run_dir / "predictions.json"
+        fit_id = run_dir.relative_to(store.root).as_posix()
+        receipt = store.receipt(fit_id, missing_ok=True)
+        if receipt is None or not predictions.exists():
+            continue
+        description, kind, artifact = training_description(receipt, fit_id)
+        write_prediction_receipt(
+            run_dir,
+            record_hash=record_hash,
+            fit_id=fit_id,
+            training_receipt_sha256=training_receipt_digest(run_dir),
+            artifact_kind=kind,
+            artifact_sha256=artifact["sha256"],
+            fit_manifest_sha256=receipt_manifest_digest(description),
+            predictions_sha256=hashlib.sha256(predictions.read_bytes()).hexdigest(),
+        )
 
 
 def _complete_fit(
@@ -166,7 +217,14 @@ def _complete_fit(
     classical: bool = False,
 ) -> dict[str, object]:
     """Complete one fit in the store and return its run-record entry."""
-    _receipt(store, fit_id, seed, classical=classical, system=system)
+    _receipt(
+        store,
+        fit_id,
+        seed,
+        load_manifest(target).digest(),
+        classical=classical,
+        system=system,
+    )
     _predictions(target, store.run_dir(fit_id) / "predictions.json", flip, None)
     return {
         "fit_id": fit_id,
@@ -266,6 +324,7 @@ def test_test_read_refused_without_records_and_permitted_after(
     )
     store = RunStore(tmp_path / "runs")
     runs = _record_runs(target, store)
+    _issue_receipts(store, freeze)
     runs_file = _write(tmp_path / "runs.json", runs)
     with pytest.raises(SystemExit, match="no run record"):
         _cli(*arguments, "--freeze-record", freeze)
@@ -334,6 +393,7 @@ def test_run_record_binds_each_fit_by_digest_wherever_it_is_written(
     )
     store = RunStore(tmp_path / "store")
     runs_file = _write(tmp_path / "runs.json", _record_runs(target, store))
+    _issue_receipts(store, freeze)
     elsewhere = tmp_path / "elsewhere" / "run-record.json"
     _cli(
         "evaluate",
@@ -380,6 +440,7 @@ def test_run_record_accepts_classical_receipts(
     runs_file = _write(
         tmp_path / "runs.json", _record_runs(target, store, classical=True)
     )
+    _issue_receipts(store, freeze)
     _cli(
         "evaluate",
         "run-record",
@@ -421,6 +482,7 @@ def test_run_record_refuses_a_fit_without_a_receipt(
     )
     store = RunStore(tmp_path / "runs")
     runs = [r for r in _record_runs(target, store) if "-0" in r["fit_id"]]
+    _issue_receipts(store, freeze)
     (store.run_dir(FIT.format(0)) / "receipt.json").unlink()
     runs_file = _write(tmp_path / "runs.json", runs)
     with pytest.raises(SystemExit, match="no verified training receipt"):

@@ -22,15 +22,23 @@ from jute_disease.data import (
     Manifest,
     ManifestDataset,
     classical_pipeline,
+    load_manifest,
     load_policy_complete_manifest,
+    load_policy_manifest,
 )
 from jute_disease.data.manifest import load_complete_manifest
 from jute_disease.evaluation.freeze_record import (
     FreezeRecordError,
     TestReadRefusedError,
+    bound_path,
     default_reads_log_path,
     log_test_read,
+    receipt_manifest_digest,
+    refuse_conflicting_repeat,
+    training_description,
+    training_receipt_digest,
     verify_freeze_record,
+    write_prediction_receipt,
 )
 from jute_disease.models.dl import Classifier, TimmBackbone, read_checkpoint_state
 from jute_disease.models.ml import (
@@ -45,54 +53,103 @@ PREDICTIONS_FILE = "predictions.json"
 OPERATION = "predict_test"
 
 
-def _description(
-    receipt: Mapping[str, Any], fit_id: str
-) -> tuple[dict[str, Any], str, dict[str, Any]]:
-    """Return the fit description, the artifact kind and the artifact entry."""
-    results = receipt.get("results")
-    artifacts = receipt.get("artifacts")
-    if not isinstance(results, dict) or not isinstance(artifacts, dict):
-        raise TestReadRefusedError(f"training receipt of {fit_id} is malformed")
-    fit = results.get("fit")
-    if isinstance(fit, dict):
-        description = {**results, **fit}
-    elif isinstance(fit, str):
-        description = dict(results)
-    else:
-        raise TestReadRefusedError(f"training receipt has no fit metadata: {fit_id}")
-    kind = "checkpoint" if "checkpoint" in artifacts else "model"
-    artifact = artifacts.get(kind)
-    if not isinstance(artifact, dict) or "path" not in artifact:
+def _cell(description: Mapping[str, Any]) -> dict[str, Any]:
+    """The pool, view, policy and draw a pooled fit declares in its receipt."""
+    cell = {
+        "pool": description.get("pool"),
+        "view": description.get("view"),
+        "policy": description.get("policy"),
+        "draw": description.get("split"),
+        "image_size": (description.get("recipe") or {}).get("image_size"),
+    }
+    if any(value is None for value in cell.values()):
         raise TestReadRefusedError(
-            f"training receipt of {fit_id} binds no checkpoint or model"
+            "test read refused: the training receipt does not name its policy cell"
         )
-    return description, kind, artifact
+    return cell
+
+
+def _bound_policy_dir(
+    body: Mapping[str, Any], root: Path | str, policy_dir: Path | str | None
+) -> Path:
+    bound = bound_path(body["policy_binding"]["path"], root)
+    if policy_dir is not None and Path(policy_dir).resolve() != bound.resolve():
+        raise TestReadRefusedError(
+            "policy dir is not the one bound by the freeze record"
+        )
+    return bound
+
+
+def _require_frozen_cell(body: Mapping[str, Any], cell: Mapping[str, Any]) -> None:
+    matrix = body["policy_binding"]["matrix"]
+    for field, key in (
+        ("pools", "pool"),
+        ("views", "view"),
+        ("policies", "policy"),
+        ("draws", "draw"),
+    ):
+        if cell[key] not in matrix[field]:
+            raise TestReadRefusedError(
+                f"test read refused: {key} {cell[key]!r} is outside the frozen matrix"
+            )
+
+
+def _check_fit_manifest(
+    body: Mapping[str, Any],
+    description: Mapping[str, Any],
+    fit_id: str,
+    target_dir: Path,
+    root: Path | str,
+    policy_dir: Path | str | None,
+) -> str:
+    """Require the fit to have trained on the draw the freeze record binds.
+
+    Returns the digest of that train manifest. A fit trained on another draw,
+    another policy artifact or a manifest from before a re-freeze records a
+    different digest and is refused before any test image opens.
+    """
+    recorded = receipt_manifest_digest(description)
+    if not description.get("pool"):
+        if policy_dir is not None:
+            raise TestReadRefusedError("this fit has no pool; do not pass a policy dir")
+        expected = load_manifest(target_dir).digest()
+    else:
+        cell = _cell(description)
+        _require_frozen_cell(body, cell)
+        expected = load_policy_manifest(
+            _bound_policy_dir(body, root, policy_dir),
+            pool=cell["pool"],
+            view=int(cell["view"]),
+            policy=str(cell["policy"]),
+            draw=int(cell["draw"]),
+            image_size=int(cell["image_size"]),
+        ).digest()
+    if recorded != expected:
+        raise TestReadRefusedError(
+            f"test read refused: {fit_id} was not trained on the manifest the "
+            "freeze record binds"
+        )
+    return recorded
 
 
 def _complete_manifest(
     body: Mapping[str, Any],
     description: Mapping[str, Any],
     target_dir: Path,
+    root: Path | str,
     policy_dir: Path | str | None,
 ) -> Manifest:
     """The complete manifest of the data this fit trained on, from the record."""
-    pool = description.get("pool") or ""
-    if not pool:
-        if policy_dir is not None:
-            raise TestReadRefusedError("this fit has no pool; do not pass a policy dir")
+    if not description.get("pool"):
         return load_complete_manifest(target_dir)
-    bound = Path(str(body["policy_binding"]["path"])).resolve()
-    if policy_dir is not None and Path(policy_dir).resolve() != bound:
-        raise TestReadRefusedError(
-            "policy dir is not the one bound by the freeze record"
-        )
+    cell = _cell(description)
     return load_policy_complete_manifest(
-        bound,
-        pool=pool,
-        view=int(description["view"]),
-        policy=str(description["policy"]),
-        draw=int(description["split"]),
-        image_size=int(description["recipe"]["image_size"]),
+        _bound_policy_dir(body, root, policy_dir),
+        pool=cell["pool"],
+        view=int(cell["view"]),
+        policy=str(cell["policy"]),
+        draw=int(cell["draw"]),
+        image_size=int(cell["image_size"]),
     )
 
 
@@ -218,23 +275,40 @@ def predict_test(
         raise TestReadRefusedError(
             f"test read refused: no verified training receipt for {fit_id}"
         )
-    description, kind, artifact = _description(receipt, fit_id)
+    description, kind, artifact = training_description(receipt, fit_id)
     run_dir = store.run_dir(fit_id)
     artifact_path = (run_dir / str(artifact["path"])).resolve()
     if not artifact_path.is_relative_to(base) or not artifact_path.is_file():
         raise FreezeRecordError(f"{kind} of {fit_id} is missing or escapes the store")
+    fit_manifest = _check_fit_manifest(
+        body, description, fit_id, Path(target_dir), root, policy_dir
+    )
     image_size = int(description["recipe"]["image_size"])
-    manifest = _complete_manifest(body, description, Path(target_dir), policy_dir)
+    manifest = _complete_manifest(body, description, Path(target_dir), root, policy_dir)
     pool = description.get("pool") or ""
     roots = dict(pool_roots or {})
     pool_root = Path(roots.get(pool, image_root))
 
-    # The read is on disk before the first test image opens.
+    receipt_digest = training_receipt_digest(run_dir)
+    details = {
+        "training_receipt_sha256": receipt_digest,
+        "artifact_kind": kind,
+        "artifact_sha256": str(artifact["sha256"]),
+    }
+    ledger = default_reads_log_path(root)
+    extra_logs = [Path(reads_log)] if reads_log is not None else []
+    refuse_conflicting_repeat(
+        [ledger, *extra_logs], record["hash"], fit_id, OPERATION, details
+    )
+    # The read is on disk before the first test image opens. The project ledger
+    # is always written; a custom log is an additional copy, never a replacement.
     log_test_read(
-        reads_log if reads_log is not None else default_reads_log_path(root),
+        ledger,
         record["hash"],
         [fit_id],
         operation=OPERATION,
+        additional_logs=extra_logs,
+        details=details,
     )
     if kind == "checkpoint":
         image_ids, labels = _deep_labels(
@@ -254,10 +328,21 @@ def predict_test(
         )
     path = run_dir / PREDICTIONS_FILE
     digest = _write_predictions(path, image_ids, labels)
+    prediction_receipt = write_prediction_receipt(
+        run_dir,
+        record_hash=record["hash"],
+        fit_id=fit_id,
+        training_receipt_sha256=receipt_digest,
+        artifact_kind=kind,
+        artifact_sha256=str(artifact["sha256"]),
+        fit_manifest_sha256=fit_manifest,
+        predictions_sha256=digest,
+    )
     return {
         "fit_id": fit_id,
         "predictions": path.relative_to(base).as_posix(),
         "predictions_sha256": digest,
+        "prediction_receipt_sha256": prediction_receipt,
         "images": len(image_ids),
         "freeze_record_hash": record["hash"],
         "post_hoc": bool(body["post_hoc"]),
