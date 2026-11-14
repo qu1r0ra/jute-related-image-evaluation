@@ -79,13 +79,29 @@ partition images.
 checking the freeze and run records. Repeat it for each primary-split target
 manifest and policy group, passing all five seed fits with repeated `--fit-id`
 options. `--assignment-table` must be the table whose digest is recorded in
-every fit receipt. The required `--context` JSON contains a scene tag for each
-test image, prediction maps for `image-random`, `exact-copy` and
-`near-duplicate`, and recorded parameter- and label-randomization outcomes
-whose evidence names the selected checkpoint SHA-256. Its contents and the
-freeze record, run record, lockfile and project configuration are hashed into
-the export. The command writes `diagnostics.json`, aligned coordinate CSV files
-and prespecified Grad-CAM figures. The command itself does not train models or
+every fit receipt. The inputs are outputs of two logged commands, run first
+under the same freeze record:
+
+- `jute-disease evaluate sanity-checks` computes parameter randomization, plus a
+  head-refit label-randomization variant (not Adebayo data-randomization
+  retraining), on the validation-median primary-cell checkpoint. The pass rule is
+  fixed in code and its thresholds (60 sampled images, median absolute Spearman
+  correlation below 0.5, at least half defined) are prespecified heuristics, not a
+  significance test; they apply to the sampled images only. The label variant is
+  descriptive, reported beside a true-label control refit, and does not gate the
+  leaf score.
+- `jute-disease evaluate scene-tags` computes a scene tag and frame leaf share
+  for every test image with the thresholds and backend of the frozen mask audit.
+
+Pass their files as `--sanity-checks` and `--scene-tags`. Both are refused unless
+the ledger holds the completion row of the command that wrote those exact bytes,
+so a hand-written file is rejected. The policy predictions come from the run
+record, which must hold the runs of all three policies for the frozen cell; pass
+every fit with `--fit-id`. The freeze record, run record, lockfile and project
+configuration are hashed into the export. The command writes `diagnostics.json`,
+aligned coordinate CSV files and prespecified Grad-CAM figures into a staging
+directory and renames it into place with `output-manifest.json`, which lists a
+SHA-256 for every file. The command itself does not train models or
 benchmark hardware; reported compute totals come from verified training
 receipts.
 

@@ -7,7 +7,7 @@ belongs to the caller.
 """
 
 import hashlib
-import json
+import io
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
@@ -20,7 +20,6 @@ import torch
 from PIL import Image
 
 from jute_disease.data import (
-    POLICIES,
     SCENE_TAGS,
     ColorThresholdBackend,
     ManifestDataset,
@@ -37,6 +36,16 @@ from jute_disease.evaluation.breakdowns import (
     scene_summaries,
     stratified_sample,
 )
+from jute_disease.evaluation.diagnostic_inputs import (
+    SANITY_CHECKS_KIND,
+    SCENE_TAGS_KIND,
+    BoundOutput,
+    load_run_predictions,
+    policy_predictions,
+    primary_policy_runs,
+    require_scene_tags_bound,
+    verified_checkpoint,
+)
 from jute_disease.evaluation.diagnostics import (
     aggregate_leaf_scores,
     diagnostic_configuration,
@@ -47,16 +56,13 @@ from jute_disease.evaluation.diagnostics import (
     letterbox_leaf_mask,
     penultimate_features,
     require_analysis,
-    sanity_check_record,
     select_gradcam_sample,
     select_median_validation_run,
-    validate_primary_policy_runs,
     write_diagnostics_export,
 )
 from jute_disease.evaluation.freeze_record import (
     Authorization,
     FreezeRecordError,
-    RunEntry,
 )
 from jute_disease.evaluation.probes import (
     background_probe,
@@ -82,23 +88,6 @@ def leaf_sample_ids(
     return stratified_sample(
         [e.image_id for e in entries], [e.label for e in entries], size, seed
     )
-
-
-def _load(entry: RunEntry, base_dir: Path, ids: tuple[str, ...]) -> tuple[str, ...]:
-    raw = (base_dir / entry.predictions).read_bytes()
-    if hashlib.sha256(raw).hexdigest() != entry.predictions_sha256:
-        raise FreezeRecordError(
-            f"predictions changed since the run record: {entry.fit_id}"
-        )
-    payload = json.loads(raw)
-    if tuple(payload.get("image_ids", ())) != ids:
-        raise FreezeRecordError(
-            f"predictions for {entry.fit_id} do not match test images"
-        )
-    labels = tuple(payload.get("predictions", ()))
-    if len(labels) != len(ids):
-        raise FreezeRecordError(f"predictions for {entry.fit_id} are incomplete")
-    return labels
 
 
 def _plain(value: Any) -> Any:
@@ -145,7 +134,7 @@ def evaluate_test(
                 f"more than one run for {run.system} {run.variant} seed {run.seed}; "
                 "restrict the call to one pool, view, policy and split with --fit-id"
             )
-        group[run.seed] = _load(run, base, expected)
+        group[run.seed] = load_run_predictions(run, base, expected)
 
     def build(system: str, variant: str) -> PredictionSet:
         chosen = sample_ids if variant == "leaf_only" else ids
@@ -234,11 +223,10 @@ def evaluate_image_diagnostics(
     *,
     frozen_backbone_checkpoint: Path | str,
     assignment_table_path: Path | str,
+    scene_tags: BoundOutput,
+    sanity_checks: BoundOutput,
     model_name: str = "mobilenetv2_100.ra_in1k",
-    scenes: Mapping[str, str] | None = None,
-    policy_predictions: Mapping[str, Mapping[str, str]] | None = None,
     mask_backend: MaskBackend | None = None,
-    sanity_checks: Mapping[str, Any] | None = None,
     generating_command: Sequence[str] = (),
     source_artifacts: Sequence[Path | str] = (),
 ) -> dict[str, Any]:
@@ -246,18 +234,40 @@ def evaluate_image_diagnostics(
 
     This is the diagnostics image-reading entry point. It checks both analysis
     IDs, run membership and checkpoint receipts before opening the test partition.
+    The scene tags and sanity checks must be outputs of the logged commands that
+    compute them, and the policy predictions come from the run record: the
+    authorized runs must cover all three policies at the pool, view and policy the
+    freeze record fixed.
     """
+    if (scene_tags.kind, sanity_checks.kind) != (SCENE_TAGS_KIND, SANITY_CHECKS_KIND):
+        raise FreezeRecordError("diagnostics inputs must be the logged command outputs")
     fit_ids = [run.fit_id for run in authorization.runs]
     require_analysis(authorization, "embeddings-test-pass", fit_ids)
     require_analysis(authorization, "gradcam-test-pass", fit_ids)
-    assignment = validate_primary_policy_runs(assignment_table_path, authorization.runs)
+    runs, assignment, runs_by_policy = primary_policy_runs(
+        authorization, assignment_table_path
+    )
+    require_scene_tags_bound(scene_tags, authorization.body)
+    if sanity_checks.body.get("freeze_record_hash") != authorization.record_hash:
+        raise FreezeRecordError("sanity checks belong to another freeze record")
+
+    base = Path(base_dir).resolve()
+    selected = select_median_validation_run(runs)
+    checkpoint_bytes = verified_checkpoint(selected, base)
+    if sanity_checks.body.get("checkpoint_sha256") != selected.checkpoint_sha256:
+        raise FreezeRecordError(
+            "sanity checks were computed on a different checkpoint than the "
+            "selected run"
+        )
+    checkpoint_path = (base / str(selected.checkpoint)).resolve()
+    receipt_path = base.joinpath(*selected.fit_id.split("/")) / "receipt.json"
 
     manifest = load_complete_manifest(target_dir)
     entries = tuple(sorted(manifest.partition("test"), key=lambda item: item.image_id))
     image_ids = tuple(entry.image_id for entry in entries)
     if not image_ids:
         raise FreezeRecordError("target manifest has no test images")
-    scene_map = dict(scenes or {})
+    scene_map = dict(scene_tags.body["scenes"])
     missing_scenes = sorted(set(image_ids) - set(scene_map))
     invalid_scenes = sorted(
         (image_id, scene_map.get(image_id))
@@ -269,45 +279,8 @@ def evaluate_image_diagnostics(
             "diagnostics need a frozen scene tag for every test image; "
             f"missing={missing_scenes[:5]}, invalid={invalid_scenes[:5]}"
         )
-    if policy_predictions is None or set(policy_predictions) != set(POLICIES):
-        raise FreezeRecordError(
-            "diagnostics need predictions for image-random, exact-copy and "
-            "near-duplicate policies"
-        )
     dataset = ManifestDataset(manifest, "test", Path(image_root))
-    if any(
-        run.validation_macro_f1 is None
-        or run.checkpoint is None
-        or run.checkpoint_sha256 is None
-        or run.training_receipt_sha256 is None
-        for run in authorization.runs
-    ):
-        raise FreezeRecordError(
-            "diagnostics require receipt-bound validation macro-F1 and "
-            "checkpoint artifacts"
-        )
-
-    selected = select_median_validation_run(authorization.runs)
-    base = Path(base_dir).resolve()
-    checkpoint_path = (base / str(selected.checkpoint)).resolve()
-    if not checkpoint_path.is_relative_to(base) or not checkpoint_path.is_file():
-        raise FreezeRecordError(
-            "authorized checkpoint path is missing or escapes the run store"
-        )
-    if (
-        hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
-        != selected.checkpoint_sha256
-    ):
-        raise FreezeRecordError(
-            "authorized checkpoint bytes differ from the run record"
-        )
-    receipt_path = base.joinpath(*selected.fit_id.split("/")) / "receipt.json"
-    if (
-        not receipt_path.is_file()
-        or hashlib.sha256(receipt_path.read_bytes()).hexdigest()
-        != selected.training_receipt_sha256
-    ):
-        raise FreezeRecordError("training receipt changed since the run record")
+    recorded_policy_predictions = policy_predictions(runs_by_policy, base, image_ids)
 
     from jute_disease.models.dl import (
         Classifier,
@@ -317,20 +290,24 @@ def evaluate_image_diagnostics(
     )
 
     model = Classifier(TimmBackbone(model_name, pretrained=False), len(manifest.labels))
-    model.load_state_dict(read_checkpoint_state(checkpoint_path), strict=True)
+    model.load_state_dict(
+        read_checkpoint_state(io.BytesIO(checkpoint_bytes)), strict=True
+    )
     model.eval()
     mask_model = mask_backend or ColorThresholdBackend()
     class_to_idx = {label: index for index, label in enumerate(manifest.labels)}
     image_pipeline = create_pipeline(is_dl=False, include_mask=True)
     tensor_pipeline = create_pipeline(is_dl=True)
-    prediction_labels = _load(selected, base, image_ids)
+    prediction_labels = load_run_predictions(selected, base, image_ids)
     sampled = select_gradcam_sample(
         image_ids,
         [entry.label for entry in entries],
         prediction_labels,
         manifest.labels,
-        policy_predictions=policy_predictions,
+        policy_predictions=recorded_policy_predictions,
     )
+    if not sampled["all_policy_disagreements_included"]:
+        raise FreezeRecordError("a policy disagreement is missing from the CAM sample")
     figure_ids = {
         image_id
         for selected_ids in sampled["selected"].values()
@@ -402,15 +379,16 @@ def evaluate_image_diagnostics(
                 frozen_backbone(tensor).detach().cpu().numpy().reshape(-1)
             )
 
-    checks = sanity_check_record(
-        None if sanity_checks is None else sanity_checks.get("parameter_randomization"),
-        None if sanity_checks is None else sanity_checks.get("label_randomization"),
-        checkpoint_sha256=selected.checkpoint_sha256,
-    )
+    checks = {
+        "parameter_randomization": sanity_checks.body["parameter_randomization"],
+        "label_randomization": sanity_checks.body["label_randomization"],
+        "pass_rule": sanity_checks.body["pass_rule"],
+        "checkpoint_sha256": selected.checkpoint_sha256,
+        "output_sha256": sanity_checks.sha256,
+    }
     mask_audit_passed = bool(authorization.body.get("mask_audit", {}).get("passed"))
     gate = leaf_score_gate(
         parameter_randomization=checks["parameter_randomization"]["status"] == "pass",
-        label_randomization=checks["label_randomization"]["status"] == "pass",
         mask_audit_passed=mask_audit_passed,
     )
     from jute_disease.reporting import compute_training_costs
@@ -455,9 +433,7 @@ def evaluate_image_diagnostics(
     else:
         report["leaf_attention"] = {"reported": False, "reason": gate["reason"]}
 
-    figure_root = Path(output_dir) / "gradcam"
-    figure_root.mkdir(parents=True)
-    figure_paths: list[str] = []
+    figure_files: dict[str, bytes] = {}
     for (image_id, target_index), (rgb, cam, leaf_mask) in figure_rows.items():
         figure, axes = plt.subplots(1, 3, figsize=(10, 3.5))
         axes[0].imshow(rgb)
@@ -476,11 +452,16 @@ def evaluate_image_diagnostics(
         )
         figure.tight_layout()
         file_id = hashlib.sha256(image_id.encode()).hexdigest()[:16]
-        figure_path = figure_root / f"{file_id}-target-{target_index}.png"
-        figure.savefig(figure_path, dpi=150)
-        figure_paths.append(figure_path.relative_to(Path(output_dir)).as_posix())
+        rendered = io.BytesIO()
+        figure.savefig(rendered, format="png", dpi=150)
+        figure_files[f"gradcam/{file_id}-target-{target_index}.png"] = (
+            rendered.getvalue()
+        )
         plt.close(figure)
-    report["gradcam_figures"] = sorted(figure_paths)
+    report["gradcam_figures"] = sorted(figure_files)
+    rendered_ids = {image_id for image_id, _ in figure_rows}
+    if not set(sampled["selected"]["disagreement"]) <= rendered_ids:
+        raise FreezeRecordError("a policy disagreement has no rendered Grad-CAM figure")
     cost_receipts = (
         training_costs["receipts"] + training_costs["classical_search"]["receipts"]
     )
@@ -491,6 +472,8 @@ def evaluate_image_diagnostics(
         Path(frozen_backbone_checkpoint),
         checkpoint_path,
         receipt_path,
+        scene_tags.path,
+        sanity_checks.path,
         *source_artifacts,
         *(base / run.predictions for run in authorization.runs),
         *(
@@ -521,5 +504,6 @@ def evaluate_image_diagnostics(
             },
         },
         source_artifacts=source_paths,
+        files=figure_files,
     )
     return {"export": str(export_path), "report": report}
