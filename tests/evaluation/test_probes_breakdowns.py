@@ -9,9 +9,12 @@ from jute_disease.evaluation.breakdowns import (
 )
 from jute_disease.evaluation.probes import (
     border_probe,
+    family_permutation,
     frame_leaf_share,
     frame_mask,
     permutation_null,
+    permutation_test,
+    probe_result,
 )
 from jute_disease.evaluation.scores import PredictionSet
 
@@ -90,6 +93,115 @@ def test_permutation_null_is_near_chance_and_rule_detects_signal() -> None:
     assert 0.3 < float(np.percentile(null, 95)) < 0.7
     perfect = _system(60)
     assert permutation_null(perfect, 50).mean() < 0.75
+
+
+MIXED_FAMILIES = (
+    ("a", "b"),
+    ("a", "b"),
+    ("a", "a", "b"),
+    ("a", "b", "b"),
+    ("a", "a", "b"),
+    ("a", "b", "b"),
+    ("a",),
+    ("b",),
+    ("b",),
+    ("a",),
+)
+
+
+def _mixed_system(
+    rng: np.random.Generator, repeats: int, predicted: str = "random"
+) -> PredictionSet:
+    ids, truth, groups = [], [], []
+    for r in range(repeats):
+        for f, labels in enumerate(MIXED_FAMILIES):
+            for j, label in enumerate(labels):
+                ids.append(f"r{r}f{f}i{j}")
+                truth.append(label)
+                groups.append(f"r{r}f{f}")
+    if predicted == "truth":
+        guess = tuple(truth)
+    else:
+        guess = tuple(str(x) for x in rng.choice(list(CLASSES), size=len(ids)))
+    return PredictionSet(
+        CLASSES,
+        tuple(ids),
+        tuple(truth),
+        tuple(groups),
+        tuple("src" for _ in ids),
+        {0: guess},
+    )
+
+
+def test_family_permutation_moves_whole_label_multisets_between_families() -> None:
+    system = _mixed_system(np.random.default_rng(0), 3)
+    families = sorted(set(system.groups))
+    original = {
+        f: tuple(
+            sorted(
+                t for t, g in zip(system.truth, system.groups, strict=True) if g == f
+            )
+        )
+        for f in families
+    }
+    rng = np.random.default_rng(5)
+    moved = 0
+    for _ in range(30):
+        labels = family_permutation(system, rng)
+        permuted = {
+            f: tuple(
+                sorted(
+                    system.classes[k]
+                    for k, g in zip(labels, system.groups, strict=True)
+                    if g == f
+                )
+            )
+            for f in families
+        }
+        assert sorted(permuted.values()) == sorted(original.values())
+        for f in families:
+            assert len(permuted[f]) == len(original[f])
+        moved += permuted != original
+    assert moved > 0
+
+
+def test_probe_null_has_nominal_size_on_mixed_label_families() -> None:
+    rng = np.random.default_rng(11)
+    simulations = 300
+    rejected = 0
+    for k in range(simulations):
+        system = _mixed_system(rng, 2)
+        test = permutation_test(system, 99, seed=k)
+        rejected += test.p_value < 0.05
+    assert 0.02 <= rejected / simulations <= 0.09
+
+
+def test_probe_null_detects_label_information_on_mixed_label_families() -> None:
+    system = _mixed_system(np.random.default_rng(3), 4, predicted="truth")
+    test = permutation_test(system, 199, seed=1)
+    assert test.p_value <= 0.01
+
+
+def test_probe_decision_uses_the_permutation_p_value() -> None:
+    signal = probe_result(
+        _mixed_system(np.random.default_rng(3), 4, predicted="truth"),
+        "found",
+        "none",
+        resamples=50,
+        permutations=199,
+    )
+    assert signal.detected
+    assert signal.p_value < 0.05
+    assert signal.statement == "found"
+    noise = probe_result(
+        _mixed_system(np.random.default_rng(4), 4),
+        "found",
+        "none",
+        resamples=50,
+        permutations=199,
+    )
+    assert noise.detected == (noise.p_value < 0.05)
+    assert noise.macro_f1.lower <= noise.macro_f1.estimate <= noise.macro_f1.upper
 
 
 def test_scene_macro_f1_needs_thirty_per_class() -> None:

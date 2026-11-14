@@ -16,10 +16,10 @@ from jute_disease.evaluation.scores import PredictionSet, metric_values
 from jute_disease.training.benchmark import Benchmark, FitKind, FitSpec
 
 PROBE_SYSTEM = "mobilenet_v2_direct"
-BORDER_SEEDS = 3
 FRAME_WIDTH_PX = 32
 LEAF_CUTOFF = 0.05
 PERMUTATIONS = 1000
+DETECTION_ALPHA = 0.05
 MIN_RETAINED_PER_CLASS = 50
 NO_BORDER = "no detectable border information at this frame width"
 NO_BACKGROUND = "no detectable background information at this setting"
@@ -36,7 +36,7 @@ class ProbeFit:
     base_fit_id: str
 
 
-def _probe_base(fit: FitSpec, benchmark: Benchmark, seeds: int | None) -> bool:
+def _probe_base(fit: FitSpec, benchmark: Benchmark) -> bool:
     if fit.kind is FitKind.CLASSICAL:
         pass
     elif fit.kind is FitKind.TARGET and fit.system == PROBE_SYSTEM:
@@ -45,22 +45,21 @@ def _probe_base(fit: FitSpec, benchmark: Benchmark, seeds: int | None) -> bool:
         return False
     if fit.phase != "final" or fit.split != benchmark.primary_split:
         return False
-    return seeds is None or fit.seed_index < seeds
+    return True
 
 
 def probe_fits(benchmark: Benchmark, variant: str) -> tuple[ProbeFit, ...]:
     """Plan the background-only or border fits from the declared matrix.
 
     Classical models and the MobileNetV2 ImageNet route, the primary split, every
-    pool and policy, and the five matrix seeds (three for the border probe).
+    pool and policy, and all five matrix seeds.
     """
     if variant not in ("background", "border"):
         raise ValueError("variant must be 'background' or 'border'")
-    seeds = BORDER_SEEDS if variant == "border" else None
     return tuple(
         ProbeFit(f"probe/{variant}/{fit.fit_id}", variant, fit.fit_id)
         for fit in benchmark.fits()
-        if _probe_base(fit, benchmark, seeds)
+        if _probe_base(fit, benchmark)
     )
 
 
@@ -70,7 +69,7 @@ def pad_cue_fits(benchmark: Benchmark) -> tuple[ProbeFit, ...]:
     for pool in benchmark.pools:
         for view in benchmark.views:
             for policy in benchmark.policies:
-                for seed in benchmark.recipe.seeds[:BORDER_SEEDS]:
+                for seed in benchmark.recipe.seeds:
                     fit_id = (
                         f"probe/pad-cue/pool-{pool}/view-{view}/{policy}/seed-{seed}"
                     )
@@ -154,43 +153,102 @@ def subset(system: PredictionSet, image_ids: Sequence[str]) -> PredictionSet:
     )
 
 
+def _family_strata(system: PredictionSet) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Group families by size: member indices and sorted label multisets."""
+    truth = system.truth_index()
+    members: dict[str, list[int]] = {}
+    for image, family in enumerate(system.groups):
+        members.setdefault(family, []).append(image)
+    by_size: dict[int, list[list[int]]] = {}
+    for family in sorted(members):
+        by_size.setdefault(len(members[family]), []).append(members[family])
+    strata = []
+    for size in sorted(by_size):
+        index = np.array(by_size[size], dtype=np.int64).reshape(-1, size)
+        strata.append((index, np.sort(truth[index], axis=1)))
+    return strata
+
+
+def family_permutation(
+    system: PredictionSet,
+    rng: np.random.Generator,
+    strata: list[tuple[np.ndarray, np.ndarray]] | None = None,
+) -> np.ndarray:
+    """One null draw of true labels, permuted at family level.
+
+    Each family's label multiset travels as a unit: it is handed to another
+    family of the same size, so families with mixed labels keep their mix and
+    the class counts of the test set never change. Which member of the receiving
+    family carries which label is drawn at random, since the pixels of a family
+    are not ordered. Returns one class index per image.
+    """
+    permuted = np.zeros(len(system.image_ids), dtype=np.int64)
+    for index, labels in strata if strata is not None else _family_strata(system):
+        moved = labels[rng.permutation(len(labels))]
+        order = np.argsort(rng.random(moved.shape), axis=1)
+        permuted[index] = np.take_along_axis(moved, order, axis=1)
+    return permuted
+
+
+def _macro_f1(truth: np.ndarray, predicted: list[np.ndarray], k: int) -> float:
+    scores = []
+    for pred in predicted:
+        confusion = np.bincount(truth * k + pred, minlength=k * k).reshape(k, k)
+        scores.append(float(metric_values(confusion, "macro_f1")))
+    return float(np.mean(scores))
+
+
+@dataclass(frozen=True)
+class PermutationTest:
+    """Observed macro-F1, the permutation null and the one-sided p-value."""
+
+    observed: float
+    null: np.ndarray
+    p_value: float
+
+
+def permutation_test(
+    system: PredictionSet, permutations: int = PERMUTATIONS, seed: int = 42
+) -> PermutationTest:
+    """Family-level permutation test of macro-F1, with no refits.
+
+    The p-value is ``(b + 1) / (permutations + 1)``, where ``b`` counts null
+    draws at least as large as the observed macro-F1, so it is never zero and is
+    valid for the finite number of draws. Predictions are not changed.
+    """
+    k = len(system.classes)
+    predicted = [system.prediction_index(s) for s in system.seeds]
+    observed = _macro_f1(system.truth_index(), predicted, k)
+    strata = _family_strata(system)
+    rng = np.random.default_rng(seed)
+    null = np.empty(permutations)
+    for i in range(permutations):
+        null[i] = _macro_f1(family_permutation(system, rng, strata), predicted, k)
+    exceed = int(np.count_nonzero(null >= observed - 1e-12))
+    return PermutationTest(observed, null, (exceed + 1) / (permutations + 1))
+
+
 def permutation_null(
     system: PredictionSet, permutations: int = PERMUTATIONS, seed: int = 42
 ) -> np.ndarray:
-    """Macro-F1 under permuted family labels, with no refits.
-
-    Labels are permuted among families, so each family keeps one label, matching
-    the family clustering of the #106 intervals. Predictions are not changed.
-    """
-    families = sorted(set(system.groups))
-    position = {family: i for i, family in enumerate(families)}
-    family_of = np.array([position[g] for g in system.groups])
-    truth = system.truth_index()
-    family_label = np.zeros(len(families), dtype=np.int64)
-    family_label[family_of] = truth
-    k = len(system.classes)
-    predicted = [system.prediction_index(s) for s in system.seeds]
-    rng = np.random.default_rng(seed)
-    out = np.empty(permutations)
-    for i in range(permutations):
-        permuted = rng.permutation(family_label)[family_of]
-        scores = []
-        for pred in predicted:
-            confusion = np.bincount(permuted * k + pred, minlength=k * k).reshape(k, k)
-            scores.append(float(metric_values(confusion, "macro_f1")))
-        out[i] = np.mean(scores)
-    return out
+    """Macro-F1 under family-level permuted labels, with no refits."""
+    return permutation_test(system, permutations, seed).null
 
 
 @dataclass(frozen=True)
 class ProbeResult:
-    """Macro-F1 and accuracy against the chance baselines."""
+    """Macro-F1 and accuracy against the chance baselines.
+
+    ``detected`` follows the permutation p-value alone; the bootstrap intervals
+    are reported for the reader and do not decide.
+    """
 
     n: int
     macro_f1: Interval
     accuracy: Interval
     majority_accuracy: float
     null_p95: float
+    p_value: float
     permutations: int
     detected: bool
     statement: str
@@ -205,20 +263,20 @@ def probe_result(
     permutations: int = PERMUTATIONS,
     seed: int = 42,
 ) -> ProbeResult:
-    """Apply the prespecified rule: lower CI of macro-F1 above the null's 95th pct."""
+    """Apply the rule: detected when the permutation p-value is below 0.05."""
     wrapped = {"probe": {0: system}}
     macro = resample_metrics(wrapped, "macro_f1", resamples, seed).interval("probe")
     accuracy = resample_metrics(wrapped, "accuracy", resamples, seed).interval("probe")
     counts = np.bincount(system.truth_index(), minlength=len(system.classes))
-    null = permutation_null(system, permutations, seed)
-    p95 = float(np.percentile(null, 95))
-    detected = macro.lower > p95
+    test = permutation_test(system, permutations, seed)
+    detected = test.p_value < DETECTION_ALPHA
     return ProbeResult(
         n=len(system.image_ids),
         macro_f1=macro,
         accuracy=accuracy,
         majority_accuracy=float(counts.max() / counts.sum()),
-        null_p95=p95,
+        null_p95=float(np.percentile(test.null, 95)),
+        p_value=test.p_value,
         permutations=permutations,
         detected=detected,
         statement=detected_statement if detected else none_statement,

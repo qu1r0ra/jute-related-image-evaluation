@@ -122,7 +122,11 @@ def test_probe_plan_is_primary_split_classical_and_imagenet_route(
         }
 
     assert len(final_cnn_seeds(background)) == len(benchmark.recipe.seeds)
-    assert len(final_cnn_seeds(border)) == 3
+    assert len(final_cnn_seeds(border)) == len(benchmark.recipe.seeds)
+    pad_cue_seeds = {
+        p.rsplit("seed-", 1)[1] for p in probes if p.startswith("probe/pad-cue/")
+    }
+    assert len(pad_cue_seeds) == len(benchmark.recipe.seeds)
     for pool in benchmark.pools:
         for policy in benchmark.policies:
             assert any(f"pool-{pool}" in p and policy in p for p in background)
