@@ -404,7 +404,14 @@ def test_grouped_manifest_rejects_missing_grouping_dependency(
 
 def test_freeze_accepts_audit_cli_gate_projection(inputs: dict[str, Path]) -> None:
     audit_dir = inputs["base"] / "rating-fixture"
-    fixture = _run("data", "audit-fixture", "--output", str(audit_dir))
+    fixture = _run(
+        "data",
+        "audit-fixture",
+        "--output",
+        str(audit_dir),
+        "--grouping-version",
+        "dhash-v1",
+    )
     assert fixture.returncode == 0, fixture.stderr
     gate = inputs["base"] / "projected-gate.json"
     rating = _run(

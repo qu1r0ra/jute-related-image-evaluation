@@ -20,6 +20,18 @@ def _run(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _assert_no_machine_paths(directory: Path, base: Path) -> None:
+    """Fail if any text file under ``directory`` names a path under ``base``."""
+    needles = {str(base.resolve()), str(directory.resolve()), str(Path.home())}
+    needles |= {needle.replace("\\", "/") for needle in needles}
+    needles |= {needle.replace("\\", "\\\\") for needle in needles}
+    for path in directory.rglob("*"):
+        if path.is_file() and path.suffix in {".json", ".csv", ".tex", ".txt"}:
+            text = path.read_text(encoding="utf-8")
+            leaked = [needle for needle in needles if needle in text]
+            assert not leaked, f"{path.name} names a machine path: {leaked}"
+
+
 def _write_synthetic_receipt(runs_root: Path, fit_id: str, identity: str) -> None:
     from jute_disease.training import RunStore
 
@@ -269,6 +281,9 @@ def test_fixture_freezes_exports_rebuilds_and_checks_macros(tmp_path: Path) -> N
     assert metadata["configuration"]["purpose"] == "synthetic fixture only"
     assert metadata["artifacts"]["manifest"]["manifest_digest"]
     assert metadata["outputs"]["source-metadata.json"]["sha256"]
+    assert kit["version"] == 2
+    assert metadata["repository_root"] == ".."
+    _assert_no_machine_paths(export_dir, output)
     assert kit["entries"]
     assert all(
         {
@@ -438,6 +453,7 @@ def test_fixture_freezes_exports_rebuilds_and_checks_macros(tmp_path: Path) -> N
                 (export_dir / "source-metadata.json").read_text(encoding="utf-8")
             ),
             evaluation_artifacts_path=evaluation_artifacts,
+            repository_root=tmp_path,
         )
     except ValueError as error:
         assert "does not match the export configuration" in str(error)
@@ -464,6 +480,7 @@ def test_fixture_freezes_exports_rebuilds_and_checks_macros(tmp_path: Path) -> N
                 (export_dir / "source-metadata.json").read_text(encoding="utf-8")
             ),
             evaluation_metrics_path=held_out_metrics,
+            repository_root=tmp_path,
         )
     except ValueError as error:
         assert "unsupported or held-out columns" in str(error)
@@ -481,6 +498,7 @@ def test_fixture_freezes_exports_rebuilds_and_checks_macros(tmp_path: Path) -> N
             ),
             training_runs_dir=unverified_runs,
             evaluation_metrics_path=evaluation_metrics,
+            repository_root=tmp_path,
         )
     except ValueError as error:
         assert "no completed verified receipt" in str(error)
@@ -506,6 +524,8 @@ def test_fixture_freezes_exports_rebuilds_and_checks_macros(tmp_path: Path) -> N
         str(evaluation_artifacts),
         "--statistics-artifacts",
         str(statistics_artifacts),
+        "--repository-root",
+        str(tmp_path),
     )
     assert cost_export.returncode == 0, cost_export.stderr
     cost_report = json.loads(cost_export.stdout)
@@ -523,9 +543,11 @@ def test_fixture_freezes_exports_rebuilds_and_checks_macros(tmp_path: Path) -> N
     cost_metadata = json.loads(
         (cost_export_dir / "export.json").read_text(encoding="utf-8")
     )
-    assert cost_metadata["evaluation_metrics"]["path"] == str(
-        evaluation_metrics.resolve()
-    )
+    assert cost_metadata["evaluation_metrics"]["path"] == evaluation_metrics.name
+    assert cost_metadata["evaluation_metrics"]["runs_root"] == runs_root.name
+    assert cost_metadata["evaluation_artifacts"]["path"] == evaluation_artifacts.name
+    assert cost_metadata["statistics_artifacts"]["path"] == statistics_artifacts.name
+    _assert_no_machine_paths(cost_export_dir, tmp_path)
     assert cost_metadata["evaluation_metrics"]["sha256"]
     assert cost_metadata["evaluation_metrics"]["fits"][0]["receipt_sha256"]
     assert cost_metadata["evaluation_metrics"]["fits"][0]["configuration_sha256"]
@@ -572,6 +594,7 @@ def test_fixture_freezes_exports_rebuilds_and_checks_macros(tmp_path: Path) -> N
         ),
         training_runs_dir=alternate_runs,
         command=cost_metadata["command"],
+        repository_root=tmp_path,
     )
     assert alternate_export["export_id"] != cost_report["export_id"]
     alternate_check = _run(
@@ -613,7 +636,7 @@ def test_fixture_freezes_exports_rebuilds_and_checks_macros(tmp_path: Path) -> N
     malformed_kit.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "seed": 42,
                 "fractions": {"train": 0.7, "val": 0.15, "test": 0.15},
                 "entries": [None],

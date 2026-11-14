@@ -233,6 +233,49 @@ def test_transfer_command_records_and_verifies_file_contents(tmp_path: Path) -> 
     assert _transfer("verify", root, manifest).returncode != 0
 
 
+def _transfer_module() -> object:
+    spec = importlib.util.spec_from_file_location(
+        "jute_verify_transfer", TRANSFER_COMMAND
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_transfer_inventory_detects_a_file_changed_while_hashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    transfer = _transfer_module()
+    root = tmp_path / "batch"
+    root.mkdir()
+    target = root / "result.json"
+    target.write_text('{"score": 0.7}', encoding="utf-8")
+    real_digest = transfer.hashlib.file_digest
+
+    def digest_then_write(handle: object, algorithm: str) -> object:
+        result = real_digest(handle, algorithm)
+        with target.open("ab") as writer:
+            writer.write(b" ")
+        return result
+
+    monkeypatch.setattr(transfer.hashlib, "file_digest", digest_then_write)
+
+    with pytest.raises(ValueError, match="changed while hashing"):
+        transfer.inventory(root)
+
+
+def test_transfer_inventory_accepts_a_file_that_stays_unchanged(
+    tmp_path: Path,
+) -> None:
+    transfer = _transfer_module()
+    root = tmp_path / "batch"
+    root.mkdir()
+    (root / "result.json").write_text('{"score": 0.7}', encoding="utf-8")
+
+    assert list(transfer.inventory(root)) == ["result.json"]
+
+
 @pytest.mark.parametrize(("queue_status", "expected"), [(0, 0), (17, 17)])
 def test_queue_batch_snapshots_run_store_and_preserves_queue_status(
     tmp_path: Path, queue_status: int, expected: int
