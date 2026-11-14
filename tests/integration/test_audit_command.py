@@ -231,6 +231,8 @@ def test_evaluation_reports_exact_bounds_per_pool_and_names_the_agent(
         assert stratum["lower"] <= stratum["rate"] <= stratum["upper"]
         assert stratum["kind"] in {"wrong_merge", "false_split", "same_family"}
     assert report["dataset_quality"]["pool_c_mixed_label_scenes"] >= 0
+    assert "Clopper-Pearson" in report["bound_methods"]["per_stratum"]
+    assert report["bound_methods"]["design_weighted"].startswith("conservative")
 
 
 def test_evaluation_refuses_a_cohort_without_grouping_version_or_agent(

@@ -1,3 +1,5 @@
+from math import comb
+
 import numpy as np
 import pytest
 
@@ -56,31 +58,94 @@ def test_zero_events_still_gives_a_positive_upper_bound() -> None:
     ]
     result = design_weighted_interval(strata)
     assert result.estimate == 0
-    assert 0 < result.upper < 0.15
+    assert 0 < result.upper < 0.2
 
 
-def test_design_weighted_interval_covers_known_truth() -> None:
-    rng = np.random.default_rng(7)
-    populations = [3000, 800, 200]
-    truth_rates = [0.01, 0.05, 0.30]
-    truth = sum(n * p for n, p in zip(populations, truth_rates, strict=True)) / sum(
-        populations
+def test_single_large_stratum_matches_the_binomial_closed_form() -> None:
+    # In a huge population sampling without replacement is binomial, so the
+    # one-stratum bound is the exact two-sided 95% upper bound 1 - 0.025 ** (1 / n).
+    result = design_weighted_interval(
+        [StratumCounts(population=10_000_000, sampled=20, events=0)]
     )
-    sizes = [40, 30, 30]
+    assert result.lower == 0
+    assert result.upper == pytest.approx(1 - 0.025 ** (1 / 20), abs=1e-4)
+
+
+def test_single_small_stratum_matches_a_brute_force_exact_bound() -> None:
+    population, sampled, events = 30, 10, 2
+
+    # Brute force: the exact 95% two-sided bounds are the extreme population event
+    # counts D that the observed count x does not reject at 2.5% in either tail.
+    def pmf(count: int, d: int) -> float:
+        return (
+            comb(d, count)
+            * comb(population - d, sampled - count)
+            / comb(population, sampled)
+        )
+
+    plausible = [
+        d
+        for d in range(population + 1)
+        if sum(pmf(k, d) for k in range(events + 1)) >= 0.025
+        and sum(pmf(k, d) for k in range(events, sampled + 1)) >= 0.025
+    ]
+    result = design_weighted_interval([StratumCounts(population, sampled, events)])
+    assert result.lower == pytest.approx(min(plausible) / population)
+    assert result.upper == pytest.approx(max(plausible) / population)
+
+
+# A synthetic design in the audit's shape: a census stratum, strata of very
+# different size, and rare to common event rates.
+SYNTHETIC_DESIGN = [
+    # population, sampled, true event rate
+    (13, 13, 0.60),
+    (3000, 40, 0.01),
+    (1200, 30, 0.00),
+    (800, 30, 0.05),
+    (450, 25, 0.10),
+    (200, 30, 0.30),
+    (60, 20, 0.50),
+]
+
+
+def test_design_weighted_interval_covers_known_truth_by_simulation() -> None:
+    rng = np.random.default_rng(7)
+    # Fix the finite population's true event counts, then redraw samples without
+    # replacement, which is how the audit samples inside a stratum.
+    truth_events = [round(n * p) for n, _, p in SYNTHETIC_DESIGN]
+    truth = sum(truth_events) / sum(n for n, _, _ in SYNTHETIC_DESIGN)
+    trials = 1500
     covered = 0
-    trials = 400
     for _ in range(trials):
         strata = [
             StratumCounts(
                 population=n,
                 sampled=m,
-                events=int(rng.binomial(m, p)),
+                events=int(rng.hypergeometric(d, n - d, m)),
             )
-            for n, m, p in zip(populations, sizes, truth_rates, strict=True)
+            for (n, m, _), d in zip(SYNTHETIC_DESIGN, truth_events, strict=True)
+        ]
+        interval = design_weighted_interval(strata)
+        assert interval.lower <= interval.estimate <= interval.upper
+        covered += interval.lower <= truth <= interval.upper
+    # The bound is conservative: coverage is at least the nominal 95%.
+    assert covered / trials >= 0.95
+
+
+def test_design_weighted_interval_covers_when_events_are_rare_in_small_strata() -> None:
+    rng = np.random.default_rng(11)
+    design = [(40, 10, 1), (25, 10, 0), (500, 30, 5), (90, 30, 9)]
+    truth = sum(d for _, _, d in design) / sum(n for n, _, _ in design)
+    trials = 1500
+    covered = 0
+    for _ in range(trials):
+        strata = [
+            StratumCounts(n, m, int(rng.hypergeometric(d, n - d, m)))
+            for n, m, d in design
         ]
         interval = design_weighted_interval(strata)
         covered += interval.lower <= truth <= interval.upper
-    assert covered / trials >= 0.93
+    assert covered / trials >= 0.95
 
 
 def _pair_ratings(rng: np.random.Generator, count: int) -> tuple[list[int], list[int]]:

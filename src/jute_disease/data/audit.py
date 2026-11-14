@@ -413,6 +413,16 @@ def _specific_agreement(
     }
 
 
+BOUND_METHODS = {
+    "per_stratum": "exact two-sided 95% Clopper-Pearson",
+    "design_weighted": (
+        "conservative two-sided 95%: exact finite-population (hypergeometric) "
+        "bounds per sampled stratum at tail 0.025 / m, summed with population "
+        "weights (union bound over the m sampled strata); coverage is at least 95%"
+    ),
+}
+
+
 def _interval(estimate: Interval) -> dict[str, float]:
     return {
         "rate": estimate.estimate,
@@ -426,7 +436,9 @@ def _error_rates(
     owner: Sequence[int],
     denominators: dict[str, int],
 ) -> dict[str, Any]:
-    """Per-stratum exact and design-weighted wrong-merge and false-split rates.
+    """Per-stratum exact and conservative design-weighted error rates.
+
+    Covers wrong-merge and false-split rates.
 
     A wrong merge is a merged pair the owner rates no-merge. A false split is a
     near-miss pair in different families that the owner rates a duplicate.
@@ -478,6 +490,7 @@ def _error_rates(
 
     pool_names = sorted(set(pools.values()))
     return {
+        "bound_methods": BOUND_METHODS,
         "per_stratum": per_stratum,
         "wrong_merge": {
             "overall": weighted("wrong_merge", None),

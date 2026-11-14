@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from statistics import NormalDist
 
 import numpy as np
-from scipy.stats import beta, kendalltau
+from scipy.stats import beta, hypergeom, kendalltau
 
 from jute_disease.evaluation.resampling import Interval
 
@@ -41,13 +41,9 @@ def wilson_interval(successes: int, total: int, level: float = 0.95) -> Interval
 
 
 def clopper_pearson_interval(
-    successes: float, total: float, level: float = 0.95
+    successes: int, total: int, level: float = 0.95
 ) -> Interval:
-    """Exact two-sided Clopper-Pearson interval for a binomial proportion.
-
-    Counts may be fractional so the design-weighted interval can pass an
-    effective sample size.
-    """
+    """Exact two-sided Clopper-Pearson interval for a binomial proportion."""
     if total <= 0 or not 0 <= successes <= total or not 0 < level < 1:
         raise ValueError("invalid binomial counts or confidence level")
     tail = (1 - level) / 2
@@ -77,35 +73,72 @@ class StratumCounts:
             )
 
 
+def _event_bounds(stratum: StratumCounts, tail: float) -> tuple[int, int]:
+    """Exact lower and upper bounds on a stratum's population event count.
+
+    The sample is drawn without replacement, so the sampled event count is
+    hypergeometric. The upper bound is the largest population count D for which
+    P(X <= x) is at least ``tail``; the lower bound is the smallest D for which
+    P(X >= x) is at least ``tail``. Both probabilities are monotone in D, so each
+    bound is found by bisection. Each bound fails to cover the true count with
+    probability at most ``tail``: this is the Clopper-Pearson construction with
+    the finite population kept.
+    """
+    population, sampled, events = (
+        stratum.population,
+        stratum.sampled,
+        stratum.events,
+    )
+    low_limit, high_limit = events, population - (sampled - events)
+    low, high = low_limit, high_limit
+    while low < high:  # largest D with P(X <= events) >= tail
+        middle = (low + high + 1) // 2
+        if hypergeom.cdf(events, population, middle, sampled) >= tail:
+            low = middle
+        else:
+            high = middle - 1
+    upper = low
+    if events == 0:
+        return 0, upper
+    low, high = low_limit, high_limit
+    while low < high:  # smallest D with P(X >= events) >= tail
+        middle = (low + high) // 2
+        if hypergeom.sf(events - 1, population, middle, sampled) >= tail:
+            high = middle
+        else:
+            low = middle + 1
+    return low, upper
+
+
 def design_weighted_interval(
     strata: Sequence[StratumCounts], level: float = 0.95
 ) -> Interval:
-    """Design-weighted rate, sum(N_h p_h) / sum(N_h), with an exact interval.
+    """Design-weighted rate, sum(N_h p_h) / sum(N_h), with a conservative interval.
 
-    The interval is the Clopper-Pearson interval at the design's effective sample
-    size (Korn and Graubard 1998). The effective size divides the Bernoulli variance
-    by the stratified variance with finite-population correction, evaluated at
-    add-half stratum rates so that all-zero strata still carry sampling error. A
-    design that is a census has no sampling error, so its interval is the point.
+    The interval is conservative, not exact: its coverage is at least ``level``
+    and is usually higher. Within a stratum the audited pairs are a simple random
+    sample without replacement, so the sampled event count is hypergeometric and
+    the exact Clopper-Pearson-type bounds of ``_event_bounds`` hold for the
+    stratum's population event count D_h at any chosen tail probability. Let m be
+    the number of strata that are not censuses. Each such stratum gets two-sided
+    tail probability (1 - level) / (2 m). By the union bound, with probability at
+    least ``level`` every one of the m strata contains its true D_h between its
+    bounds, and a census stratum has D_h = its sampled count exactly. On that
+    event the true rate sum(D_h) / sum(N_h) lies between the sums of the lower
+    and of the upper stratum bounds, divided by sum(N_h). The strata are
+    independent, so this needs no variance estimate or normal approximation. The
+    price of the union bound is width, which grows with m.
     """
     if not strata or not 0 < level < 1:
         raise ValueError("need at least one stratum and a confidence level in (0, 1)")
     population = sum(s.population for s in strata)
-    weights = [s.population / population for s in strata]
-    estimate = sum(
-        w * s.events / s.sampled for w, s in zip(weights, strata, strict=True)
-    )
-    smoothed = [(s.events + 0.5) / (s.sampled + 1) for s in strata]
-    variance = sum(
-        w * w * (1 - s.sampled / s.population) * q * (1 - q) / s.sampled
-        for w, s, q in zip(weights, strata, smoothed, strict=True)
-    )
-    if variance == 0:
-        return Interval(estimate, estimate, estimate, level)
-    overall = sum(w * q for w, q in zip(weights, smoothed, strict=True))
-    effective = min(overall * (1 - overall) / variance, sum(s.sampled for s in strata))
-    exact = clopper_pearson_interval(estimate * effective, effective, level)
-    return Interval(estimate, exact.lower, exact.upper, level)
+    estimate = sum(s.population * s.events / s.sampled for s in strata) / population
+    sampled_strata = sum(s.sampled < s.population for s in strata)
+    tail = (1 - level) / (2 * max(sampled_strata, 1))
+    bounds = [_event_bounds(s, tail) for s in strata]
+    lower = sum(low for low, _ in bounds) / population
+    upper = sum(high for _, high in bounds) / population
+    return Interval(estimate, lower, upper, level)
 
 
 def kendall_tau(first: Sequence[float], second: Sequence[float]) -> float:
