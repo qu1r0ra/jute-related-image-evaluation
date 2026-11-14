@@ -23,6 +23,7 @@ def frozen_pool(
     healthy_count: int = 30,
     copies: int = 3,
     threshold_change: str = "not_requested",
+    neighbours: bool = True,
 ) -> Path:
     """Construct a small frozen pool, with two images per family."""
     records = []
@@ -60,6 +61,12 @@ def frozen_pool(
         "excluded": [],
         "gate_outcomes": {"agreement": gate, "threshold_change": threshold_change},
     }
+    if neighbours:
+        grouping["audit_band_neighbours"] = {
+            "threshold": 4,
+            "max_distance": 16,
+            "pairs": [],
+        }
     grouping["digest"] = hashlib.sha256(
         json.dumps(grouping, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -93,6 +100,13 @@ def test_recorded_threshold_change_is_accepted_and_other_outcomes_are_not(
     _pool(frozen_pool(tmp_path / "applied", threshold_change="applied"))
     with pytest.raises(ValueError, match="gate outcomes"):
         _pool(frozen_pool(tmp_path / "failed", threshold_change="fail"))
+
+
+def test_grouping_without_audit_band_neighbours_is_refused(tmp_path: Path) -> None:
+    from jute_disease.data.policies import _pool
+
+    with pytest.raises(ValueError, match="audit-band neighbours"):
+        _pool(frozen_pool(tmp_path / "old", neighbours=False))
 
 
 def test_command_refuses_pending_grouping_gate(tmp_path: Path) -> None:

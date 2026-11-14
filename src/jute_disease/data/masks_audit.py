@@ -1,4 +1,4 @@
-"""Held-out scene calibration and blind leaf-mask audit workflow."""
+"""Held-out scene calibration and blind colour-threshold leaf-mask audit."""
 
 from __future__ import annotations
 
@@ -9,35 +9,38 @@ import random
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from math import sqrt
 from pathlib import Path
-from statistics import NormalDist
 from typing import Any
 
 import numpy as np
 from PIL import Image
+from scipy.stats import beta
 
+from jute_disease.data.manifest import load_protected_test_manifest
 from jute_disease.data.masks import (
     MASK_QUALITY_RATINGS,
     MASK_RUBRIC,
     SCENE_RUBRIC,
     SCENE_TAGS,
+    ColorThresholdBackend,
     MaskBackend,
-    MaskPrediction,
     SceneObservation,
     SceneThresholds,
     classify_scene,
     extract_scene_features,
     fit_scene_thresholds,
+    require_colour_threshold,
     save_mask_artifacts,
 )
 from jute_disease.evaluation import agreement_gate
 
-AUDIT_SCHEMA = "jute-mask-audit-v1"
+AUDIT_SCHEMA = "jute-mask-audit-v2"
+EVALUATION_SCHEMA = "jute-mask-audit-evaluation-v2"
 AUDIT_COUNT = 300
 OWNER_COUNT = 120
 KAPPA_THRESHOLD = 0.6
 MASK_FAIL_RATE_LIMIT = 0.10
+FAIL_RATE_CONFIDENCE = 0.95
 AGENT_COLUMNS = ("audit_id", "overlay_path", "mask_quality")
 OWNER_COLUMNS = ("audit_id", "overlay_path", "mask_quality", "scene_tag")
 
@@ -57,19 +60,41 @@ class CandidateImage:
 
 
 @dataclass(frozen=True)
-class FixtureMaskBackend:
-    """Weight-free mask stub for an end-to-end synthetic audit fixture."""
+class ProtectedTestImages:
+    """Content digests of the protected test partition a mask audit must avoid."""
 
-    model: str = "fixture-green-pixel-mask-stub"
-    version: str = "1"
+    manifest_digest: str
+    image_ids: frozenset[str]
 
-    def predict(self, image: Image.Image) -> MaskPrediction:
-        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
-        mask = (rgb[..., 1] > 100) & (rgb[..., 1] > rgb[..., 0] * 1.4)
-        return MaskPrediction(
-            mask,
-            self.model,
-            {"fixture_stub": True, "selected_component_area": int(mask.sum())},
+    def __post_init__(self) -> None:
+        if not self.manifest_digest:
+            raise ValueError("the protected-test binding needs a manifest digest")
+        if not self.image_ids:
+            raise ValueError("the protected test partition is empty")
+
+
+def load_protected_test_images(target_dir: Path) -> ProtectedTestImages:
+    """Read only the identities of the protected test partition of a frozen target.
+
+    Image identities are file SHA-256 digests, so the partition can be compared
+    with candidate content without opening any test image.
+    """
+    manifest = load_protected_test_manifest(Path(target_dir))
+    return ProtectedTestImages(
+        manifest.digest(), frozenset(entry.image_id for entry in manifest.entries)
+    )
+
+
+def _refuse_test_overlap(
+    hashes: dict[str, str], protected: ProtectedTestImages, what: str
+) -> None:
+    hits = sorted(
+        name for name, digest in hashes.items() if digest in protected.image_ids
+    )
+    if hits:
+        raise ValueError(
+            f"{what} overlaps the test partition ({len(hits)} images, "
+            f"first: {hits[:3]})"
         )
 
 
@@ -93,13 +118,14 @@ def read_candidates(source: Path) -> list[CandidateImage]:
 
 
 def read_development_observations(
-    source: Path, backend: MaskBackend
+    source: Path, backend: MaskBackend, protected: ProtectedTestImages
 ) -> list[SceneObservation]:
     """Create 100 labeled scene observations from the held-apart dev manifest."""
+    require_colour_threshold(backend.model, backend.version)
     records = json.loads(Path(source).read_text(encoding="utf-8"))
     if not isinstance(records, list) or len(records) != 100:
         raise ValueError("scene development manifest must contain exactly 100 images")
-    observations: list[SceneObservation] = []
+    candidates: list[tuple[CandidateImage, str]] = []
     for record in records:
         if not isinstance(record, dict) or set(record) != {
             "image_id",
@@ -113,7 +139,15 @@ def read_development_observations(
         if not path.is_absolute():
             path = Path(source).parent / path
         path = path.resolve()
-        candidate = CandidateImage(str(record["image_id"]), path)
+        candidates.append(
+            (CandidateImage(str(record["image_id"]), path), str(record["scene_tag"]))
+        )
+    hashes = {
+        candidate.image_id: file_sha256(candidate.path) for candidate, _ in candidates
+    }
+    _refuse_test_overlap(hashes, protected, "the calibration development set")
+    observations: list[SceneObservation] = []
+    for candidate, scene_tag in candidates:
         with Image.open(candidate.path) as opened:
             image = opened.convert("RGB")
         prediction = backend.predict(image)
@@ -122,17 +156,19 @@ def read_development_observations(
             SceneObservation(
                 image_id=candidate.image_id,
                 features=features,
-                scene_tag=str(record["scene_tag"]),
-                source_sha256=file_sha256(candidate.path),
+                scene_tag=scene_tag,
+                source_sha256=hashes[candidate.image_id],
             )
         )
     return observations
 
 
-def fit_thresholds_from_manifest(source: Path, backend: MaskBackend) -> SceneThresholds:
+def fit_thresholds_from_manifest(
+    source: Path, backend: MaskBackend, protected: ProtectedTestImages
+) -> SceneThresholds:
     """Fit cutoffs from exactly 100 labeled development images."""
     return fit_scene_thresholds(
-        read_development_observations(source, backend),
+        read_development_observations(source, backend, protected),
         mask_model=backend.model,
         mask_version=backend.version,
     )
@@ -152,12 +188,15 @@ def run_masks_audit(
     thresholds: SceneThresholds,
     backend: MaskBackend,
     output_dir: Path,
+    protected: ProtectedTestImages,
     *,
     seed: int = 42,
     sample_count: int = AUDIT_COUNT,
     owner_count: int = OWNER_COUNT,
 ) -> dict[str, Any]:
     """Select a stratified mask audit and emit blinded rating templates."""
+    require_colour_threshold(backend.model, backend.version)
+    require_colour_threshold(thresholds.mask_model, thresholds.mask_version)
     if sample_count < 1 or owner_count < 1 or owner_count > sample_count:
         raise ValueError("sample and owner counts must be positive and owner <= sample")
     if len(candidates) < sample_count:
@@ -176,11 +215,19 @@ def run_masks_audit(
         raise ValueError("scene thresholds were fitted with a different mask backend")
 
     dev_hashes = {digest for _, digest in thresholds.development_sources}
-    source_hashes: dict[str, str] = {}
+    _refuse_test_overlap(
+        dict(thresholds.development_sources),
+        protected,
+        "the calibration development set",
+    )
+    source_hashes = {
+        candidate.image_id: file_sha256(candidate.path) for candidate in candidates
+    }
+    _refuse_test_overlap(source_hashes, protected, "the audit sample inventory")
     hash_to_id: dict[str, str] = {}
     strata: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for candidate in candidates:
-        source_hash = file_sha256(candidate.path)
+        source_hash = source_hashes[candidate.image_id]
         if source_hash in dev_hashes:
             raise ValueError(
                 "development image content overlaps the held-out audit set"
@@ -191,7 +238,6 @@ def run_masks_audit(
                 f"{hash_to_id[source_hash]!r} and {candidate.image_id!r}"
             )
         hash_to_id[source_hash] = candidate.image_id
-        source_hashes[candidate.image_id] = source_hash
         with Image.open(candidate.path) as opened:
             image = opened.convert("RGB")
         prediction = backend.predict(image)
@@ -276,9 +322,16 @@ def run_masks_audit(
             "population_by_scene": populations,
             "sampled_by_scene": allocations,
             "fail_rate_estimator": "stratified population-weighted proportion "
-            "with finite-population correction",
+            "with an exact Clopper-Pearson upper bound per stratum",
         },
         "mask_backend": {"model": backend.model, "version": backend.version},
+        "partition_check": {
+            "target_manifest_digest": protected.manifest_digest,
+            "test_image_count": len(protected.image_ids),
+            "development_images_checked": len(thresholds.development_sources),
+            "inventory_images_checked": len(candidates),
+            "overlaps": 0,
+        },
         "agent_rater": None,
         "mask_rubric": MASK_RUBRIC,
         "scene_rubric": SCENE_RUBRIC,
@@ -308,9 +361,21 @@ def evaluate_masks_audit(
     resamples: int = 10_000,
     agent_rater: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Evaluate mask agreement, weighted fail rate and scene agreement."""
+    """Evaluate mask agreement, the exact fail-rate bound and scene agreement."""
     if manifest.get("schema") != AUDIT_SCHEMA:
         raise ValueError("unsupported mask audit manifest")
+    backend_record = manifest.get("mask_backend")
+    if not isinstance(backend_record, dict):
+        raise ValueError("mask audit manifest records no mask backend")
+    require_colour_threshold(
+        str(backend_record.get("model", "")), str(backend_record.get("version", ""))
+    )
+    check = manifest.get("partition_check")
+    if not isinstance(check, dict) or check.get("overlaps") != 0:
+        raise ValueError(
+            "mask audit manifest has no clean test-partition check; "
+            "rerun the audit against the frozen target"
+        )
     records = manifest.get("records")
     if not isinstance(records, list) or not records:
         raise ValueError("mask audit manifest has no records")
@@ -365,8 +430,8 @@ def evaluate_masks_audit(
         raise ValueError(
             "agent rater name and version are required for real audit results"
         )
-    return {
-        "schema": "jute-mask-audit-evaluation-v1",
+    report: dict[str, Any] = {
+        "schema": EVALUATION_SCHEMA,
         "fixture_mode": is_fixture,
         "evidence_status": (
             "synthetic fixture only; not an audit result"
@@ -374,6 +439,12 @@ def evaluate_masks_audit(
             else "owner and agent ratings supplied"
         ),
         "agent_rater": agent_rater,
+        "mask_backend": {
+            "model": str(backend_record["model"]),
+            "version": str(backend_record["version"]),
+        },
+        "audit_manifest_digest": _canonical_digest(manifest),
+        "partition_check": check,
         "mask_quality": {
             **mask_agreement,
             "fail_rate": fail_rate,
@@ -381,7 +452,7 @@ def evaluate_masks_audit(
             "fail_rate_limit": MASK_FAIL_RATE_LIMIT,
             "gate_pass": mask_agreement["lower_95"] is not None
             and mask_agreement["lower_95"] >= KAPPA_THRESHOLD
-            and fail_rate["estimate"] < MASK_FAIL_RATE_LIMIT,
+            and fail_rate["gate_pass"],
         },
         "scene_tag": {
             **scene_agreement,
@@ -401,6 +472,8 @@ def evaluate_masks_audit(
             "owner_scene": dict(Counter(row["scene_tag"] for row in owner.values())),
         },
     }
+    report["digest"] = _canonical_digest(report)
+    return report
 
 
 def run_masks_fixture(output_dir: Path, *, seed: int = 42) -> dict[str, Any]:
@@ -409,7 +482,7 @@ def run_masks_fixture(output_dir: Path, *, seed: int = 42) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=False)
     input_dir = output_dir / "fixture-inputs"
     input_dir.mkdir()
-    backend = FixtureMaskBackend()
+    backend = ColorThresholdBackend()
 
     development_records: list[dict[str, str]] = []
     for index in range(100):
@@ -421,7 +494,8 @@ def run_masks_fixture(output_dir: Path, *, seed: int = 42) -> dict[str, Any]:
         )
     development_path = input_dir / "development.json"
     _write_json_new(development_path, development_records)
-    thresholds = fit_thresholds_from_manifest(development_path, backend)
+    protected = _fixture_protected(input_dir)
+    thresholds = fit_thresholds_from_manifest(development_path, backend, protected)
     write_thresholds(output_dir / "scene-thresholds.json", thresholds)
 
     candidate_records: list[dict[str, str]] = []
@@ -440,6 +514,7 @@ def run_masks_fixture(output_dir: Path, *, seed: int = 42) -> dict[str, Any]:
         thresholds,
         backend,
         output_dir / "audit",
+        protected,
         seed=seed,
         sample_count=AUDIT_COUNT,
         owner_count=OWNER_COUNT,
@@ -596,9 +671,25 @@ def _confusion_matrix(
     return matrix
 
 
+def _canonical_digest(value: dict[str, Any]) -> str:
+    """SHA-256 of canonical JSON, ignoring any digest field already present."""
+    payload = {key: item for key, item in value.items() if key != "digest"}
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def _weighted_fail_rate(
     records: Sequence[dict[str, Any]], agent: dict[str, dict[str, str]]
 ) -> dict[str, Any]:
+    """Estimate the population fail rate with an exact one-sided upper bound.
+
+    Each sampled stratum gets a one-sided Clopper-Pearson bound at level
+    ``0.05 / k`` for ``k`` non-census strata, a Bonferroni split so the weighted
+    sum holds jointly at 95%. A stratum audited in full contributes its observed
+    rate. The gate passes only when this upper bound is within the limit; the
+    point estimate never decides the gate.
+    """
     by_stratum: dict[str, list[bool]] = defaultdict(list)
     populations: dict[str, int] = {}
     for record in records:
@@ -611,45 +702,35 @@ def _weighted_fail_rate(
     total_population = sum(populations.values())
     if total_population < 1:
         raise ValueError("audit population must be nonempty")
-    estimate = (
-        sum(
-            populations[tag] * sum(values) / len(values)
-            for tag, values in by_stratum.items()
-        )
-        / total_population
-    )
-    variance_terms: list[float] = []
-    variance_available = True
+    sampled_strata = [
+        tag for tag, values in by_stratum.items() if len(values) < populations[tag]
+    ]
+    level = (1 - FAIL_RATE_CONFIDENCE) / len(sampled_strata) if sampled_strata else 0.0
+    estimate = 0.0
+    upper = 0.0
     for tag, values in by_stratum.items():
-        population = populations[tag]
-        sample_size = len(values)
-        if sample_size == population:
-            continue
-        if sample_size < 2:
-            variance_available = False
-            break
-        stratum_estimate = sum(values) / sample_size
-        sample_variance = (
-            sample_size / (sample_size - 1) * stratum_estimate * (1 - stratum_estimate)
-        )
-        weight = population / total_population
-        variance_terms.append(
-            weight**2 * (1 - sample_size / population) * sample_variance / sample_size
-        )
-    if variance_available:
-        standard_error = sqrt(sum(variance_terms))
-        radius = NormalDist().inv_cdf(0.975) * standard_error
-        lower, upper = max(0.0, estimate - radius), min(1.0, estimate + radius)
-    else:
-        standard_error = lower = upper = None
+        weight = populations[tag] / total_population
+        failures, sample_size = sum(values), len(values)
+        estimate += weight * failures / sample_size
+        if tag in sampled_strata:
+            stratum_upper = (
+                1.0
+                if failures == sample_size
+                else float(beta.ppf(1 - level, failures + 1, sample_size - failures))
+            )
+        else:
+            stratum_upper = failures / sample_size
+        upper += weight * stratum_upper
+    upper = min(1.0, upper)
     return {
         "estimate": estimate,
-        "lower_95": lower,
         "upper_95": upper,
-        "standard_error": standard_error,
-        "gate_pass": estimate < MASK_FAIL_RATE_LIMIT,
-        "method": "stratified expansion estimate with finite-population-corrected "
-        "normal 95% interval",
+        "confidence": FAIL_RATE_CONFIDENCE,
+        "gate_pass": upper <= MASK_FAIL_RATE_LIMIT,
+        "fail_rate_limit": MASK_FAIL_RATE_LIMIT,
+        "method": "stratified expansion estimate with exact one-sided "
+        "Clopper-Pearson upper bounds per stratum, Bonferroni-split across "
+        "sampled strata; strata audited in full use their observed rate",
         "population": total_population,
         "sampled": len(records),
         "population_by_scene": populations,
@@ -661,6 +742,16 @@ def _write_json_new(path: Path, value: Any) -> None:
     with Path(path).open("x", encoding="utf-8") as handle:
         json.dump(value, handle, indent=2, sort_keys=True)
         handle.write("\n")
+
+
+def _fixture_protected(input_dir: Path) -> ProtectedTestImages:
+    """A small synthetic test partition, disjoint from every fixture image."""
+    ids = []
+    for index in range(5):
+        path = input_dir / f"test-{index}.png"
+        _write_fixture_image(path, "field", 10_000 + index)
+        ids.append(file_sha256(path))
+    return ProtectedTestImages("synthetic-fixture-test-partition", frozenset(ids))
 
 
 def _fixture_tag(index: int) -> str:

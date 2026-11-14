@@ -117,7 +117,7 @@ The unified jute dataset merges three public sources. The repository code is Apa
    uv sync --locked --all-groups
    ```
 
-   uv selects CUDA 13.0 PyTorch wheels on Windows and CUDA 12.6 wheels on Linux. Optional SAM2 support is installed with `uv sync --locked --extra masks --all-groups`. Setup does not include or download a model checkpoint. Optional SAM 2 refinement requires an existing local checkpoint and loads it offline.
+   uv selects CUDA 13.0 PyTorch wheels on Windows and CUDA 12.6 wheels on Linux.
 
 3. Optional: install [`just`](https://just.systems) to run the recipes shown below. `just --list` shows every recipe, and each one wraps a single `uv run jute-disease` command. `uv run jute-disease --help` lists the commands themselves. The Linux lab helpers are under `scripts/`; ntfy topic and token are supplied through the host's environment secret mechanism, never command arguments.
 
@@ -161,8 +161,6 @@ uv run --locked python scripts/audit_dependencies.py
 ```
 
 Training runs through a serial, resumable queue declared in `configs/benchmark.json`: `just queue-plan` shows the fits, `just queue-run` runs them, and running it again skips completed fits and resumes an interrupted CNN fit from its last saved epoch. [Architecture](docs/architecture.md#training-queue) defines the identity, retry and resume rules.
-
-For optional local SAM2 package imports, use `uv sync --locked --all-groups --extra masks`. No model weights are included or downloaded by setup.
 
 This tooling work does not authorize experiment fits or establish readiness of the lab A100. The synthetic freeze and Linux CI checks validate the development environment. The validation-only lab pilots and experiment readiness gates remain in [issue 114](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/114). See [Tooling](docs/tooling.md) for update cadence, local evidence, audit limits, preprocessing identity, and helper commands.
 
