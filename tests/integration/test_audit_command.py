@@ -222,7 +222,7 @@ def test_evaluation_reports_exact_bounds_per_pool_and_names_the_agent(
     }
     for kind in ("wrong_merge", "false_split"):
         overall = report[kind]["overall"]
-        assert overall["lower"] <= overall["rate"] <= overall["upper"]
+        assert overall["rate"] <= overall["upper"] and "lower" not in overall
         assert set(report[kind]["by_pool"]) == {"A", "B", "C"}
     # Owner flips every fourth pair, so some merged pairs are wrong merges.
     assert report["wrong_merge"]["overall"]["events"] > 0
@@ -232,7 +232,9 @@ def test_evaluation_reports_exact_bounds_per_pool_and_names_the_agent(
         assert stratum["kind"] in {"wrong_merge", "false_split", "same_family"}
     assert report["dataset_quality"]["pool_c_mixed_label_scenes"] >= 0
     assert "Clopper-Pearson" in report["bound_methods"]["per_stratum"]
-    assert report["bound_methods"]["design_weighted"].startswith("conservative")
+    assert report["bound_methods"]["design_weighted"].startswith(
+        "conservative one-sided"
+    )
 
 
 def test_evaluation_refuses_a_cohort_without_grouping_version_or_agent(

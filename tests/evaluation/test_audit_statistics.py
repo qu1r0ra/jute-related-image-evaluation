@@ -7,7 +7,7 @@ from jute_disease.evaluation import (
     StratumCounts,
     agreement_gate,
     clopper_pearson_interval,
-    design_weighted_interval,
+    design_weighted_upper_bound,
 )
 
 
@@ -39,16 +39,16 @@ def test_design_weighted_estimate_uses_population_weights() -> None:
         StratumCounts(population=900, sampled=30, events=0),
         StratumCounts(population=100, sampled=30, events=15),
     ]
-    result = design_weighted_interval(strata)
+    result = design_weighted_upper_bound(strata)
     # 0.9 * 0 + 0.1 * 0.5
     assert result.estimate == pytest.approx(0.05)
-    assert result.lower <= result.estimate <= result.upper
+    assert result.estimate <= result.upper <= 1
 
 
 def test_census_strata_add_no_sampling_error() -> None:
     census = [StratumCounts(population=13, sampled=13, events=10)]
-    result = design_weighted_interval(census)
-    assert (result.estimate, result.lower, result.upper) == (10 / 13,) * 3
+    result = design_weighted_upper_bound(census)
+    assert (result.estimate, result.upper) == (10 / 13, 10 / 13)
 
 
 def test_zero_events_still_gives_a_positive_upper_bound() -> None:
@@ -56,26 +56,25 @@ def test_zero_events_still_gives_a_positive_upper_bound() -> None:
         StratumCounts(population=400, sampled=40, events=0),
         StratumCounts(population=200, sampled=40, events=0),
     ]
-    result = design_weighted_interval(strata)
+    result = design_weighted_upper_bound(strata)
     assert result.estimate == 0
     assert 0 < result.upper < 0.2
 
 
-def test_single_large_stratum_matches_the_binomial_closed_form() -> None:
+def test_single_large_stratum_zero_events_matches_the_closed_form() -> None:
     # In a huge population sampling without replacement is binomial, so the
-    # one-stratum bound is the exact two-sided 95% upper bound 1 - 0.025 ** (1 / n).
-    result = design_weighted_interval(
+    # one-sided 95% upper bound at zero events is 1 - alpha ** (1 / n).
+    result = design_weighted_upper_bound(
         [StratumCounts(population=10_000_000, sampled=20, events=0)]
     )
-    assert result.lower == 0
-    assert result.upper == pytest.approx(1 - 0.025 ** (1 / 20), abs=1e-4)
+    assert result.upper == pytest.approx(1 - 0.05 ** (1 / 20), abs=1e-4)
 
 
 def test_single_small_stratum_matches_a_brute_force_exact_bound() -> None:
     population, sampled, events = 30, 10, 2
 
-    # Brute force: the exact 95% two-sided bounds are the extreme population event
-    # counts D that the observed count x does not reject at 2.5% in either tail.
+    # Brute force: the exact one-sided 95% upper bound is the largest population
+    # event count D that the observed count x does not reject at 5%.
     def pmf(count: int, d: int) -> float:
         return (
             comb(d, count)
@@ -86,12 +85,19 @@ def test_single_small_stratum_matches_a_brute_force_exact_bound() -> None:
     plausible = [
         d
         for d in range(population + 1)
-        if sum(pmf(k, d) for k in range(events + 1)) >= 0.025
-        and sum(pmf(k, d) for k in range(events, sampled + 1)) >= 0.025
+        if sum(pmf(k, d) for k in range(events + 1)) >= 0.05
     ]
-    result = design_weighted_interval([StratumCounts(population, sampled, events)])
-    assert result.lower == pytest.approx(min(plausible) / population)
+    result = design_weighted_upper_bound([StratumCounts(population, sampled, events)])
     assert result.upper == pytest.approx(max(plausible) / population)
+
+
+def test_census_stratum_does_not_spend_any_of_the_error_budget() -> None:
+    sampled = StratumCounts(population=2000, sampled=40, events=1)
+    census = StratumCounts(population=13, sampled=13, events=10)
+    alone = design_weighted_upper_bound([sampled])
+    together = design_weighted_upper_bound([sampled, census])
+    # Same sampled-stratum bound (m = 1 in both), plus the census events exactly.
+    assert together.upper * 2013 == pytest.approx(alone.upper * 2000 + 10)
 
 
 # A synthetic design in the audit's shape: a census stratum, strata of very
@@ -108,7 +114,7 @@ SYNTHETIC_DESIGN = [
 ]
 
 
-def test_design_weighted_interval_covers_known_truth_by_simulation() -> None:
+def test_upper_bound_covers_known_truth_by_simulation() -> None:
     rng = np.random.default_rng(7)
     # Fix the finite population's true event counts, then redraw samples without
     # replacement, which is how the audit samples inside a stratum.
@@ -125,14 +131,14 @@ def test_design_weighted_interval_covers_known_truth_by_simulation() -> None:
             )
             for (n, m, _), d in zip(SYNTHETIC_DESIGN, truth_events, strict=True)
         ]
-        interval = design_weighted_interval(strata)
-        assert interval.lower <= interval.estimate <= interval.upper
-        covered += interval.lower <= truth <= interval.upper
+        bound = design_weighted_upper_bound(strata)
+        assert bound.estimate <= bound.upper
+        covered += truth <= bound.upper
     # The bound is conservative: coverage is at least the nominal 95%.
     assert covered / trials >= 0.95
 
 
-def test_design_weighted_interval_covers_when_events_are_rare_in_small_strata() -> None:
+def test_upper_bound_covers_when_events_are_rare_in_small_strata() -> None:
     rng = np.random.default_rng(11)
     design = [(40, 10, 1), (25, 10, 0), (500, 30, 5), (90, 30, 9)]
     truth = sum(d for _, _, d in design) / sum(n for n, _, _ in design)
@@ -143,8 +149,7 @@ def test_design_weighted_interval_covers_when_events_are_rare_in_small_strata() 
             StratumCounts(n, m, int(rng.hypergeometric(d, n - d, m)))
             for n, m, d in design
         ]
-        interval = design_weighted_interval(strata)
-        covered += interval.lower <= truth <= interval.upper
+        covered += truth <= design_weighted_upper_bound(strata).upper
     assert covered / trials >= 0.95
 
 

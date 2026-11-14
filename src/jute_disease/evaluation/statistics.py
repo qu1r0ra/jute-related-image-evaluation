@@ -73,72 +73,69 @@ class StratumCounts:
             )
 
 
-def _event_bounds(stratum: StratumCounts, tail: float) -> tuple[int, int]:
-    """Exact lower and upper bounds on a stratum's population event count.
+@dataclass(frozen=True)
+class UpperBound:
+    """A point estimate with a one-sided upper confidence bound on a rate."""
 
-    The sample is drawn without replacement, so the sampled event count is
-    hypergeometric. The upper bound is the largest population count D for which
-    P(X <= x) is at least ``tail``; the lower bound is the smallest D for which
-    P(X >= x) is at least ``tail``. Both probabilities are monotone in D, so each
-    bound is found by bisection. Each bound fails to cover the true count with
-    probability at most ``tail``: this is the Clopper-Pearson construction with
-    the finite population kept.
+    estimate: float
+    upper: float
+    level: float
+
+
+def _upper_event_bound(stratum: StratumCounts, tail: float) -> int:
+    """Exact upper bound on a stratum's population event count.
+
+    The sample is drawn without replacement, so the sampled event count X is
+    hypergeometric. The bound is the largest population count D for which
+    P(X <= x) is at least ``tail``. That probability falls as D rises, so
+    bisection finds it. The true count exceeds the bound with probability at
+    most ``tail``: this is the one-sided Clopper-Pearson construction with the
+    finite population kept.
     """
     population, sampled, events = (
         stratum.population,
         stratum.sampled,
         stratum.events,
     )
-    low_limit, high_limit = events, population - (sampled - events)
-    low, high = low_limit, high_limit
-    while low < high:  # largest D with P(X <= events) >= tail
+    low, high = events, population - (sampled - events)
+    while low < high:
         middle = (low + high + 1) // 2
         if hypergeom.cdf(events, population, middle, sampled) >= tail:
             low = middle
         else:
             high = middle - 1
-    upper = low
-    if events == 0:
-        return 0, upper
-    low, high = low_limit, high_limit
-    while low < high:  # smallest D with P(X >= events) >= tail
-        middle = (low + high) // 2
-        if hypergeom.sf(events - 1, population, middle, sampled) >= tail:
-            high = middle
-        else:
-            low = middle + 1
-    return low, upper
+    return low
 
 
-def design_weighted_interval(
+def design_weighted_upper_bound(
     strata: Sequence[StratumCounts], level: float = 0.95
-) -> Interval:
-    """Design-weighted rate, sum(N_h p_h) / sum(N_h), with a conservative interval.
+) -> UpperBound:
+    """Design-weighted rate, sum(N_h p_h) / sum(N_h), and a conservative upper bound.
 
-    The interval is conservative, not exact: its coverage is at least ``level``
-    and is usually higher. Within a stratum the audited pairs are a simple random
-    sample without replacement, so the sampled event count is hypergeometric and
-    the exact Clopper-Pearson-type bounds of ``_event_bounds`` hold for the
-    stratum's population event count D_h at any chosen tail probability. Let m be
-    the number of strata that are not censuses. Each such stratum gets two-sided
-    tail probability (1 - level) / (2 m). By the union bound, with probability at
-    least ``level`` every one of the m strata contains its true D_h between its
-    bounds, and a census stratum has D_h = its sampled count exactly. On that
-    event the true rate sum(D_h) / sum(N_h) lies between the sums of the lower
-    and of the upper stratum bounds, divided by sum(N_h). The strata are
-    independent, so this needs no variance estimate or normal approximation. The
-    price of the union bound is width, which grows with m.
+    The bound is one-sided and conservative, not exact: its coverage is at least
+    ``level`` and is usually higher. Within a stratum the audited pairs are a
+    simple random sample without replacement, so the sampled event count is
+    hypergeometric and ``_upper_event_bound`` is an exact one-sided bound on the
+    stratum's population event count D_h at any tail probability. Let m be the
+    number of strata that are not censuses and alpha = 1 - level. Each such
+    stratum gets tail alpha / m. By the union bound, with probability at least
+    ``level`` no sampled stratum's true D_h exceeds its upper bound, and a census
+    stratum has D_h equal to its sampled count exactly. On that event the true
+    rate sum(D_h) / sum(N_h) is at most the sum of the upper stratum bounds
+    divided by sum(N_h). The strata are independent samples, so this needs no
+    variance estimate or normal approximation. The price of the union bound is
+    width, which grows with m. Only the upper bound is formed: the audit asks
+    whether a wrong-merge or false-split rate is small, and a one-sided bound
+    spends all of alpha on that side.
     """
     if not strata or not 0 < level < 1:
         raise ValueError("need at least one stratum and a confidence level in (0, 1)")
     population = sum(s.population for s in strata)
     estimate = sum(s.population * s.events / s.sampled for s in strata) / population
     sampled_strata = sum(s.sampled < s.population for s in strata)
-    tail = (1 - level) / (2 * max(sampled_strata, 1))
-    bounds = [_event_bounds(s, tail) for s in strata]
-    lower = sum(low for low, _ in bounds) / population
-    upper = sum(high for _, high in bounds) / population
-    return Interval(estimate, lower, upper, level)
+    tail = (1 - level) / max(sampled_strata, 1)
+    upper = sum(_upper_event_bound(s, tail) for s in strata) / population
+    return UpperBound(estimate, upper, level)
 
 
 def kendall_tau(first: Sequence[float], second: Sequence[float]) -> float:

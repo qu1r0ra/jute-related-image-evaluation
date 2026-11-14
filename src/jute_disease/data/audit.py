@@ -30,9 +30,10 @@ from jute_disease.data.grouping import flip_canonical_dhash, union_find_componen
 from jute_disease.evaluation import (
     Interval,
     StratumCounts,
+    UpperBound,
     agreement_gate,
     clopper_pearson_interval,
-    design_weighted_interval,
+    design_weighted_upper_bound,
 )
 
 RUBRIC = {"exact": 1, "near-duplicate": 1, "very similar": 0, "different": 0}
@@ -416,9 +417,10 @@ def _specific_agreement(
 BOUND_METHODS = {
     "per_stratum": "exact two-sided 95% Clopper-Pearson",
     "design_weighted": (
-        "conservative two-sided 95%: exact finite-population (hypergeometric) "
-        "bounds per sampled stratum at tail 0.025 / m, summed with population "
-        "weights (union bound over the m sampled strata); coverage is at least 95%"
+        "conservative one-sided 95% upper bound: exact finite-population "
+        "(hypergeometric) upper bounds per sampled stratum at tail 0.05 / m, "
+        "summed with population weights (union bound over the m sampled "
+        "strata); coverage is at least 95%"
     ),
 }
 
@@ -431,12 +433,16 @@ def _interval(estimate: Interval) -> dict[str, float]:
     }
 
 
+def _upper(bound: UpperBound) -> dict[str, float]:
+    return {"rate": bound.estimate, "upper": bound.upper}
+
+
 def _error_rates(
     rows: Sequence[dict[str, Any]],
     owner: Sequence[int],
     denominators: dict[str, int],
 ) -> dict[str, Any]:
-    """Per-stratum exact and conservative design-weighted error rates.
+    """Per-stratum exact and conservative design-weighted upper-bounded error rates.
 
     Covers wrong-merge and false-split rates.
 
@@ -482,7 +488,7 @@ def _error_rates(
             for key in chosen
         ]
         return {
-            **_interval(design_weighted_interval(counts)),
+            **_upper(design_weighted_upper_bound(counts)),
             "population": sum(c.population for c in counts),
             "sampled": sum(c.sampled for c in counts),
             "events": sum(c.events for c in counts),
@@ -626,7 +632,7 @@ def evaluate_ratings(
         )
         for pool in sorted({row["pool"] for row in ordered})
     }
-    disagreement = design_weighted_interval(
+    disagreement = design_weighted_upper_bound(
         [
             StratumCounts(
                 denominators[key],
@@ -656,7 +662,7 @@ def evaluate_ratings(
         "negative_agreement": _specific_agreement(first, second)["negative"],
         "specific_agreement_by_pool": by_pool,
         **_error_rates(ordered, second, denominators),
-        "agent_owner_disagreement": _interval(disagreement),
+        "agent_owner_disagreement": _upper(disagreement),
         "very_similar": similar,
         "round": round_number,
         "next_action": "proceed"
