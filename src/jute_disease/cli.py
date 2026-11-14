@@ -99,9 +99,11 @@ from jute_disease.training import (
     QueueAbortedError,
     QueueReport,
     RunStore,
+    Stage,
     SystemClock,
     Workspace,
     build_plan,
+    build_probe_plan,
     make_executor,
     make_identity,
     open_workspace,
@@ -110,7 +112,7 @@ from jute_disease.training import (
     subprocess_launcher,
     verify_stack,
 )
-from jute_disease.training.benchmark import load_benchmark
+from jute_disease.training.benchmark import Benchmark, load_benchmark
 from jute_disease.training.process import exit_on_sigterm
 
 Handler = Callable[[argparse.Namespace], None]
@@ -540,6 +542,10 @@ def _stack(args: argparse.Namespace) -> None:
     _print_json(verify_stack(require_cuda=not args.allow_cpu))
 
 
+def _stages(benchmark: Benchmark, probes: bool) -> tuple[Stage, ...]:
+    return build_probe_plan(benchmark) if probes else build_plan(benchmark)
+
+
 def _queue_plan(args: argparse.Namespace) -> None:
     workspace = _workspace_from(args)
     store = RunStore(workspace.runs_dir)
@@ -552,7 +558,7 @@ def _queue_plan(args: argparse.Namespace) -> None:
                     for fit in stage.fits
                 ],
             }
-            for stage in build_plan(workspace.benchmark)
+            for stage in _stages(workspace.benchmark, args.probes)
         ]
     )
 
@@ -601,6 +607,7 @@ def _queue_run(args: argparse.Namespace) -> None:
             execute=make_executor(workspace, store, identity, launcher),
             identity_for=identity,
             report_path=workspace.runs_dir / "queue.json",
+            plan=_stages(workspace.benchmark, args.probes),
         )
     except QueueAbortedError as error:
         raise SystemExit(f"{error}; see queue.json") from error
@@ -1202,14 +1209,20 @@ def build_parser() -> argparse.ArgumentParser:
     queue_actions = queue.add_subparsers(
         dest="queue_action", metavar="ACTION", required=True
     )
+    probes_help = (
+        "Plan or run only the border and pad-cue probe fits, with the tuning "
+        "fits a border probe reuses."
+    )
     plan = queue_actions.add_parser("plan", help="Show stages and current run states.")
     _add_workspace_options(plan)
+    plan.add_argument("--probes", action="store_true", help=probes_help)
     plan.set_defaults(run=_queue_plan)
     status = queue_actions.add_parser("status", help="Show every fit's state.")
     _add_workspace_options(status)
     status.set_defaults(run=_queue_status)
     run = queue_actions.add_parser("run", help="Run or resume the benchmark.")
     _add_workspace_options(run)
+    run.add_argument("--probes", action="store_true", help=probes_help)
     run.set_defaults(run=_queue_run)
 
     # evaluate: aggregation and inference

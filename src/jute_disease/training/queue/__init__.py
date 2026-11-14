@@ -1,4 +1,4 @@
-from jute_disease.training.queue.plan import Stage, build_plan
+from jute_disease.training.queue.plan import Stage, build_plan, build_probe_plan
 from jute_disease.training.queue.runner import (
     MAX_CONSECUTIVE_FAILURES,
     RETRIES,
@@ -32,5 +32,6 @@ __all__ = [
     "confirmatory_blockers",
     "require_confirmatory_completion",
     "build_plan",
+    "build_probe_plan",
     "run_queue",
 ]
