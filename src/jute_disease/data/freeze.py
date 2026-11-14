@@ -21,6 +21,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from PIL import Image
 
 from jute_disease.config import (
@@ -78,6 +79,7 @@ from jute_disease.data.sources import (
     SourceSpec,
     check_overlap,
     derive_validation,
+    drop_images,
     drop_overlap,
     find_source_root,
     leaf_constraints,
@@ -92,6 +94,7 @@ INVENTORY_FILE = "inventory.jsonl"
 REPORT_FILE = "freeze_report.json"
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 SOURCES = {"plantdoc": PLANTDOC, "plantvillage": PLANTVILLAGE}
+AUDIT_BAND_LIMIT = 16
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -100,6 +103,64 @@ def _write_json(path: Path, payload: object) -> None:
         encoding="utf-8",
         newline="\n",
     )
+
+
+def _audit_band_neighbours(
+    images: dict[str, tuple[str, int, str]],
+    families: list[list[str]],
+    threshold: int,
+) -> dict[str, Any]:
+    """Return every cross-family pair whose dHash distance is in the audit band.
+
+    The band is ``threshold < distance <= AUDIT_BAND_LIMIT``: near misses the
+    grouping rule did not merge. Policy generation reads this record, so the
+    strict View 2 subset is defined once from the frozen grouping.
+    """
+    family_of = {
+        path: index for index, family in enumerate(families) for path in family
+    }
+    paths = sorted(path for path in images if path in family_of)
+    values = np.array([images[path][1] for path in paths], dtype=np.uint64)
+    pairs: list[list[Any]] = []
+    for start in range(0, len(paths), 256):
+        distance = np.bitwise_count(values[start : start + 256, None] ^ values[None])
+        rows, columns = np.nonzero(
+            (distance > threshold) & (distance <= AUDIT_BAND_LIMIT)
+        )
+        for row, column in zip(rows.tolist(), columns.tolist(), strict=True):
+            first, second = start + row, column
+            if first < second and family_of[paths[first]] != family_of[paths[second]]:
+                pairs.append([paths[first], paths[second], int(distance[row, column])])
+    return {
+        "threshold": threshold,
+        "max_distance": AUDIT_BAND_LIMIT,
+        "pairs": sorted(pairs),
+    }
+
+
+def _screened_exclusions(
+    target_dir: Path, spec: SourceSpec, package_digest: str
+) -> set[str] | None:
+    """Return the source paths the target freeze screened out, if it screened.
+
+    A freeze without a grouping receipt records no screening and returns None.
+    A grouped freeze must have screened this exact package, otherwise intake
+    stops: an unscreened source could still hold target images.
+    """
+    path = target_dir / "grouping.json"
+    if not path.is_file():
+        return None
+    screening = json.loads(path.read_text(encoding="utf-8")).get("source_screening")
+    entry = screening.get(spec.name.lower()) if isinstance(screening, dict) else None
+    if not isinstance(entry, dict) or entry.get("inventory_digest") != package_digest:
+        raise FreezeBlockedError(
+            f"The {spec.name} package was not screened against this target freeze; "
+            "refreeze the target with this package's root"
+        )
+    exclusions = entry.get("exclusions")
+    if not isinstance(exclusions, dict):
+        raise FreezeBlockedError(f"The {spec.name} screening record is invalid")
+    return set(exclusions)
 
 
 def freeze_target(
@@ -276,6 +337,9 @@ def freeze_target(
             "removed_edges": result["removed"],
             "no_merge_ratings": sorted(ratings),
             "source_screening": screening,
+            "audit_band_neighbours": _audit_band_neighbours(
+                images, result["families"], threshold
+            ),
             "families": result["families"],
             "excluded": result["excluded"],
             "denominators": {
@@ -552,9 +616,21 @@ def intake_source(
     )
     overlap = check_overlap(records, target)
     split, removed = drop_overlap(split, overlap)
+    screened = _screened_exclusions(output_dir / TARGET_DIR, spec, digest)
+    screening_removed: tuple = ()
+    if screened:
+        split, screening_removed = drop_images(
+            split, {r.image_id for r in records if r.path in screened}
+        )
+        removed = (*removed, *screening_removed)
 
     result = provenance(spec, records, package_version, split, overlap, leaf_map)
     result["removed"] = [r.path for r in removed]
+    if screened is not None:
+        result["screening"] = {
+            "exclusions": sorted(screened),
+            "removed": sorted(r.path for r in screening_removed),
+        }
     result["overlap_matches"] = [vars(match) for match in overlap.matches]
     result["official_overlap"] = official_overlap.summary()
     result["official_overlap_matches"] = [vars(m) for m in official_overlap.matches]
@@ -606,7 +682,15 @@ def intake_source(
         fractions=(("train", 0.85), ("val", 0.15), ("test", 0.0)),
         entries=entries,
         excluded=tuple(
-            [{"path": r.path, "reason": "target overlap"} for r in removed]
+            [
+                {"path": r.path, "reason": "target overlap"}
+                for r in removed
+                if r not in screening_removed
+            ]
+            + [
+                {"path": r.path, "reason": "source screening"}
+                for r in screening_removed
+            ]
             + [
                 {"path": m.source_path, "reason": "official held-out overlap"}
                 for m in official_overlap.matches

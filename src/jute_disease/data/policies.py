@@ -17,6 +17,60 @@ from jute_disease.data.transforms import letterbox_pad_fraction
 
 POLICIES = ("image-random", "exact-copy", "near-duplicate")
 PARTITIONS = ("train", "val", "test")
+HEALTHY_CAP = 1000
+AUDIT_BAND_LIMIT = 16
+
+
+def _cap_healthy(
+    splits: dict[str, list[dict]], cap: int, rank_seed: str
+) -> tuple[dict[str, list[dict]], dict[str, list[dict]], dict[str, int]]:
+    """Cap the Healthy training image count identically in every policy.
+
+    A policy above the cap keeps exactly `cap` images, filled with whole
+    families taken in one seeded order and skipping a family only when it would
+    overshoot. A policy at or below the cap is left whole. Failing to fill the
+    cap exactly stops the run.
+    """
+
+    def healthy(entries: list[dict]) -> list[dict]:
+        return [
+            row
+            for row in entries
+            if row["label"].lower() == "healthy" and row["partition"] == "train"
+        ]
+
+    target = cap
+    kept: dict[str, list[dict]] = {}
+    excluded: dict[str, list[dict]] = {}
+    counts: dict[str, int] = {}
+    for policy, entries in splits.items():
+        if len(healthy(entries)) <= cap:
+            kept[policy] = entries
+            excluded[policy] = []
+            counts[policy] = len(healthy(entries))
+            continue
+        families: dict[str, list[dict]] = defaultdict(list)
+        for row in healthy(entries):
+            families[row["family"]].append(row)
+        chosen: set[str] = set()
+        count = 0
+        for family in sorted(families, key=lambda item: _rank(rank_seed, item)):
+            if count == target:
+                break
+            if count + len(families[family]) <= target:
+                chosen.add(family)
+                count += len(families[family])
+        if count != target:
+            raise ValueError(
+                f"Healthy cap of {target} images cannot be filled with whole "
+                f"families under {policy}"
+            )
+        dropped = [row for row in healthy(entries) if row["family"] not in chosen]
+        dropped_paths = {row["path"] for row in dropped}
+        excluded[policy] = dropped
+        kept[policy] = [row for row in entries if row["path"] not in dropped_paths]
+        counts[policy] = count
+    return kept, excluded, counts
 
 
 def load_policy_manifest(
@@ -154,7 +208,35 @@ def _select(keys: set[str], fraction: float, seed: str) -> set[str]:
     return set(sorted(keys, key=lambda key: _rank(seed, key))[:count])
 
 
-def _pool(root: Path) -> tuple[list[dict], dict[str, str]]:
+def _neighbours(grouping: dict, by_path: dict) -> dict:
+    """Read the frozen audit-band neighbour pairs into a symmetric lookup."""
+    record = grouping.get("audit_band_neighbours")
+    if (
+        not isinstance(record, dict)
+        or not isinstance(record.get("pairs"), list)
+        or record.get("max_distance") != AUDIT_BAND_LIMIT
+        or not isinstance(record.get("threshold"), int)
+    ):
+        raise ValueError(
+            "grouping lacks audit-band neighbours; refreeze the target with "
+            "the current command"
+        )
+    lookup: dict[str, set[str]] = defaultdict(set)
+    for pair in record["pairs"]:
+        if (
+            not isinstance(pair, list)
+            or len(pair) != 3
+            or pair[0] not in by_path
+            or pair[1] not in by_path
+            or not record["threshold"] < pair[2] <= AUDIT_BAND_LIMIT
+        ):
+            raise ValueError("invalid audit-band neighbour record")
+        lookup[pair[0]].add(pair[1])
+        lookup[pair[1]].add(pair[0])
+    return {"threshold": record["threshold"], "neighbours": lookup}
+
+
+def _pool(root: Path) -> tuple[list[dict], dict[str, str], dict]:
     target = root / "target"
     manifest = load_complete_manifest(target)
     dependencies = dict(manifest.dependencies)
@@ -216,7 +298,11 @@ def _pool(root: Path) -> tuple[list[dict], dict[str, str]]:
         "inventory_digest": dependencies["inventory"],
         "manifest_digest": manifest.digest(),
     }
-    return sorted(rows, key=lambda row: row["path"]), lineage
+    return (
+        sorted(rows, key=lambda row: row["path"]),
+        lineage,
+        _neighbours(grouping, by_path),
+    )
 
 
 def _split(
@@ -288,8 +374,11 @@ def write_policy_manifests(
     val_fraction: float,
     test_fraction: float,
     seed: int,
+    healthy_cap: int = HEALTHY_CAP,
 ) -> dict:
     """Write a complete, recorded split matrix from verified grouping freezes."""
+    if type(healthy_cap) is not int or healthy_cap < 1:
+        raise ValueError("healthy cap must be a positive image count")
     fractions = (reserve_fraction, train_fraction, val_fraction, test_fraction)
     if not all(
         math.isfinite(value) and 0 < value < 1 for value in fractions
@@ -314,6 +403,12 @@ def write_policy_manifests(
         "reserve_denominator": "admitted families per class",
         "split_denominator": "non-reserve policy units per class",
         "view2_test": "whole near-duplicate families per class, shared across policies",
+        "healthy_cap_images": healthy_cap,
+        "healthy_cap_rule": (
+            "pool C only: a policy with more Healthy training images than the "
+            "cap keeps exactly the cap, filled with whole families in a seeded "
+            "order; the same cap applies in every policy, view and draw"
+        ),
     }
     config_digest = hashlib.sha256(
         json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
@@ -324,8 +419,17 @@ def write_policy_manifests(
         for split in range(10)
         for target_seed in range(5)
     ]
+    cap_record: dict[str, list[dict]] = {}
+    strict_record: dict[str, list[dict]] = {}
+    grouping_digests: dict[str, str] = {}
+    audit_thresholds: dict[str, int] = {}
     for name, path in sorted(pools.items()):
-        rows, lineage = _pool(Path(path))
+        rows, lineage, audit = _pool(Path(path))
+        neighbours = audit["neighbours"]
+        grouping_digests[name] = lineage["grouping_digest"]
+        audit_thresholds[name] = audit["threshold"]
+        strict_record[name] = []
+        cap_record[name] = []
         labels = sorted({row["label"] for row in rows})
         reserve = set()
         for label in labels:
@@ -362,9 +466,11 @@ def write_policy_manifests(
                     test_fraction,
                     f"{draw_seed}:{name}:{label}:protected",
                 )
+            view2_fit: set[str] = set()
+            view2_protected: set[str] = set()
             for view in (1, 2):
-                for policy in POLICIES:
-                    entries = _split(
+                splits = {
+                    policy: _split(
                         available,
                         policy,
                         draw_seed,
@@ -372,36 +478,28 @@ def write_policy_manifests(
                         test_fraction,
                         protected if view == 2 else None,
                     )
-                    excluded = []
-                    if name == "C":
-                        healthy = [
-                            row
+                    for policy in POLICIES
+                }
+                excluded_rows: dict[str, list[dict]] = {p: [] for p in POLICIES}
+                if name == "C":
+                    splits, excluded_rows, applied = _cap_healthy(
+                        splits, healthy_cap, f"{draw_seed}:{name}:healthy-cap"
+                    )
+                    cap_record[name].append(
+                        {"view": view, "draw": draw, "healthy_train_images": applied}
+                    )
+                for policy in POLICIES:
+                    entries = splits[policy]
+                    excluded = excluded_rows[policy]
+                    if view == 2:
+                        view2_fit |= {
+                            row["path"]
                             for row in entries
-                            if row["label"].lower() == "healthy"
-                            and row["partition"] == "train"
-                        ]
-                        key = "path" if policy == "image-random" else "family"
-                        units = {row[key] for row in healthy}
-                        if len(units) > 1000:
-                            keep = set(
-                                sorted(
-                                    units,
-                                    key=lambda unit: _rank(f"{seed}:healthy-cap", unit),
-                                )[:1000]
-                            )
-                            excluded = [
-                                row
-                                for row in entries
-                                if row["label"].lower() == "healthy"
-                                and row["partition"] == "train"
-                                and row[key] not in keep
-                            ]
-                            excluded_paths = {row["path"] for row in excluded}
-                            entries = [
-                                row
-                                for row in entries
-                                if row["path"] not in excluded_paths
-                            ]
+                            if row["partition"] in ("train", "val")
+                        }
+                        view2_protected |= {
+                            row["path"] for row in entries if row["partition"] == "test"
+                        }
                     support = _support(entries, labels)
                     if any(
                         count == 0
@@ -466,6 +564,17 @@ def write_policy_manifests(
                             }
                         },
                     }
+            strict_record[name].append(
+                {
+                    "draw": draw,
+                    "protected_test": len(view2_protected),
+                    "paths": sorted(
+                        path
+                        for path in view2_protected
+                        if not neighbours.get(path, set()) & view2_fit
+                    ),
+                }
+            )
     output.mkdir(parents=True, exist_ok=False)
     digests = {}
     for relative, payload in artifacts.items():
@@ -474,7 +583,31 @@ def write_policy_manifests(
         encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
         destination.write_bytes(encoded)
         digests[relative] = hashlib.sha256(encoded).hexdigest()
-    receipt = {"version": 1, "config_digest": config_digest, "files": digests}
+    receipt = {
+        "version": 1,
+        "config_digest": config_digest,
+        "files": digests,
+        "healthy_cap": {
+            "images": healthy_cap,
+            "seed": seed,
+            "applied": cap_record,
+        },
+        "strict_view2_subset": {
+            "definition": (
+                "View 2 protected-test images with no audit-band neighbour in "
+                "any View 2 fit partition (train or validation, any policy)"
+            ),
+            "audit_bands": {
+                name: {
+                    "threshold": audit_thresholds[name],
+                    "max_distance": AUDIT_BAND_LIMIT,
+                }
+                for name in sorted(pools)
+            },
+            "grouping_digests": grouping_digests,
+            "pools": strict_record,
+        },
+    }
     (output / "receipt.json").write_text(
         json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )

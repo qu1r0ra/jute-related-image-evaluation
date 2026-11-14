@@ -433,7 +433,16 @@ def drop_overlap(
 
     Returns the cleaned split and the removed records.
     """
-    bad = report.source_ids
+    return drop_images(split, report.source_ids)
+
+
+def drop_images(
+    split: SourceSplit, bad: frozenset[str] | set[str]
+) -> tuple[SourceSplit, tuple[InventoryRecord, ...]]:
+    """Remove the images with these ids from every side of a source split.
+
+    Returns the cleaned split and the removed records.
+    """
 
     def keep(records: tuple[InventoryRecord, ...]) -> tuple[InventoryRecord, ...]:
         return tuple(r for r in records if r.image_id not in bad)
