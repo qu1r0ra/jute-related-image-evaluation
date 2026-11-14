@@ -15,14 +15,17 @@ from jute_disease.data.manifest import (
     load_protected_test_manifest,
     write_manifest,
 )
-from jute_disease.training import load_benchmark
+from jute_disease.training import RunStore, load_benchmark
 
 from .test_gated_evaluator import (
     FIT,
+    LEAF_FIT,
+    SYSTEM,
     _cli,
+    _complete_fit,
     _freeze,
+    _leaf_run,
     _outcomes,
-    _predictions,
     _probe_ids,
     _spec,
     _write,
@@ -30,7 +33,12 @@ from .test_gated_evaluator import (
 
 
 def test_freeze_record_needs_recorded_validation_outcomes(
-    tmp_path: Path, target: Path, root: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     spec = _spec(tmp_path, [], _probe_ids(capsys))
     base = [
@@ -42,6 +50,10 @@ def test_freeze_record_needs_recorded_validation_outcomes(
         target,
         "--root",
         root,
+        "--policy-dir",
+        policy_dir,
+        "--mask-audit-report",
+        mask_audit_report,
     ]
     with pytest.raises(SystemExit, match="validation outcomes"):
         _cli(*base, "--output", tmp_path / "none.json")
@@ -53,7 +65,12 @@ def test_freeze_record_needs_recorded_validation_outcomes(
 
 
 def test_freeze_record_must_list_every_probe_fit(
-    tmp_path: Path, target: Path, root: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     probes = _probe_ids(capsys)
     spec = json.loads(_spec(tmp_path, [], probes).read_text(encoding="utf-8"))
@@ -73,6 +90,10 @@ def test_freeze_record_must_list_every_probe_fit(
             target,
             "--root",
             root,
+            "--policy-dir",
+            policy_dir,
+            "--mask-audit-report",
+            mask_audit_report,
         )
 
 
@@ -102,35 +123,28 @@ def test_probe_plan_is_primary_split_classical_and_imagenet_route(
 
 
 def _setup_runs(
-    tmp_path: Path, target: Path, root: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> tuple[Path, Path, Path]:
+    leaf = LEAF_FIT.format(0)
     record = _freeze(
         tmp_path,
         target,
         root,
+        policy_dir,
+        mask_audit_report,
         capsys,
-        [FIT.format(0), "fixture/mobilenet_v2_direct/leaf-seed-0"],
+        [FIT.format(0), leaf],
     )
-    _predictions(target, tmp_path / "runs" / "0.json", 7, None)
-    _predictions(target, tmp_path / "runs" / "leaf-0.json", 8, None)
+    store = RunStore(tmp_path / "runs")
+    full = _complete_fit(store, target, FIT.format(0), 0, 3)
     _write(
         tmp_path / "runs" / "runs.json",
-        [
-            {
-                "fit_id": FIT.format(0),
-                "system": "mobilenet_v2_direct",
-                "seed": 0,
-                "predictions": "0.json",
-            },
-            {
-                "fit_id": "fixture/mobilenet_v2_direct/leaf-seed-0",
-                "system": "mobilenet_v2_direct",
-                "seed": 0,
-                "variant": "leaf_only",
-                "predictions": "leaf-0.json",
-                "of": FIT.format(0),
-            },
-        ],
+        [full, _leaf_run(store, target, leaf, FIT.format(0), 0, 2)],
     )
     run_record = tmp_path / "runs" / "run-record.json"
     _cli(
@@ -143,7 +157,7 @@ def _setup_runs(
         "--output",
         run_record,
     )
-    return record, run_record, tmp_path / "runs" / "0.json"
+    return record, run_record, store.run_dir(FIT.format(0)) / "predictions.json"
 
 
 def _test_args(
@@ -173,9 +187,13 @@ def test_freeze_record_binds_both_manifest_paths_schemas_and_bytes(
     tmp_path: Path,
     target: Path,
     root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    record = _freeze(tmp_path, target, root, capsys, [FIT.format(0)])
+    record = _freeze(
+        tmp_path, target, root, policy_dir, mask_audit_report, capsys, [FIT.format(0)]
+    )
     payload = json.loads(record.read_text(encoding="utf-8"))
     binding = payload["body"]["manifest_binding"]
     assert binding["schema"] == 1
@@ -193,13 +211,23 @@ def test_freeze_record_refuses_a_missing_protected_manifest(
     tmp_path: Path,
     target: Path,
     root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     incomplete = tmp_path / "incomplete-target"
     copytree(target, incomplete)
     (incomplete / "protected-test" / "manifest.json").unlink()
     with pytest.raises(SystemExit, match="freeze record blocked"):
-        _freeze(tmp_path, incomplete, root, capsys, [FIT.format(0)])
+        _freeze(
+            tmp_path,
+            incomplete,
+            root,
+            policy_dir,
+            mask_audit_report,
+            capsys,
+            [FIT.format(0)],
+        )
     assert not (tmp_path / "freeze-record.json").exists()
 
 
@@ -207,6 +235,8 @@ def test_freeze_record_refuses_mismatched_split_rules(
     tmp_path: Path,
     target: Path,
     root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     mismatched = tmp_path / "mismatched-target"
@@ -217,23 +247,45 @@ def test_freeze_record_refuses_mismatched_split_rules(
     )
 
     with pytest.raises(SystemExit, match="mismatched split rules"):
-        _freeze(tmp_path, mismatched, root, capsys, [FIT.format(0)])
+        _freeze(
+            tmp_path,
+            mismatched,
+            root,
+            policy_dir,
+            mask_audit_report,
+            capsys,
+            [FIT.format(0)],
+        )
     assert not (tmp_path / "freeze-record.json").exists()
 
 
 def test_changed_pipeline_code_refuses_the_read(
-    tmp_path: Path, target: Path, root: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    record, run_record, _ = _setup_runs(tmp_path, target, root, capsys)
+    record, run_record, _ = _setup_runs(
+        tmp_path, target, root, policy_dir, mask_audit_report, capsys
+    )
     (root / "src" / "a.py").write_text("x = 2\n", encoding="utf-8")
     with pytest.raises(SystemExit, match="pipeline code changed"):
         _cli(*_test_args(tmp_path, target, root, record, run_record))
 
 
 def test_edited_freeze_record_refuses_the_read(
-    tmp_path: Path, target: Path, root: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    record, run_record, _ = _setup_runs(tmp_path, target, root, capsys)
+    record, run_record, _ = _setup_runs(
+        tmp_path, target, root, policy_dir, mask_audit_report, capsys
+    )
     payload = json.loads(record.read_text(encoding="utf-8"))
     payload["body"]["budget"] = {"a100_gpu_hours": 99}
     _write(record, payload)
@@ -242,9 +294,16 @@ def test_edited_freeze_record_refuses_the_read(
 
 
 def test_unlisted_fit_cannot_enter_a_run_record(
-    tmp_path: Path, target: Path, root: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    record, _, _ = _setup_runs(tmp_path, target, root, capsys)
+    record, _, _ = _setup_runs(
+        tmp_path, target, root, policy_dir, mask_audit_report, capsys
+    )
     _write(
         tmp_path / "runs" / "bad.json",
         [{"fit_id": "not/planned", "system": "s", "seed": 0, "predictions": "0.json"}],
@@ -263,9 +322,16 @@ def test_unlisted_fit_cannot_enter_a_run_record(
 
 
 def test_changed_predictions_refuse_the_read(
-    tmp_path: Path, target: Path, root: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    record, run_record, predictions = _setup_runs(tmp_path, target, root, capsys)
+    record, run_record, predictions = _setup_runs(
+        tmp_path, target, root, policy_dir, mask_audit_report, capsys
+    )
     predictions.write_text(
         predictions.read_text(encoding="utf-8") + " ", encoding="utf-8"
     )
@@ -274,9 +340,16 @@ def test_changed_predictions_refuse_the_read(
 
 
 def test_changed_protected_manifest_refuses_test_read_before_logging(
-    tmp_path: Path, target: Path, root: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    record, run_record, _ = _setup_runs(tmp_path, target, root, capsys)
+    record, run_record, _ = _setup_runs(
+        tmp_path, target, root, policy_dir, mask_audit_report, capsys
+    )
     manifest = target / "protected-test" / "manifest.json"
     manifest.write_bytes(manifest.read_bytes() + b" ")
     with pytest.raises(SystemExit, match="manifest bytes changed"):
@@ -288,10 +361,14 @@ def test_diagnostics_cli_gates_and_logs_authorized_manifest_read(
     tmp_path: Path,
     target: Path,
     root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    record, run_record, _ = _setup_runs(tmp_path, target, root, capsys)
+    record, run_record, _ = _setup_runs(
+        tmp_path, target, root, policy_dir, mask_audit_report, capsys
+    )
     protected_path = target / "protected-test" / "manifest.json"
     original = protected_path.read_bytes()
     protected_path.write_bytes(original + b" ")
@@ -341,9 +418,13 @@ def test_leaf_sample_cli_gates_and_logs_authorized_read(
     tmp_path: Path,
     target: Path,
     root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    record = _freeze(tmp_path, target, root, capsys, [FIT.format(0)])
+    record = _freeze(
+        tmp_path, target, root, policy_dir, mask_audit_report, capsys, [FIT.format(0)]
+    )
     capsys.readouterr()
     _cli(
         "evaluate",
@@ -373,21 +454,41 @@ def test_leaf_sample_cli_gates_and_logs_authorized_read(
 
 
 def test_record_made_after_a_read_is_flagged_post_hoc(
-    tmp_path: Path, target: Path, root: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    record, run_record, _ = _setup_runs(tmp_path, target, root, capsys)
+    record, run_record, _ = _setup_runs(
+        tmp_path, target, root, policy_dir, mask_audit_report, capsys
+    )
     log = tmp_path / "reads.jsonl"
     _cli(*_test_args(tmp_path, target, root, record, run_record), "--reads-log", log)
     assert log.read_text(encoding="utf-8").strip()
     second = _freeze(
-        tmp_path, target, root, capsys, [FIT.format(0)], "second.json", log
+        tmp_path,
+        target,
+        root,
+        policy_dir,
+        mask_audit_report,
+        capsys,
+        [FIT.format(0)],
+        "second.json",
+        log,
     )
     assert json.loads(second.read_text(encoding="utf-8"))["body"]["post_hoc"] is True
     assert json.loads(record.read_text(encoding="utf-8"))["body"]["post_hoc"] is False
 
 
 def test_all_analyses_run_through_the_evaluator(
-    tmp_path: Path, target: Path, root: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    passing_mask_audit_report: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     entries = load_protected_test_manifest(target).entries
     fits = {
@@ -397,7 +498,15 @@ def test_all_analyses_run_through_the_evaluator(
         "border": "fixture/border/seed-0",
         "pad_cue": "fixture/pad/seed-0",
     }
-    record = _freeze(tmp_path, target, root, capsys, list(fits.values()))
+    record = _freeze(
+        tmp_path,
+        target,
+        root,
+        policy_dir,
+        passing_mask_audit_report,
+        capsys,
+        list(fits.values()),
+    )
     sample_args = ["--freeze-record", record, "--target-dir", target, "--root", root]
     capsys.readouterr()
     _cli("evaluate", "leaf-sample", *sample_args, "--sample-size", 12)
@@ -414,25 +523,15 @@ def test_all_analyses_run_through_the_evaluator(
         and row["record_hash"] == json.loads(record.read_text(encoding="utf-8"))["hash"]
         for row in reads
     )
+    store = RunStore(tmp_path / "runs")
     runs = []
     for variant, fit_id in fits.items():
-        file = f"{variant}.json"
-        _predictions(
-            target,
-            tmp_path / "runs" / file,
-            5,
-            sample if variant == "leaf_only" else None,
-        )
-        runs.append(
-            {
-                "fit_id": fit_id,
-                "system": "pad" if variant == "pad_cue" else "mobilenet_v2_direct",
-                "seed": 0,
-                "variant": variant,
-                "predictions": file,
-                "of": fits["full"] if variant == "leaf_only" else None,
-            }
-        )
+        if variant == "leaf_only":
+            runs.append(_leaf_run(store, target, fit_id, fits["full"], 0, 5, sample))
+            continue
+        system = "pad" if variant == "pad_cue" else SYSTEM
+        run = _complete_fit(store, target, fit_id, 0, 5, system=system)
+        runs.append({**run, "variant": variant, "of": None})
     _write(tmp_path / "runs" / "runs.json", runs)
     run_record = tmp_path / "runs" / "run-record.json"
     _cli(
@@ -471,15 +570,28 @@ def test_all_analyses_run_through_the_evaluator(
 
 
 def test_two_runs_for_one_system_and_seed_are_refused(
-    tmp_path: Path, target: Path, root: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    record = _freeze(tmp_path, target, root, capsys, [FIT.format(0), "fixture/dup"])
-    _predictions(target, tmp_path / "runs" / "0.json", 7, None)
-    entry = {"system": "mobilenet_v2_direct", "seed": 0, "predictions": "0.json"}
-    _write(
-        tmp_path / "runs" / "runs.json",
-        [{**entry, "fit_id": FIT.format(0)}, {**entry, "fit_id": "fixture/dup"}],
+    record = _freeze(
+        tmp_path,
+        target,
+        root,
+        policy_dir,
+        mask_audit_report,
+        capsys,
+        [FIT.format(0), "fixture/dup"],
     )
+    store = RunStore(tmp_path / "runs")
+    runs = [
+        _complete_fit(store, target, FIT.format(0), 0, 3),
+        _complete_fit(store, target, "fixture/dup", 0, 3),
+    ]
+    _write(tmp_path / "runs" / "runs.json", runs)
     run_record = tmp_path / "runs" / "run-record.json"
     _cli(
         "evaluate",

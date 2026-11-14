@@ -5,6 +5,7 @@ Commands marked as planned exit non-zero and name the issue that owns them.
 """
 
 import argparse
+import hashlib
 import json
 import sys
 from collections.abc import Callable, Sequence
@@ -63,6 +64,7 @@ from jute_disease.data import (
 )
 from jute_disease.data.policies import HEALTHY_CAP
 from jute_disease.evaluation import (
+    RESIDUAL_AUDIT_OPERATION,
     FreezeRecordError,
     TestReadRefusedError,
     authorize_test_read,
@@ -72,6 +74,7 @@ from jute_disease.evaluation import (
     leaf_sample_ids,
     log_test_read,
     planned_probe_fit_ids,
+    predict_test,
     verify_freeze_record,
     write_freeze_record,
     write_run_record,
@@ -102,7 +105,6 @@ from jute_disease.training import (
     verify_stack,
 )
 from jute_disease.training.benchmark import load_benchmark
-from jute_disease.training.engines.ml import predict_ml
 from jute_disease.training.process import exit_on_sigterm
 
 Handler = Callable[[argparse.Namespace], None]
@@ -134,6 +136,15 @@ def _audit_fixture(args: argparse.Namespace) -> None:
         raise SystemExit(f"audit blocked: {error}") from error
 
 
+def _pinned_extractor(args: argparse.Namespace) -> ImageNetExtractor:
+    if args.weights is None or args.weights_sha256 is None:
+        raise ValueError(
+            "--weights and --weights-sha256 are required: the audit loads "
+            "pinned local pretrained weights and never downloads them"
+        )
+    return ImageNetExtractor(args.weights, args.weights_sha256)
+
+
 def _audit_sample(args: argparse.Namespace) -> None:
     from PIL import Image
 
@@ -144,17 +155,29 @@ def _audit_sample(args: argparse.Namespace) -> None:
                 data, count=args.count, seed=args.seed, threshold=args.threshold
             )
         elif args.kind == "features":
-            extractor = ImageNetExtractor()
+            extractor = _pinned_extractor(args)
             report = {
                 "pairs": feature_neighbors(data, extractor, k=args.k),
                 "feature_provenance": extractor.provenance,
             }
         elif args.kind == "residual":
-            extractors: list[ImageNetExtractor] = []
+            source_digest = hashlib.sha256(args.source.read_bytes()).hexdigest()
+            extra_logs = [args.reads_log] if args.reads_log else []
+            built: list[ImageNetExtractor] = []
 
             def extract(paths: Sequence[str]) -> Any:
-                extractor = ImageNetExtractor()
-                extractors.append(extractor)
+                # Built only once the sample is valid; each pool's protected-test
+                # sample is on the log before any of its images opens.
+                if not built:
+                    built.append(_pinned_extractor(args))
+                extractor = built[0]
+                log_test_read(
+                    default_reads_log_path(args.root),
+                    source_digest,
+                    [],
+                    operation=RESIDUAL_AUDIT_OPERATION,
+                    additional_logs=extra_logs,
+                )
                 return extractor(paths)
 
             report = residual_sample(
@@ -165,7 +188,7 @@ def _audit_sample(args: argparse.Namespace) -> None:
                 k=args.k,
                 seed=args.seed,
             )
-            report["feature_provenance"] = extractors[-1].provenance
+            report["feature_provenance"] = built[0].provenance
         else:
             images = []
             for path in data:
@@ -642,6 +665,14 @@ def _evaluate_freeze_record(args: argparse.Namespace) -> None:
             args.output,
             args.root,
             target_dir=args.target_dir,
+            policy_dir=args.policy_dir,
+            mask_audit_report=args.mask_audit_report,
+            matrix={
+                "pools": benchmark.pools,
+                "views": benchmark.views,
+                "policies": benchmark.policies,
+                "draws": benchmark.splits,
+            },
             required_fit_ids=required,
             reads_log=args.reads_log,
         )
@@ -650,12 +681,38 @@ def _evaluate_freeze_record(args: argparse.Namespace) -> None:
     _print_json({"hash": record["hash"], "post_hoc": record["body"]["post_hoc"]})
 
 
+def _evaluate_predict_test(args: argparse.Namespace) -> None:
+    try:
+        result = predict_test(
+            args.freeze_record,
+            args.fit_id,
+            args.run_store,
+            root=args.root,
+            image_root=args.image_root,
+            target_dir=args.target_dir,
+            policy_dir=args.policy_dir,
+            pool_roots={
+                pool: root
+                for pool, root in (
+                    ("A", args.pool_a_root),
+                    ("B", args.pool_b_root),
+                    ("C", args.pool_c_root),
+                )
+                if root is not None
+            },
+            reads_log=args.reads_log,
+        )
+    except (TestReadRefusedError, FreezeRecordError, OSError, ValueError) as error:
+        raise SystemExit(f"test read refused: {error}") from error
+    _print_json(result)
+
+
 def _evaluate_run_record(args: argparse.Namespace) -> None:
     try:
         record = write_run_record(
             args.freeze_record,
             _read_json_file(args.runs),
-            args.output.parent,
+            args.run_store or args.output.parent,
             args.output,
         )
     except (FreezeRecordError, TestReadRefusedError, OSError) as error:
@@ -696,7 +753,7 @@ def _evaluate_test(args: argparse.Namespace) -> None:
         report = evaluate_test(
             args.target_dir,
             auth,
-            args.run_record.parent,
+            args.run_store or args.run_record.parent,
             scenes=features.get("scenes"),
             frame_leaf_share=features.get("frame_leaf_share"),
             sample_size=args.sample_size,
@@ -736,7 +793,7 @@ def _evaluate_diagnostics(args: argparse.Namespace) -> None:
         result = evaluate_image_diagnostics(
             args.target_dir,
             auth,
-            args.run_record.parent,
+            args.run_store or args.run_record.parent,
             args.image_root,
             args.output,
             frozen_backbone_checkpoint=args.frozen_backbone_checkpoint,
@@ -842,6 +899,21 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=4,
         help="Merge threshold for edges and recall (dhash-v2 uses 6).",
+    )
+    sampler.add_argument(
+        "--weights",
+        type=Path,
+        help="Local pretrained weights file for features and residual; never fetched.",
+    )
+    sampler.add_argument(
+        "--weights-sha256",
+        help="Pinned SHA-256 of --weights; a different file is refused.",
+    )
+    sampler.add_argument("--root", type=Path, default=ROOT_DIR)
+    sampler.add_argument(
+        "--reads-log",
+        type=Path,
+        help="Extra test-read log for residual; the project log is always written.",
     )
     sampler.set_defaults(run=_audit_sample)
     cohort = data_actions.add_parser(
@@ -1007,7 +1079,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output CSV path.",
     )
     aggregate.set_defaults(run=_evaluate_aggregate)
-    evaluate_actions.add_parser("predict", help="Classify one image (forwarded).")
     _add_bootstrap_coverage(evaluate_actions)
     _add_gated_evaluator(evaluate_actions)
 
@@ -1086,6 +1157,18 @@ def _add_gated_evaluator(actions: argparse._SubParsersAction) -> None:
     )
     record.add_argument("--output", type=Path, required=True)
     record.add_argument("--target-dir", type=Path, required=True)
+    record.add_argument(
+        "--policy-dir",
+        type=Path,
+        required=True,
+        help="Receipted policy matrix; every draw's protected-test manifest is bound.",
+    )
+    record.add_argument(
+        "--mask-audit-report",
+        type=Path,
+        required=True,
+        help="Mask audit evaluation report; its digest is bound, not an operator flag.",
+    )
     record.add_argument("--benchmark", type=Path, default=BENCHMARK_CONFIG)
     record.add_argument("--root", type=Path, default=ROOT_DIR)
     record.add_argument("--reads-log", type=Path)
@@ -1097,7 +1180,34 @@ def _add_gated_evaluator(actions: argparse._SubParsersAction) -> None:
     runs.add_argument("--freeze-record", type=Path, required=True)
     runs.add_argument("--runs", type=Path, required=True)
     runs.add_argument("--output", type=Path, required=True)
+    runs.add_argument(
+        "--run-store",
+        type=Path,
+        help="Run-store root of receipts and predictions (default: beside output).",
+    )
     runs.set_defaults(run=_evaluate_run_record)
+
+    predict = actions.add_parser(
+        "predict-test",
+        help="Write one fit's gated test predictions; refused without a freeze record.",
+    )
+    predict.add_argument("--freeze-record", type=Path)
+    predict.add_argument("--fit-id", required=True)
+    predict.add_argument("--run-store", type=Path, required=True)
+    predict.add_argument("--target-dir", type=Path, required=True)
+    predict.add_argument("--image-root", type=Path, required=True)
+    predict.add_argument(
+        "--policy-dir",
+        type=Path,
+        default=None,
+        help="Must equal the policy dir the freeze record binds (pool fits only).",
+    )
+    predict.add_argument("--pool-a-root", type=Path, default=None)
+    predict.add_argument("--pool-b-root", type=Path, default=None)
+    predict.add_argument("--pool-c-root", type=Path, default=None)
+    predict.add_argument("--root", type=Path, default=ROOT_DIR)
+    predict.add_argument("--reads-log", type=Path)
+    predict.set_defaults(run=_evaluate_predict_test)
 
     test = actions.add_parser(
         "test", help="Read test predictions; refused without both records."
@@ -1108,6 +1218,7 @@ def _add_gated_evaluator(actions: argparse._SubParsersAction) -> None:
     test.add_argument("--output", type=Path, required=True)
     test.add_argument("--features", type=Path, help="Scene tags and frame leaf shares.")
     test.add_argument("--fit-id", action="append")
+    test.add_argument("--run-store", type=Path, help="Default: beside the run record.")
     test.add_argument("--root", type=Path, default=ROOT_DIR)
     test.add_argument("--reads-log", type=Path)
     test.add_argument("--sample-size", type=int, default=2000)
@@ -1136,6 +1247,9 @@ def _add_gated_evaluator(actions: argparse._SubParsersAction) -> None:
     diagnostics.add_argument("--output", type=Path, required=True)
     diagnostics.add_argument("--fit-id", action="append", required=True)
     diagnostics.add_argument("--model-name", default="mobilenetv2_100.ra_in1k")
+    diagnostics.add_argument(
+        "--run-store", type=Path, help="Default: beside the run record."
+    )
     diagnostics.add_argument("--root", type=Path, default=ROOT_DIR)
     diagnostics.add_argument("--reads-log", type=Path)
     diagnostics.set_defaults(run=_evaluate_diagnostics)
@@ -1237,12 +1351,8 @@ def _add_freeze(commands: argparse._SubParsersAction) -> None:
 
 def main(argv: Sequence[str] | None = None) -> None:
     tokens = list(sys.argv[1:] if argv is None else argv)
-    # predict owns its argument parsing, so its arguments bypass argparse.
-    if tuple(tokens[:2]) == ("evaluate", "predict"):
-        predict_ml(tokens[2:])
-    else:
-        args = build_parser().parse_args(tokens)
-        args.run(args)
+    args = build_parser().parse_args(tokens)
+    args.run(args)
 
 
 if __name__ == "__main__":

@@ -476,6 +476,44 @@ def evaluate_masks_audit(
     return report
 
 
+def audit_report_outcome(report: dict[str, Any]) -> dict[str, Any]:
+    """Verify an evaluation report and derive the outcome a freeze record binds.
+
+    The report's own digest must match its content, so an edited report is
+    rejected. The gate outcome is computed here from the report's gates and is
+    never taken from an operator-written value.
+
+    Raises:
+        ValueError: the report is not a clean, untampered evaluation report.
+    """
+    if not isinstance(report, dict) or report.get("schema") != EVALUATION_SCHEMA:
+        raise ValueError("unsupported mask audit evaluation report")
+    digest = report.get("digest")
+    if not isinstance(digest, str) or digest != _canonical_digest(report):
+        raise ValueError("mask audit report digest does not match its content")
+    backend = report.get("mask_backend")
+    if not isinstance(backend, dict):
+        raise ValueError("mask audit report records no mask backend")
+    require_colour_threshold(
+        str(backend.get("model", "")), str(backend.get("version", ""))
+    )
+    check = report.get("partition_check")
+    if not isinstance(check, dict) or check.get("overlaps") != 0:
+        raise ValueError("mask audit report has no clean test-partition check")
+    audit_digest = report.get("audit_manifest_digest")
+    if not isinstance(audit_digest, str) or not audit_digest:
+        raise ValueError("mask audit report does not name its audit manifest")
+    gates = [report.get(name) for name in ("mask_quality", "scene_tag")]
+    if not all(isinstance(gate, dict) for gate in gates):
+        raise ValueError("mask audit report is missing a gate")
+    return {
+        "digest": digest,
+        "audit_manifest_digest": audit_digest,
+        "fixture_mode": bool(report.get("fixture_mode", False)),
+        "passed": all(gate.get("gate_pass") is True for gate in gates),
+    }
+
+
 def run_masks_fixture(output_dir: Path, *, seed: int = 42) -> dict[str, Any]:
     """Run the full calibration, sample, rating and evaluation path without weights."""
     output_dir = Path(output_dir)

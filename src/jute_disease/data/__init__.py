@@ -113,6 +113,7 @@ from jute_disease.data.masks_audit import (
     OWNER_COUNT,
     CandidateImage,
     ProtectedTestImages,
+    audit_report_outcome,
     evaluate_masks_audit,
     fit_thresholds_from_manifest,
     load_protected_test_images,
@@ -124,7 +125,9 @@ from jute_disease.data.masks_audit import (
 )
 from jute_disease.data.policies import (
     POLICIES,
+    load_policy_complete_manifest,
     load_policy_manifest,
+    policy_matrix_binding,
     write_policy_manifests,
 )
 from jute_disease.data.readers import (
@@ -252,6 +255,8 @@ __all__ = [
     "write_isolated_manifests",
     "write_policy_manifests",
     "load_policy_manifest",
+    "load_policy_complete_manifest",
+    "policy_matrix_binding",
 ]
 
 
@@ -285,6 +290,7 @@ __all__ += [
     "SceneThresholds",
     "classify_scene",
     "color_uniformity",
+    "audit_report_outcome",
     "evaluate_masks_audit",
     "extract_scene_features",
     "fit_scene_thresholds",

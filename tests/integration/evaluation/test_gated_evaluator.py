@@ -10,10 +10,12 @@ from jute_disease.cli import main
 from jute_disease.config import BENCHMARK_CONFIG
 from jute_disease.data import load_manifest
 from jute_disease.data.manifest import load_protected_test_manifest
-from jute_disease.training import load_benchmark
+from jute_disease.training import RunStore, load_benchmark
 
 LABEL_COUNT = 2
+SYSTEM = "mobilenet_v2_direct"
 FIT = "fixture/mobilenet_v2_direct/seed-{}"
+LEAF_FIT = "fixture/mobilenet_v2_direct/leaf-seed-{}"
 ANALYSES = [
     "background-probe",
     "border-probe",
@@ -47,7 +49,7 @@ def _spec(tmp_path: Path, extra_fits: list[str], probes: list[str]) -> Path:
             "analysis_ids": ANALYSES,
             "selections": {"cnn/tune/pool-A": 1.0},
             "letterbox_decision": {"choice": "letterbox"},
-            "mask_audit": {"passed": True},
+            "diagnostic": {"pool": "A", "view": 1, "policy": "image-random"},
             "border_probe": {
                 "start": {"width_px": 32, "leaf_cutoff": 0.05},
                 "final": {"width_px": 32, "leaf_cutoff": 0.05},
@@ -64,7 +66,6 @@ def _outcomes(tmp_path: Path) -> Path:
             "partition": "val",
             "letterbox_comparison": {"letterbox": 0.9, "resize": 0.8},
             "selections": {"cnn/tune/pool-A": {"selected": 1.0, "val_macro_f1": 0.9}},
-            "mask_audit": {"passed": True},
         },
     )
 
@@ -79,6 +80,8 @@ def _freeze(
     tmp_path: Path,
     target: Path,
     root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
     capsys: pytest.CaptureFixture[str],
     extra_fits: list[str],
     name: str = "freeze-record.json",
@@ -97,6 +100,10 @@ def _freeze(
         target,
         "--root",
         root,
+        "--policy-dir",
+        policy_dir,
+        "--mask-audit-report",
+        mask_audit_report,
     ]
     if reads_log is not None:
         arguments += ["--reads-log", reads_log]
@@ -119,14 +126,79 @@ def _predictions(target: Path, path: Path, flip: int, ids: list[str] | None) -> 
     _write(path, {"image_ids": [e.image_id for e in chosen], "predictions": predicted})
 
 
-def test_test_read_refused_without_records_and_permitted_after(
-    tmp_path: Path,
-    target: Path,
-    root: Path,
-    capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
+def _receipt(
+    store: RunStore,
+    fit_id: str,
+    seed: int,
+    *,
+    classical: bool = False,
+    system: str = SYSTEM,
 ) -> None:
-    arguments = (
+    """Record a completed fit the way the trainer does, with a real artifact."""
+    run = store.start(fit_id, "identity")
+    if classical:
+        artifact = run.attempt_dir / "model.joblib"
+        artifact.write_bytes(f"model-{fit_id}".encode())
+        run.complete(
+            {"fit": fit_id, "seed": seed, "metrics": {"val_macro_f1": 0.5}},
+            artifacts={"model": artifact},
+        )
+        return
+    artifact = run.attempt_dir / "best.ckpt"
+    artifact.write_bytes(f"weights-{fit_id}".encode())
+    run.complete(
+        {
+            "fit": {"fit_id": fit_id, "system": system, "seed": seed},
+            "metrics": {"val_f1": 0.5},
+        },
+        artifacts={"checkpoint": artifact},
+    )
+
+
+def _complete_fit(
+    store: RunStore,
+    target: Path,
+    fit_id: str,
+    seed: int,
+    flip: int,
+    *,
+    system: str = SYSTEM,
+    classical: bool = False,
+) -> dict[str, object]:
+    """Complete one fit in the store and return its run-record entry."""
+    _receipt(store, fit_id, seed, classical=classical, system=system)
+    _predictions(target, store.run_dir(fit_id) / "predictions.json", flip, None)
+    return {
+        "fit_id": fit_id,
+        "system": system,
+        "seed": seed,
+        "predictions": f"{fit_id}/predictions.json",
+    }
+
+
+def _leaf_run(
+    store: RunStore,
+    target: Path,
+    fit_id: str,
+    of: str,
+    seed: int,
+    flip: int,
+    ids: list[str] | None = None,
+) -> dict[str, object]:
+    """Write a leaf-only run's predictions and return its run-record entry."""
+    _predictions(target, store.run_dir(fit_id) / "predictions.json", flip, ids)
+    return {
+        "fit_id": fit_id,
+        "system": SYSTEM,
+        "seed": seed,
+        "variant": "leaf_only",
+        "predictions": f"{fit_id}/predictions.json",
+        "of": of,
+    }
+
+
+def _gate_arguments(tmp_path: Path, target: Path, root: Path) -> tuple[object, ...]:
+    return (
         "evaluate",
         "test",
         "--target-dir",
@@ -140,6 +212,31 @@ def test_test_read_refused_without_records_and_permitted_after(
         "--permutations",
         20,
     )
+
+
+def _record_runs(
+    target: Path, store: RunStore, *, classical: bool = False
+) -> list[dict[str, object]]:
+    runs: list[dict[str, object]] = []
+    for seed in (0, 1):
+        full = FIT.format(seed)
+        runs.append(_complete_fit(store, target, full, seed, seed, classical=classical))
+        runs.append(
+            _leaf_run(store, target, LEAF_FIT.format(seed), full, seed, seed + 2)
+        )
+    return runs
+
+
+def test_test_read_refused_without_records_and_permitted_after(
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arguments = _gate_arguments(tmp_path, target, root)
     with pytest.raises(SystemExit, match="no frozen selection record"):
         _cli(*arguments, "--freeze-record", tmp_path / "missing.json")
     assert not (tmp_path / "out").exists()
@@ -158,65 +255,27 @@ def test_test_read_refused_without_records_and_permitted_after(
         )
     assert not (root / "artifacts/evaluation/test-reads.jsonl").exists()
 
-    probes = _probe_ids(capsys)
-    _cli(
-        "evaluate",
-        "freeze-record",
-        "--spec",
-        _spec(
-            tmp_path,
-            [
-                FIT.format(0),
-                FIT.format(1),
-                "fixture/mobilenet_v2_direct/leaf-seed-0",
-                "fixture/mobilenet_v2_direct/leaf-seed-1",
-            ],
-            probes,
-        ),
-        "--outcomes",
-        _outcomes(tmp_path),
-        "--output",
-        tmp_path / "freeze-record.json",
-        "--target-dir",
+    freeze = _freeze(
+        tmp_path,
         target,
-        "--root",
         root,
+        policy_dir,
+        mask_audit_report,
+        capsys,
+        [FIT.format(0), FIT.format(1), LEAF_FIT.format(0), LEAF_FIT.format(1)],
     )
-    runs = []
-    for seed in (0, 1):
-        _predictions(target, tmp_path / "runs" / f"{seed}.json", seed + 8, None)
-        _predictions(target, tmp_path / "runs" / f"{seed}-leaf.json", seed + 9, None)
-        runs.extend(
-            [
-                {
-                    "fit_id": FIT.format(seed),
-                    "system": "mobilenet_v2_direct",
-                    "seed": seed,
-                    "predictions": f"{seed}.json",
-                },
-                {
-                    "fit_id": f"fixture/mobilenet_v2_direct/leaf-seed-{seed}",
-                    "system": "mobilenet_v2_direct",
-                    "seed": seed,
-                    "variant": "leaf_only",
-                    "predictions": f"{seed}-leaf.json",
-                    "of": FIT.format(seed),
-                },
-            ]
-        )
-    _write(
-        tmp_path / "runs" / "runs.json",
-        runs,
-    )
+    store = RunStore(tmp_path / "runs")
+    runs = _record_runs(target, store)
+    runs_file = _write(tmp_path / "runs.json", runs)
     with pytest.raises(SystemExit, match="no run record"):
-        _cli(*arguments, "--freeze-record", tmp_path / "freeze-record.json")
+        _cli(*arguments, "--freeze-record", freeze)
     _cli(
         "evaluate",
         "run-record",
         "--freeze-record",
-        tmp_path / "freeze-record.json",
+        freeze,
         "--runs",
-        tmp_path / "runs" / "runs.json",
+        runs_file,
         "--output",
         tmp_path / "runs" / "run-record.json",
     )
@@ -238,7 +297,7 @@ def test_test_read_refused_without_records_and_permitted_after(
     _cli(
         *arguments,
         "--freeze-record",
-        tmp_path / "freeze-record.json",
+        freeze,
         "--run-record",
         tmp_path / "runs" / "run-record.json",
     )
@@ -251,7 +310,128 @@ def test_test_read_refused_without_records_and_permitted_after(
     rows = [json.loads(line) for line in read_log.read_text().splitlines()]
     assert any(
         row["operation"] == "evaluate_test"
-        and row["record_hash"]
-        == json.loads((tmp_path / "freeze-record.json").read_text())["hash"]
+        and row["record_hash"] == json.loads(freeze.read_text())["hash"]
         for row in rows
     )
+
+
+def test_run_record_binds_each_fit_by_digest_wherever_it_is_written(
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    freeze = _freeze(
+        tmp_path,
+        target,
+        root,
+        policy_dir,
+        mask_audit_report,
+        capsys,
+        [FIT.format(0), FIT.format(1), LEAF_FIT.format(0), LEAF_FIT.format(1)],
+    )
+    store = RunStore(tmp_path / "store")
+    runs_file = _write(tmp_path / "runs.json", _record_runs(target, store))
+    elsewhere = tmp_path / "elsewhere" / "run-record.json"
+    _cli(
+        "evaluate",
+        "run-record",
+        "--freeze-record",
+        freeze,
+        "--runs",
+        runs_file,
+        "--run-store",
+        tmp_path / "store",
+        "--output",
+        elsewhere,
+    )
+    fits = json.loads(elsewhere.read_text(encoding="utf-8"))["body"]["fits"]
+    full, leaf = fits[FIT.format(0)], fits[LEAF_FIT.format(0)]
+    receipt = store.receipt(FIT.format(0))
+    assert full["checkpoint_sha256"] == receipt["artifacts"]["checkpoint"]["sha256"]
+    assert full["training_receipt_sha256"]
+    assert full["lineage_fit_id"] == FIT.format(0)
+    assert leaf["lineage_fit_id"] == FIT.format(0)
+    assert leaf["checkpoint_sha256"] == full["checkpoint_sha256"]
+    assert leaf["training_receipt_sha256"] == full["training_receipt_sha256"]
+    assert leaf["predictions_sha256"] != full["predictions_sha256"]
+
+
+def test_run_record_accepts_classical_receipts(
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    freeze = _freeze(
+        tmp_path,
+        target,
+        root,
+        policy_dir,
+        mask_audit_report,
+        capsys,
+        [FIT.format(0), FIT.format(1), LEAF_FIT.format(0), LEAF_FIT.format(1)],
+    )
+    store = RunStore(tmp_path / "runs")
+    runs_file = _write(
+        tmp_path / "runs.json", _record_runs(target, store, classical=True)
+    )
+    _cli(
+        "evaluate",
+        "run-record",
+        "--freeze-record",
+        freeze,
+        "--runs",
+        runs_file,
+        "--output",
+        tmp_path / "runs" / "run-record.json",
+    )
+    fits = json.loads((tmp_path / "runs" / "run-record.json").read_text())["body"][
+        "fits"
+    ]
+    entry = fits[FIT.format(1)]
+    assert (
+        entry["model_sha256"]
+        == store.receipt(FIT.format(1))["artifacts"]["model"]["sha256"]
+    )
+    assert "checkpoint_sha256" not in entry or entry["checkpoint_sha256"] is None
+    assert entry["lineage_fit_id"] == FIT.format(1)
+
+
+def test_run_record_refuses_a_fit_without_a_receipt(
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    freeze = _freeze(
+        tmp_path,
+        target,
+        root,
+        policy_dir,
+        mask_audit_report,
+        capsys,
+        [FIT.format(0), LEAF_FIT.format(0)],
+    )
+    store = RunStore(tmp_path / "runs")
+    runs = [r for r in _record_runs(target, store) if "-0" in r["fit_id"]]
+    (store.run_dir(FIT.format(0)) / "receipt.json").unlink()
+    runs_file = _write(tmp_path / "runs.json", runs)
+    with pytest.raises(SystemExit, match="no verified training receipt"):
+        _cli(
+            "evaluate",
+            "run-record",
+            "--freeze-record",
+            freeze,
+            "--runs",
+            runs_file,
+            "--output",
+            tmp_path / "runs" / "run-record.json",
+        )
+    assert not (tmp_path / "runs" / "run-record.json").exists()

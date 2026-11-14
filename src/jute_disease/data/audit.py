@@ -167,17 +167,39 @@ def feature_neighbors(
 
 
 class ImageNetExtractor:
-    """Load frozen ImageNet features and expose a digest of the loaded weights."""
+    """Frozen ImageNet features from a pinned local weights file, never downloaded.
 
-    def __init__(self) -> None:
+    The file is hashed before anything loads it, so a swapped or truncated
+    checkpoint is refused rather than silently changing the audit's features.
+    """
+
+    TAG = "mobilenetv2_100.ra_in1k"
+
+    def __init__(self, weights: Path | str, weights_sha256: str) -> None:
+        path = Path(weights)
+        if not path.is_file():
+            raise ValueError(f"pretrained weights file not found: {path}")
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if actual != weights_sha256.strip().lower():
+            raise ValueError(
+                f"pretrained weights {path} hash {actual} does not match "
+                f"the pinned {weights_sha256}"
+            )
+        self.weights = path
+        self.weights_file_sha256 = actual
         self.provenance: dict[str, str] = {}
 
     def __call__(self, paths: Sequence[str]) -> np.ndarray:
         import timm
         import torch
 
-        tag = "mobilenetv2_100.ra_in1k"
-        model = timm.create_model(tag, pretrained=True, num_classes=0).eval()
+        tag = self.TAG
+        model = timm.create_model(
+            tag,
+            pretrained=True,
+            num_classes=0,
+            pretrained_cfg_overlay={"file": str(self.weights)},
+        ).eval()
         digest = hashlib.sha256()
         for name, tensor in sorted(model.state_dict().items()):
             digest.update(name.encode("utf-8") + b"\0")
@@ -188,6 +210,7 @@ class ImageNetExtractor:
             "kind": "imagenet",
             "model": tag,
             "timm_version": timm.__version__,
+            "weights_file_sha256": self.weights_file_sha256,
             "weights_sha256": digest.hexdigest(),
             "digest_method": "sorted state_dict names, dtype, shape and tensor bytes",
         }

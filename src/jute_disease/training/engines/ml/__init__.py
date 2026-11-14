@@ -1,6 +1,7 @@
-"""Public classical-fit and inference entry points."""
+"""Public classical-fit entry points.
 
-from jute_disease.training.engines.ml.predict import predict_ml
+Test predictions are produced only by ``evaluate predict-test``, never here.
+"""
 
 _FIT_EXPORTS = {"fit_classical", "prepare_features"}
 
@@ -13,4 +14,4 @@ def __getattr__(name: str) -> object:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-__all__ = ["predict_ml", *_FIT_EXPORTS]
+__all__ = [*_FIT_EXPORTS]

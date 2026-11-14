@@ -220,6 +220,7 @@ def fit_classical(
             "view": fit.view,
             "policy": fit.policy,
             "split": fit.split,
+            "recipe": {"image_size": recipe.image_size},
             "manifest": manifest.digest(),
             "rows": {"train": train_info["rows"], "val": val_info["rows"]},
             "feature_cache": {"train": train_info, "val": val_info},

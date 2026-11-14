@@ -279,6 +279,124 @@ def test_residual_sampler_rejects_short_pool_before_feature_extraction(
     assert not calls
 
 
+def _residual_source(tmp_path: Path) -> Path:
+    source = tmp_path / "residual.json"
+    source.write_text(
+        json.dumps(
+            {
+                "protected_test": {"A": {"t1": 0, "t2": 1, "t3": 3}},
+                "training": {"A": {"r1": 0, "r2": 7, "r3": 15}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return source
+
+
+def test_residual_audit_logs_its_test_reads_before_opening_images(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    import numpy as np
+
+    from jute_disease import cli
+
+    log = tmp_path / "artifacts" / "evaluation" / "test-reads.jsonl"
+    seen_at_open: list[str] = []
+
+    class RecordingExtractor:
+        def __init__(self, weights: Path, weights_sha256: str) -> None:
+            self.provenance = {"weights_file_sha256": weights_sha256}
+
+        def __call__(self, paths: list[str]) -> np.ndarray:
+            seen_at_open.append(log.read_text(encoding="utf-8"))
+            return np.eye(len(paths)) + 1.0
+
+    monkeypatch.setattr(cli, "ImageNetExtractor", RecordingExtractor)
+    source = _residual_source(tmp_path)
+    cli.main(
+        [
+            "data",
+            "audit-sample",
+            "residual",
+            str(source),
+            "--count",
+            "2",
+            "--k",
+            "2",
+            "--weights",
+            str(tmp_path / "w.pt"),
+            "--weights-sha256",
+            "abc",
+            "--root",
+            str(tmp_path),
+        ]
+    )
+    entries = [json.loads(line) for line in log.read_text("utf-8").splitlines()]
+    assert [entry["operation"] for entry in entries] == ["residual_audit"]
+    assert len(entries[0]["record_hash"]) == 64
+    assert seen_at_open and '"residual_audit"' in seen_at_open[0]
+    report = json.loads(capsys.readouterr().out)
+    assert report["feature_provenance"] == {"weights_file_sha256": "abc"}
+
+
+def test_residual_audit_refuses_unpinned_weights_without_logging_a_read(
+    tmp_path: Path,
+) -> None:
+    from jute_disease import cli
+
+    source = _residual_source(tmp_path)
+    base = ["data", "audit-sample", "residual", str(source), "--count", "2", "--k", "2"]
+    with pytest.raises(SystemExit, match="--weights"):
+        cli.main([*base, "--root", str(tmp_path)])
+    weights = tmp_path / "w.pt"
+    weights.write_bytes(b"not weights")
+    with pytest.raises(SystemExit, match="does not match"):
+        cli.main(
+            [
+                *base,
+                "--root",
+                str(tmp_path),
+                "--weights",
+                str(weights),
+                "--weights-sha256",
+                "0" * 64,
+            ]
+        )
+    assert not (tmp_path / "artifacts" / "evaluation" / "test-reads.jsonl").exists()
+
+
+def test_imagenet_extractor_loads_pinned_local_weights_without_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hashlib
+
+    import numpy as np
+    import timm
+    import torch
+    from PIL import Image
+
+    from jute_disease.data import ImageNetExtractor
+
+    model = timm.create_model(ImageNetExtractor.TAG, pretrained=False)
+    weights = tmp_path / "mobilenet.pth"
+    torch.save(model.state_dict(), weights)
+    digest = hashlib.sha256(weights.read_bytes()).hexdigest()
+    image = tmp_path / "leaf.png"
+    Image.fromarray(np.full((32, 32, 3), 90, dtype=np.uint8)).save(image)
+    for name in ("HF_HUB_OFFLINE", "TORCH_HOME", "HF_HOME"):
+        monkeypatch.setenv(
+            name, str(tmp_path / "empty") if name != "HF_HUB_OFFLINE" else "1"
+        )
+    extractor = ImageNetExtractor(weights, digest)
+    vectors = extractor([str(image)])
+    assert vectors.shape[0] == 1
+    assert extractor.provenance["weights_file_sha256"] == digest
+    with pytest.raises(ValueError, match="does not match"):
+        ImageNetExtractor(weights, "f" * 64)
+    with pytest.raises(ValueError, match="not found"):
+        ImageNetExtractor(tmp_path / "absent.pth", digest)
+
+
 def test_undefined_kappa_fails_then_escalates_after_revision(tmp_path: Path) -> None:
     rows = [
         {
