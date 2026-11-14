@@ -7,6 +7,7 @@ Commands marked as planned exit non-zero and name the issue that owns them.
 import argparse
 import hashlib
 import json
+import re
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import asdict
@@ -67,6 +68,8 @@ from jute_disease.data import (
     write_policy_manifests,
     write_thresholds,
 )
+from jute_disease.data.gates import build_gate_record
+from jute_disease.data.grouping import GROUPING_THRESHOLDS
 from jute_disease.data.policies import HEALTHY_CAP
 from jute_disease.evaluation import (
     RESIDUAL_AUDIT_OPERATION,
@@ -92,6 +95,7 @@ from jute_disease.evaluation import (
     write_freeze_record,
     write_run_record,
 )
+from jute_disease.evaluation.probes import PERMUTATIONS
 from jute_disease.reporting import (
     export_manuscript,
     run_manuscript_fixture,
@@ -106,9 +110,11 @@ from jute_disease.training import (
     QueueAbortedError,
     QueueReport,
     RunStore,
+    Stage,
     SystemClock,
     Workspace,
     build_plan,
+    build_probe_plan,
     make_executor,
     make_identity,
     open_workspace,
@@ -117,7 +123,7 @@ from jute_disease.training import (
     subprocess_launcher,
     verify_stack,
 )
-from jute_disease.training.benchmark import load_benchmark
+from jute_disease.training.benchmark import Benchmark, load_benchmark
 from jute_disease.training.process import exit_on_sigterm
 
 Handler = Callable[[argparse.Namespace], None]
@@ -144,7 +150,13 @@ def _data_synthetic(args: argparse.Namespace) -> None:
 
 def _audit_fixture(args: argparse.Namespace) -> None:
     try:
-        _print_json(fixture_round(args.output, args.grouping_version))
+        _print_json(
+            fixture_round(
+                args.output,
+                args.grouping_version,
+                _pool_digests(args.inventory_digest),
+            )
+        )
     except (ValueError, OSError) as error:
         raise SystemExit(f"audit blocked: {error}") from error
 
@@ -179,6 +191,7 @@ def _audit_sample(args: argparse.Namespace) -> None:
                 design,
                 args.grouping_version,
                 seed=args.seed,
+                inventory_digests=_pool_digests(args.inventory_digest),
             )
         elif args.kind == "features":
             extractor = _pinned_extractor(args)
@@ -241,6 +254,17 @@ def _audit_sample(args: argparse.Namespace) -> None:
         _print_json(report)
     except (ValueError, OSError, KeyError) as error:
         raise SystemExit(f"audit blocked: {error}") from error
+
+
+def _pool_digests(items: list[str] | None) -> dict[str, str] | None:
+    if not items:
+        return None
+    digests = dict(item.split("=", 1) for item in items if "=" in item)
+    if len(digests) != len(items) or not all(
+        re.fullmatch(r"[0-9a-f]{64}", digest) for digest in digests.values()
+    ):
+        raise ValueError("--inventory-digest takes unique POOL=SHA256 values")
+    return digests
 
 
 def _audit_cohort(args: argparse.Namespace) -> None:
@@ -330,10 +354,7 @@ def _audit_evaluate(args: argparse.Namespace) -> None:
             report["revision"] = args.revision
             report["previous"] = previous
         if args.gate_output:
-            gate = {
-                key: report[key]
-                for key in ("kappa_interval", "threshold", "pass", "method")
-            }
+            gate = build_gate_record(report)
             with args.gate_output.open("x", encoding="utf-8") as handle:
                 json.dump(gate, handle, indent=2)
                 handle.write("\n")
@@ -434,6 +455,8 @@ def _freeze_target(args: argparse.Namespace) -> None:
             grouping_version=args.grouping_version,
             no_merge_ratings=args.no_merge_ratings,
             agreement_results=args.agreement_results,
+            pool=args.pool,
+            refreeze_from=args.refreeze_from,
             plantvillage_root=args.plantvillage_root,
             plantdoc_root=args.plantdoc_root,
         )
@@ -547,6 +570,10 @@ def _stack(args: argparse.Namespace) -> None:
     _print_json(verify_stack(require_cuda=not args.allow_cpu))
 
 
+def _stages(benchmark: Benchmark, probes: bool) -> tuple[Stage, ...]:
+    return build_probe_plan(benchmark) if probes else build_plan(benchmark)
+
+
 def _queue_plan(args: argparse.Namespace) -> None:
     workspace = _workspace_from(args)
     store = RunStore(workspace.runs_dir)
@@ -559,7 +586,7 @@ def _queue_plan(args: argparse.Namespace) -> None:
                     for fit in stage.fits
                 ],
             }
-            for stage in build_plan(workspace.benchmark)
+            for stage in _stages(workspace.benchmark, args.probes)
         ]
     )
 
@@ -608,6 +635,7 @@ def _queue_run(args: argparse.Namespace) -> None:
             execute=make_executor(workspace, store, identity, launcher),
             identity_for=identity,
             report_path=workspace.runs_dir / "queue.json",
+            plan=_stages(workspace.benchmark, args.probes),
         )
     except QueueAbortedError as error:
         raise SystemExit(f"{error}; see queue.json") from error
@@ -1094,6 +1122,12 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Grouping version; it fixes the Hamming merge threshold.",
     )
+    audit.add_argument(
+        "--inventory-digest",
+        action="append",
+        metavar="POOL=SHA256",
+        help="Bind the fixture's gate to a freeze's inventory, for each of A, B, C.",
+    )
     audit.set_defaults(run=_audit_fixture)
 
     sampler = data_actions.add_parser(
@@ -1114,6 +1148,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Grouping version for edges and recall; it fixes the Hamming "
             "merge threshold and has no default."
+        ),
+    )
+    sampler.add_argument(
+        "--inventory-digest",
+        action="append",
+        metavar="POOL=SHA256",
+        help=(
+            "Edges only: the inventory digest of the freeze each pool came from, "
+            "repeated for every pool. The gate record binds to these."
         ),
     )
     sampler.add_argument(
@@ -1301,14 +1344,20 @@ def build_parser() -> argparse.ArgumentParser:
     queue_actions = queue.add_subparsers(
         dest="queue_action", metavar="ACTION", required=True
     )
+    probes_help = (
+        "Plan or run only the border and pad-cue probe fits, with the tuning "
+        "fits a border probe reuses."
+    )
     plan = queue_actions.add_parser("plan", help="Show stages and current run states.")
     _add_workspace_options(plan)
+    plan.add_argument("--probes", action="store_true", help=probes_help)
     plan.set_defaults(run=_queue_plan)
     status = queue_actions.add_parser("status", help="Show every fit's state.")
     _add_workspace_options(status)
     status.set_defaults(run=_queue_status)
     run = queue_actions.add_parser("run", help="Run or resume the benchmark.")
     _add_workspace_options(run)
+    run.add_argument("--probes", action="store_true", help=probes_help)
     run.set_defaults(run=_queue_run)
 
     # evaluate: aggregation and inference
@@ -1547,7 +1596,7 @@ def _add_gated_evaluator(actions: argparse._SubParsersAction) -> None:
     test.add_argument("--reads-log", type=Path)
     test.add_argument("--sample-size", type=int, default=2000)
     test.add_argument("--resamples", type=int, default=10_000)
-    test.add_argument("--permutations", type=int, default=1000)
+    test.add_argument("--permutations", type=int, default=PERMUTATIONS)
     test.set_defaults(run=_evaluate_test)
 
     diagnostics = actions.add_parser(
@@ -1616,10 +1665,25 @@ def _add_freeze(commands: argparse._SubParsersAction) -> None:
         "--force", action="store_true", help="Replace a different completed freeze."
     )
     target.add_argument(
-        "--grouping-version", choices=("dhash-v1", "dhash-v2"), default=None
+        "--grouping-version", choices=tuple(GROUPING_THRESHOLDS), default=None
     )
     target.add_argument("--no-merge-ratings", type=Path)
-    target.add_argument("--agreement-results", type=Path)
+    target.add_argument(
+        "--agreement-results",
+        type=Path,
+        help="Gate record from audit-evaluate --gate-output; needs --pool.",
+    )
+    target.add_argument(
+        "--pool", help="The pool this freeze is, which the gate record binds to."
+    )
+    target.add_argument(
+        "--refreeze-from",
+        type=Path,
+        help=(
+            "Pool C only: the freeze whose false-split rule fired. The one "
+            "re-freeze, at the next higher threshold, needs a new cohort's gate."
+        ),
+    )
     target.add_argument("--plantvillage-root", type=Path)
     target.add_argument("--plantdoc-root", type=Path)
     target.set_defaults(run=_freeze_target)

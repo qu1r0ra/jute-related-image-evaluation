@@ -39,6 +39,13 @@ from jute_disease.data.cache import (
     write_decision,
 )
 from jute_disease.data.curation import curate, load_rules
+from jute_disease.data.gates import (
+    ESCALATION,
+    REFREEZE_TARGETS,
+    gate_outcomes,
+    read_grouping,
+    refreeze_record,
+)
 from jute_disease.data.grouping import (
     GROUPING_THRESHOLDS,
     THRESHOLD_CHANGE_RECORD,
@@ -176,12 +183,20 @@ def freeze_target(
     agreement_results: Path | None = None,
     plantvillage_root: Path | None = None,
     plantdoc_root: Path | None = None,
+    pool: str | None = None,
+    refreeze_from: Path | None = None,
 ) -> dict:
     """Freeze the target dataset and return its report.
 
     The original images under ``image_root`` are only read. An existing completed
     legacy freeze that differs is kept unless ``force`` is set. A dHash freeze
     and any existing freeze being upgraded to it are never replaced.
+
+    ``agreement_results`` is a gate record from ``audit-evaluate``. It is bound to
+    this freeze by ``pool``, the grouping version, its Hamming threshold and the
+    inventory digest of ``image_root``; a record drawn under anything else is
+    refused. Pool C is re-frozen at most once, at the next higher threshold, with
+    ``refreeze_from`` naming the freeze whose false-split rule fired.
 
     Raises:
         FreezeBlockedError: the dataset cannot be frozen as specified, or a different
@@ -195,13 +210,24 @@ def freeze_target(
     grouped_resolution = None
     dependencies = {"preprocessing": PreprocessingSpec().digest()}
     if grouping_version is None and (
-        no_merge_ratings or agreement_results or plantvillage_root or plantdoc_root
+        no_merge_ratings
+        or agreement_results
+        or refreeze_from
+        or pool
+        or plantvillage_root
+        or plantdoc_root
     ):
         raise ValueError("Grouping inputs require --grouping-version")
     if grouping_version is not None:
         if grouping_version not in GROUPING_THRESHOLDS:
             raise ValueError("Unknown grouping version")
         threshold = GROUPING_THRESHOLDS[grouping_version]
+        if (grouping_version in REFREEZE_TARGETS) != (refreeze_from is not None):
+            raise ValueError(
+                f"{', '.join(sorted(REFREEZE_TARGETS))} is reachable only by the one "
+                "Pool C re-freeze, which needs --refreeze-from; --refreeze-from "
+                "applies to nothing else"
+            )
         if plantvillage_root is None or plantdoc_root is None:
             raise ValueError("Grouped freeze requires both source roots")
         admitted = list(curate(records, rules).admitted)
@@ -232,42 +258,39 @@ def freeze_target(
                             "Ratings must name two distinct admitted image paths"
                         )
                     ratings.add(tuple(sorted((a, b))))
-        agreement = {"status": "pending"}
-        gate = "pending"
+        agreement: dict[str, Any] = {"status": "pending"}
+        outcomes = {
+            "agreement": "pending",
+            "wrong_merge": "pending",
+            "false_split": "pending",
+        }
+        refreeze = None
         if agreement_results is not None:
+            if pool is None:
+                raise ValueError("A gate record needs --pool to bind it to this freeze")
             agreement = json.loads(Path(agreement_results).read_text(encoding="utf-8"))
-            if not isinstance(agreement, dict) or set(agreement) != {
-                "kappa_interval",
-                "threshold",
-                "pass",
-                "method",
-            }:
-                raise ValueError("Invalid agreement results schema")
-            interval = agreement["kappa_interval"]
-            kappa_threshold = agreement["threshold"]
-
-            def number(x: object) -> bool:
-                return type(x) in (int, float) and -1 <= x <= 1
-
-            valid_interval = interval is None and agreement["pass"] is False
-            if (
-                isinstance(interval, list)
-                and len(interval) == 2
-                and all(number(x) for x in interval)
-                and number(kappa_threshold)
-            ):
-                valid_interval = interval[0] <= interval[1] and agreement["pass"] == (
-                    interval[0] >= kappa_threshold
+            outcomes = gate_outcomes(
+                agreement,
+                pool=pool,
+                grouping_version=grouping_version,
+                threshold=threshold,
+                inventory=inventory_digest(records),
+            )
+            if ESCALATION in outcomes.values():
+                raise ValueError(
+                    "the Pool C false-split bound exceeds the limit and there is no "
+                    "re-freeze left: escalate to the owner"
                 )
-            if (
-                not valid_interval
-                or not number(kappa_threshold)
-                or type(agreement["pass"]) is not bool
-                or not isinstance(agreement["method"], str)
-                or not agreement["method"].strip()
-            ):
-                raise ValueError("Invalid agreement results values")
-            gate = "pass" if agreement["pass"] else "fail"
+        if refreeze_from is not None:
+            if agreement_results is None:
+                raise ValueError("a re-freeze needs the new cohort's gate record")
+            refreeze = refreeze_record(
+                read_grouping(Path(refreeze_from) / TARGET_DIR),
+                grouping_version=grouping_version,
+                record=agreement,
+                pool=pool,
+                inventory=inventory_digest(records),
+            )
         result = group_inventory(images, ratings, threshold)
         targets = {"target": {}}
         for record in records:
@@ -349,11 +372,15 @@ def freeze_target(
             },
             "agreement_results": agreement,
             "gate_outcomes": {
-                "agreement": gate,
+                **outcomes,
                 "threshold_change": ("not_requested" if threshold == 4 else "applied"),
             },
         }
-        if threshold != 4:
+        if pool is not None:
+            grouping["pool"] = pool
+        if refreeze is not None:
+            grouping["refreeze"] = refreeze
+        elif threshold != 4:
             grouping["threshold_change_record"] = THRESHOLD_CHANGE_RECORD
         grouping["digest"] = hashlib.sha256(
             json.dumps(grouping, sort_keys=True, separators=(",", ":")).encode()
@@ -405,6 +432,7 @@ def freeze_target(
         "identity": resolution.summary(),
         "pad_fraction_by_source_and_class": manifest.pad_fraction_summary(),
         "unchanged": existing is not None and existing.digest() == manifest.digest(),
+        "inventory_digest": inventory_digest(records),
     }
     _write_json(output_dir / REPORT_FILE, report)
     return report

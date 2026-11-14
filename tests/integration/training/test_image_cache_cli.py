@@ -164,6 +164,7 @@ def test_cli_refuses_a_cache_whose_entry_was_altered(
         _train_fit(workspace, PREPARE_RESERVE, tmp_path)
 
 
+@pytest.mark.serial
 def test_cli_builds_one_valid_cache_from_two_concurrent_builders(
     inputs: Inputs, tmp_path: Path
 ) -> None:
@@ -245,6 +246,7 @@ main(sys.argv[1:])
 """
 
 
+@pytest.mark.serial
 def test_cli_concurrent_builders_of_different_manifests_keep_every_entry(
     inputs: Inputs, tmp_path: Path
 ) -> None:

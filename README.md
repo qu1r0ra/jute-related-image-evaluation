@@ -154,7 +154,7 @@ The current environment installs from the committed lock and uses Python 3.14.10
 
 ```bash
 uv sync --locked --all-groups
-uv run --locked pytest -m ""
+just test-all
 uv run --locked ruff check .
 uv run --locked ruff format --check .
 uv run --locked python scripts/audit_dependencies.py

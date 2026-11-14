@@ -58,7 +58,9 @@ from jute_disease.evaluation.freeze_record import (
 from jute_disease.models.dl import Classifier, TimmBackbone, read_checkpoint_state
 from jute_disease.models.ml import (
     FEATURE_EXTRACTORS,
+    PAD_CUE_FEATURES,
     BaseFeatureExtractor,
+    PadCueFeatureExtractor,
     RawPixelFeatureExtractor,
     extract_features,
 )
@@ -228,6 +230,8 @@ def _preprocessing_of(
 
 
 def _extractor(features: str, image_size: int) -> BaseFeatureExtractor:
+    if features == PAD_CUE_FEATURES:
+        return PadCueFeatureExtractor()
     if features not in FEATURE_EXTRACTORS:
         raise FreezeRecordError(f"unknown feature set {features!r}")
     if features == "raw":
@@ -242,6 +246,7 @@ def _deep_labels(
     model_name: str,
     weights: bytes,
     preprocessing: PreprocessingSpec | None,
+    variant: str = "",
 ) -> tuple[list[str], list[str]]:
     module = DataModule(
         frozen_manifest=manifest,
@@ -251,6 +256,7 @@ def _deep_labels(
         pin_memory=False,
         image_size=image_size,
         downsize_original=preprocessing is not None,
+        variant=variant,
     )
     module.setup("predict")
     dataset = module.jute_predict
@@ -278,6 +284,7 @@ def _classical_labels(
     features: str,
     weights: bytes,
     preprocessing: PreprocessingSpec | None,
+    variant: str = "",
 ) -> tuple[list[str], list[str]]:
     import joblib
 
@@ -285,7 +292,7 @@ def _classical_labels(
         manifest,
         "test",
         image_root,
-        transform=classical_pipeline(image_size, include_mask=True),
+        transform=classical_pipeline(image_size, include_mask=True, variant=variant),
         downsize_spec=preprocessing,
     )
     x, _ = extract_features(dataset, _extractor(features, image_size), cache=False)
@@ -541,6 +548,7 @@ def predict_test(
         details=source.details,
         refuse_conflict=True,
     )
+    variant = str(source.description.get("variant") or "")
     if source.kind == "checkpoint":
         image_ids, labels = _deep_labels(
             source.manifest,
@@ -549,6 +557,7 @@ def predict_test(
             str(source.description["model"]),
             source.weights,
             source.preprocessing,
+            variant,
         )
     else:
         image_ids, labels = _classical_labels(
@@ -558,6 +567,7 @@ def predict_test(
             str(source.description["features"]),
             source.weights,
             source.preprocessing,
+            variant,
         )
     path = source.run_dir / PREDICTIONS_FILE
     digest = _write_predictions(path, image_ids, labels)
@@ -570,6 +580,7 @@ def predict_test(
         artifact_sha256=source.artifact_sha256,
         fit_manifest_sha256=source.fit_manifest,
         predictions_sha256=digest,
+        variant=variant,
     )
     return {
         "fit_id": fit_id,

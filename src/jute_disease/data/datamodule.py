@@ -60,6 +60,7 @@ class DataModule(LightningDataModule):
         image_size: int = IMAGE_SIZE,
         allow_test: bool = False,
         downsize_original: bool = False,
+        variant: str = "",
     ) -> None:
         super().__init__()
         if downsize_original and cache_root is not None:
@@ -109,12 +110,20 @@ class DataModule(LightningDataModule):
 
     def _train_transform(self) -> Callable:
         return create_pipeline(
-            self.hparams.image_size, True, True, seed=self.hparams.seed
+            self.hparams.image_size,
+            True,
+            True,
+            seed=self.hparams.seed,
+            variant=self.hparams.variant,
         )
 
     def _eval_transform(self) -> Callable:
         return create_pipeline(
-            self.hparams.image_size, False, True, seed=self.hparams.seed
+            self.hparams.image_size,
+            False,
+            True,
+            seed=self.hparams.seed,
+            variant=self.hparams.variant,
         )
 
     @property

@@ -26,7 +26,9 @@ from jute_disease.data import (
 )
 from jute_disease.models.ml import (
     FEATURE_EXTRACTORS,
+    PAD_CUE_FEATURES,
     BaseFeatureExtractor,
+    PadCueFeatureExtractor,
     RawPixelFeatureExtractor,
     build_classical_classifier,
     extract_features,
@@ -50,6 +52,8 @@ WEIGHTING = "balanced"
 
 
 def _extractor(features: str, recipe: Recipe) -> BaseFeatureExtractor:
+    if features == PAD_CUE_FEATURES:
+        return PadCueFeatureExtractor()
     if features not in FEATURE_EXTRACTORS:
         raise ValueError(
             f"Unknown features {features!r}; use one of {sorted(FEATURE_EXTRACTORS)}"
@@ -69,13 +73,16 @@ def _matrix(
     require_cache: bool = False,
     pool: str = "",
     images: ImageCache | None = None,
+    variant: str = "",
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any], float]:
     """One feature matrix, its pinned description and the seconds it took."""
     dataset = ManifestDataset(
         manifest,
         partition,
         data.target_root(pool) if pool else data.image_root,
-        transform=classical_pipeline(recipe.image_size, include_mask=True),
+        transform=classical_pipeline(
+            recipe.image_size, include_mask=True, variant=variant
+        ),
         cache_root=None if images is None else images.root,
         spec=None if images is None else images.spec,
     )
@@ -193,6 +200,7 @@ def fit_classical(
         require_cache,
         pool=fit.pool,
         images=images,
+        variant=fit.variant,
     )
     x_val, y_val, val_info, _ = _matrix(
         manifest,
@@ -204,6 +212,7 @@ def fit_classical(
         require_cache,
         pool=fit.pool,
         images=images,
+        variant=fit.variant,
     )
     image_cache = None if images is None else images.identity
 
@@ -262,6 +271,7 @@ def fit_classical(
             "view": fit.view,
             "policy": fit.policy,
             "split": fit.split,
+            "variant": fit.variant,
             "recipe": {"image_size": recipe.image_size},
             "manifest": manifest.digest(),
             "rows": {"train": train_info["rows"], "val": val_info["rows"]},

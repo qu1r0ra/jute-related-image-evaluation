@@ -129,6 +129,7 @@ def test_notifier_reports_child_completion(
     assert len(messages) == 2
 
 
+@pytest.mark.serial
 def test_notifier_sends_elapsed_heartbeats_while_child_runs_and_stops_afterward(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -451,6 +452,7 @@ def test_transfer_record_rejects_colliding_directory_names(tmp_path: Path) -> No
     assert result.returncode != 0
 
 
+@pytest.mark.serial
 @pytest.mark.skipif(BASH is None, reason="Linux shell runner requires bash")
 @pytest.mark.skipif(os.name == "nt", reason="Linux runner behavior is checked in CI")
 def test_lab_runner_rejects_a_second_process_holding_the_lock(tmp_path: Path) -> None:
@@ -484,6 +486,7 @@ def test_lab_runner_rejects_a_second_process_holding_the_lock(tmp_path: Path) ->
     assert second.returncode == 75
 
 
+@pytest.mark.serial
 @pytest.mark.skipif(BASH is None, reason="Linux shell runner requires bash")
 @pytest.mark.skipif(os.name == "nt", reason="Linux runner behavior is checked in CI")
 def test_lab_runner_bounds_runtime_and_records_detached_pid_and_log(
@@ -572,6 +575,7 @@ def test_lab_runner_bounds_runtime_and_records_detached_pid_and_log(
     assert available.returncode == 0
 
 
+@pytest.mark.serial
 @pytest.mark.skipif(BASH is None, reason="Linux shell runner requires bash")
 @pytest.mark.skipif(
     os.name == "nt", reason="Linux process-group behavior is checked in CI"
@@ -664,6 +668,7 @@ def _is_running(pid: int) -> bool:
         return False
 
 
+@pytest.mark.serial
 @pytest.mark.skipif(BASH is None, reason="Linux shell runner requires bash")
 @pytest.mark.skipif(
     os.name == "nt", reason="Linux process-group behavior is checked in CI"

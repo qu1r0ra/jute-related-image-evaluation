@@ -6,7 +6,12 @@ job then picks the test path. A PR whose changed files are all documentation
 (`docs/`, top-level Markdown files and the pull request template) runs a focused
 set of behavior tests: the fast path. Any other PR, including source, tests,
 configs, scripts, dependencies and workflow changes, runs the full test suite,
-slow tests included, and the test job fails when any test fails. Both paths check
+slow tests included, and the test job fails when any test fails. The full suite
+runs in two passes: every test not marked `serial` in parallel (`pytest-xdist`,
+`-n auto`), then the `serial` tests alone. `tests/conftest.py` gives each xdist
+worker one Torch thread, so CI and `just test-all` behave alike. The log records
+the 40 slowest tests.
+Both paths check
 CPU imports and audit the locked dependencies with `pip-audit`. CI uses Linux
 runners only. The fast path is intended to finish within two minutes, with three
 minutes as the ceiling; the full-suite path is not bound by that ceiling. Measure

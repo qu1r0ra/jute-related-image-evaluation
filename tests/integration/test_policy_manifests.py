@@ -15,6 +15,9 @@ from jute_disease.data import (
     write_inventory,
     write_isolated_manifests,
 )
+from jute_disease.data.gates import gate_outcomes
+
+from .gate_records import gate_record
 
 
 def frozen_pool(
@@ -25,6 +28,8 @@ def frozen_pool(
     threshold_change: str = "not_requested",
     neighbours: bool = True,
     healthy_sizes: list[int] | None = None,
+    pool: str = "C",
+    record: dict | None = None,
 ) -> Path:
     """Construct a small frozen pool, with two images per family.
 
@@ -71,11 +76,25 @@ def frozen_pool(
                         )
                     )
             families.append(family)
+    inventory = inventory_digest(records)
+    record = record or gate_record(inventory, pool=pool, version="dhash-v1")
+    outcomes = gate_outcomes(
+        record,
+        pool=pool,
+        grouping_version="dhash-v1",
+        threshold=4,
+        inventory=inventory,
+    )
+    if gate != "pass":
+        outcomes["agreement"] = gate
     grouping = {
         "algorithm_version": "dhash-v1",
+        "pool": pool,
+        "parameters": {"threshold": 4},
         "families": families,
         "excluded": [],
-        "gate_outcomes": {"agreement": gate, "threshold_change": threshold_change},
+        "agreement_results": record,
+        "gate_outcomes": {**outcomes, "threshold_change": threshold_change},
     }
     if neighbours:
         grouping["audit_band_neighbours"] = {
@@ -113,16 +132,16 @@ def test_recorded_threshold_change_is_accepted_and_other_outcomes_are_not(
 ) -> None:
     from jute_disease.data.policies import _pool
 
-    _pool(frozen_pool(tmp_path / "applied", threshold_change="applied"))
+    _pool(frozen_pool(tmp_path / "applied", threshold_change="applied"), "C")
     with pytest.raises(ValueError, match="gate outcomes"):
-        _pool(frozen_pool(tmp_path / "failed", threshold_change="fail"))
+        _pool(frozen_pool(tmp_path / "failed", threshold_change="fail"), "C")
 
 
 def test_grouping_without_audit_band_neighbours_is_refused(tmp_path: Path) -> None:
     from jute_disease.data.policies import _pool
 
     with pytest.raises(ValueError, match="audit-band neighbours"):
-        _pool(frozen_pool(tmp_path / "old", neighbours=False))
+        _pool(frozen_pool(tmp_path / "old", neighbours=False), "C")
 
 
 def test_command_refuses_pending_grouping_gate(tmp_path: Path) -> None:
@@ -133,7 +152,7 @@ def test_command_refuses_pending_grouping_gate(tmp_path: Path) -> None:
                 "freeze",
                 "policies",
                 "--pool",
-                f"A={pool}",
+                f"C={pool}",
                 "--output",
                 str(tmp_path / "output"),
                 "--reserve-fraction",

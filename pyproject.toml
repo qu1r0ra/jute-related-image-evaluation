@@ -37,6 +37,7 @@ dev = [
     "pip-audit>=2.10.1",
     "pre-commit>=4.5.1",
     "pytest>=9.0.2",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.14.14",
 ]
 
@@ -52,6 +53,7 @@ testpaths = ["tests"]
 addopts = "-m 'not slow'"
 markers = [
     "slow: marks tests as slow (deselected by default; run with -m slow)",
+    "serial: timing- or process-sensitive tests (concurrent builders, lock and signal drivers); run without xdist, after the parallel pass",
 ]
 
 [[tool.uv.index]]

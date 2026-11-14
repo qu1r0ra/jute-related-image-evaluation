@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -53,6 +53,23 @@ class QueueLimits:
         }[kind]
 
 
+PROBE_SYSTEM = "mobilenet_v2_direct"
+PAD_CUE_ESTIMATOR = "lr"
+PAD_CUE_FEATURES = "pad-cue"
+
+
+def is_probe_base(fit: FitSpec, benchmark: Benchmark) -> bool:
+    """Whether ``fit`` is a final primary-split fit a border probe is made from.
+
+    The probes use the classical fits and the MobileNetV2 ImageNet route.
+    """
+    if fit.variant or fit.phase != "final" or fit.split != benchmark.primary_split:
+        return False
+    if fit.kind is FitKind.CLASSICAL:
+        return True
+    return fit.kind is FitKind.TARGET and fit.system == PROBE_SYSTEM
+
+
 def prepare_reserve_id(pool: str) -> str:
     """The prepare fit of one pool's tuning reserve."""
     return f"classical/prepare/pool-{pool}/reserve"
@@ -88,6 +105,8 @@ class FitSpec:
     split: int = 0
     seed_index: int = 0
     phase: str = "final"
+    # A probe's input variant ("border", "pad_cue"); empty for every ordinary fit.
+    variant: str = ""
 
 
 @dataclass(frozen=True)
@@ -105,9 +124,54 @@ class Benchmark:
     primary_split: int
     assignments: tuple[tuple[int, int, int], ...]
 
+    def pad_cue_fits(self) -> tuple[FitSpec, ...]:
+        """The pad-cue baseline, one classical fit per matrix cell and seed.
+
+        It sees only how the letterbox padded the image, so it has no tuning and
+        no feature preparation of its own. It is classical only: its inputs are
+        two scalars, the pad fraction and the aspect ratio, so a MobileNetV2 on
+        them would add nothing a classical fit does not already show.
+        """
+        return tuple(
+            FitSpec(
+                f"probe/pad-cue/pool-{pool}/view-{view}/{policy}/seed-{seed}",
+                FitKind.CLASSICAL,
+                seed,
+                estimator=PAD_CUE_ESTIMATOR,
+                features=PAD_CUE_FEATURES,
+                pool=pool,
+                view=view,
+                policy=policy,
+                split=self.primary_split,
+                seed_index=seed_index,
+                variant="pad_cue",
+            )
+            for pool in self.pools
+            for view in self.views
+            for policy in self.policies
+            for seed_index, seed in enumerate(self.recipe.seeds)
+        )
+
+    def border_fits(self) -> tuple[FitSpec, ...]:
+        """Border probes of every probe base fit, each under its own fit ID."""
+        return tuple(
+            replace(fit, fit_id=f"probe/border/{fit.fit_id}", variant="border")
+            for fit in self.fits()
+            if is_probe_base(fit, self)
+        )
+
+    def probe_fit(self, fit_id: str) -> FitSpec | None:
+        """The declared border or pad-cue probe fit with this ID, if there is one."""
+        for fit in (*self.border_fits(), *self.pad_cue_fits()):
+            if fit.fit_id == fit_id:
+                return fit
+        return None
+
     def tuning_dependency(self, fit: FitSpec) -> str | None:
         """The tuning fit whose frozen selection a final ``fit`` reuses."""
         if fit.phase == "tune" or fit.kind is FitKind.PREPARE:
+            return None
+        if fit.variant == "pad_cue":
             return None
         if fit.kind is FitKind.CLASSICAL:
             return f"classical/tune/{fit.pool}/{fit.estimator}-{fit.features}"
@@ -118,7 +182,7 @@ class Benchmark:
 
     def prepare_dependency(self, fit: FitSpec) -> str | None:
         """The prepare fit whose feature cache a classical ``fit`` requires."""
-        if fit.kind is not FitKind.CLASSICAL:
+        if fit.kind is not FitKind.CLASSICAL or fit.variant:
             return None
         if fit.phase == "tune":
             return prepare_reserve_id(fit.pool)
@@ -469,8 +533,12 @@ def fit_identity(
     Dynamic backend and package-version observations belong in receipts, not in
     this compatibility identity.
     """
+    declared = asdict(fit)
+    if not fit.variant:
+        # An ordinary fit keeps the identity it had before probes existed.
+        del declared["variant"]
     payload = {
-        "fit": asdict(fit),
+        "fit": declared,
         "recipe": asdict(recipe),
         "manifests": manifests,
         "upstream_sha256": upstream_sha256,

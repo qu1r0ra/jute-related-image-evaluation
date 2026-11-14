@@ -6,7 +6,8 @@ from typing import Any
 
 from PIL import Image, ImageOps
 
-GROUPING_THRESHOLDS = {"dhash-v1": 4, "dhash-v2": 6}
+# dhash-v3 exists only as the one prespecified Pool C re-freeze (see gates.py).
+GROUPING_THRESHOLDS = {"dhash-v1": 4, "dhash-v2": 6, "dhash-v3": 7}
 
 THRESHOLD_CHANGE_RECORD = {
     "issue": "qu1r0ra/jute-related-image-evaluation#172",
