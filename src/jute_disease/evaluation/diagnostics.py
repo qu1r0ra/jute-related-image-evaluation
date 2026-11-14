@@ -7,9 +7,13 @@ embedding distances or CAM locations.
 
 from __future__ import annotations
 
+import copy
 import csv
 import hashlib
+import io
 import json
+import os
+import shutil
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from importlib.metadata import PackageNotFoundError, version
@@ -39,6 +43,13 @@ TSNE_PERPLEXITIES = (30, 50)
 UMAP_NEIGHBORS = (15, 50)
 CAM_SAMPLE_PER_CLASS = 8
 CAM_SAMPLE_SEED = 0
+OUTPUT_MANIFEST = "output-manifest.json"
+SANITY_SAMPLE_SIZE = 8
+SANITY_SEED = 0
+SANITY_MAX_MEDIAN_CORRELATION = 0.5
+SANITY_MIN_DEFINED_SHARE = 0.5
+SANITY_REFIT_STEPS = 100
+SANITY_REFIT_LR = 0.1
 
 
 def diagnostic_configuration() -> dict[str, Any]:
@@ -441,22 +452,9 @@ def select_gradcam_sample(
                 chosen = rng.choice(np.asarray(candidates), size=take, replace=False)
                 selected[outcome].update(ids[int(index)] for index in chosen)
 
-    if policy_predictions:
-        if set(policy_predictions) != set(POLICIES):
-            raise ValueError("policy predictions must cover all three split policies")
-        if any(
-            not isinstance(values, Mapping) for values in policy_predictions.values()
-        ):
-            raise ValueError("each policy must map image IDs to predictions")
-        for image_id in ids:
-            votes = {
-                predictions_for_policy[image_id]
-                for predictions_for_policy in policy_predictions.values()
-                if image_id in predictions_for_policy
-            }
-            if len(votes) > 1:
-                selected["disagreement"].add(image_id)
-
+    disagreements = _policy_disagreements(ids, policy_predictions)
+    selected["disagreement"].update(disagreements)
+    kept = {image_id for values in selected.values() for image_id in values}
     return {
         "seed": seed,
         "per_class": per_class,
@@ -465,7 +463,34 @@ def select_gradcam_sample(
             key: [image_id for image_id in ids if image_id in values]
             for key, values in selected.items()
         },
-        "all_policy_disagreements_included": True,
+        "policy_disagreement_count": len(disagreements),
+        # Computed from the policy predictions, never asserted.
+        "all_policy_disagreements_included": disagreements <= kept,
+    }
+
+
+def _policy_disagreements(
+    ids: Sequence[str], policy_predictions: Mapping[str, Mapping[str, str]] | None
+) -> set[str]:
+    """Image IDs on which the three split policies do not all predict one class."""
+    if not policy_predictions:
+        return set()
+    if set(policy_predictions) != set(POLICIES):
+        raise ValueError("policy predictions must cover all three split policies")
+    if any(not isinstance(values, Mapping) for values in policy_predictions.values()):
+        raise ValueError("each policy must map image IDs to predictions")
+    missing = [
+        image_id
+        for values in policy_predictions.values()
+        for image_id in ids
+        if image_id not in values
+    ]
+    if missing:
+        raise ValueError(f"policy predictions miss test images: {missing[:5]}")
+    return {
+        image_id
+        for image_id in ids
+        if len({values[image_id] for values in policy_predictions.values()}) > 1
     }
 
 
@@ -544,37 +569,144 @@ def parameter_randomization_correlations(
     return result
 
 
-def sanity_check_record(
-    parameter_randomization: Mapping[str, Any] | None,
-    label_randomization: Mapping[str, Any] | None,
+def randomization_stages(model: nn.Module) -> list[tuple[str, list[nn.Module]]]:
+    """Cascade order for parameter randomization: classifier first, stem last."""
+    stages: list[tuple[str, list[nn.Module]]] = []
+    head = getattr(model, "classifier", None)
+    if isinstance(head, nn.Module):
+        stages.append(("classifier", [head]))
+    backbone = getattr(getattr(model, "feature_extractor", None), "backbone", None)
+    if not isinstance(backbone, nn.Module):
+        raise ValueError("model has no backbone to randomize")
+    for name, child in reversed(list(backbone.named_children())):
+        if isinstance(child, nn.Sequential):
+            stages.extend(
+                (f"backbone.{name}.{index}", [block])
+                for index, block in reversed(list(enumerate(child)))
+            )
+        elif any(True for _ in child.parameters()):
+            stages.append((f"backbone.{name}", [child]))
+    return stages
+
+
+def _median_defined(values: Sequence[float | None]) -> tuple[float | None, float]:
+    defined = [value for value in values if value is not None]
+    share = len(defined) / len(values) if values else 0.0
+    return (float(np.median(defined)) if defined else None), share
+
+
+def _sanity_outcome(
+    correlations: Sequence[float | None], evidence: dict[str, Any]
+) -> dict[str, Any]:
+    """Apply the pass rule: maps must change once the explanation is broken."""
+    median, share = _median_defined(correlations)
+    passed = (
+        median is not None
+        and share >= SANITY_MIN_DEFINED_SHARE
+        and median < SANITY_MAX_MEDIAN_CORRELATION
+    )
+    return {
+        "status": "pass" if passed else "fail",
+        "evidence": {
+            **evidence,
+            "median_correlation": median,
+            "defined_share": share,
+        },
+    }
+
+
+def sanity_check_results(
+    model: nn.Module,
+    images: torch.Tensor,
+    targets: Sequence[int],
+    permuted_targets: Sequence[int],
     *,
     checkpoint_sha256: str,
+    image_ids: Sequence[str],
+    seed: int = SANITY_SEED,
 ) -> dict[str, Any]:
-    """Record Adebayo check evidence and a separately reviewed pass/fail state."""
+    """Compute both Adebayo checks, with a pass rule fixed here and not supplied.
+
+    Parameter randomization re-draws the weights of the classifier and then of
+    each backbone stage from the top down and compares each stage's maps with the
+    original maps. Label randomization refits only the classifier on permuted
+    labels over the checkpoint's own penultimate features (a head-refit variant
+    of the full retraining the original method describes) and compares maps.
+    A check passes when the median Spearman correlation with the original maps
+    at the final stage is below the cutoff and enough correlations are defined.
+    """
+    if len(targets) != images.shape[0] or len(permuted_targets) != len(targets):
+        raise ValueError("images, targets and permuted targets must align")
     if len(checkpoint_sha256) != 64 or any(
         char not in "0123456789abcdef" for char in checkpoint_sha256
     ):
         raise ValueError("sanity checks need the selected checkpoint SHA-256")
+    reference = gradcam_maps(model, images, targets)
+    generator = torch.Generator().manual_seed(seed)
 
-    def outcome(value: Mapping[str, Any] | None, name: str) -> dict[str, Any]:
-        if value is None:
-            return {"status": "not-run", "evidence": None}
-        status = value.get("status")
-        if status not in ("pass", "fail"):
-            raise ValueError(f"{name} status must be 'pass' or 'fail'")
-        evidence = value.get("evidence")
-        if not isinstance(evidence, Mapping) or not evidence:
-            raise ValueError(f"{name} must include recorded evidence")
-        if evidence.get("checkpoint_sha256") != checkpoint_sha256:
-            raise ValueError(f"{name} evidence must match the selected checkpoint")
-        return {"status": status, "evidence": dict(evidence)}
+    randomized = copy.deepcopy(model).eval()
+    stage_maps: dict[str, np.ndarray] = {}
+    for name, modules in randomization_stages(randomized):
+        for module in modules:
+            for parameter in module.parameters():
+                parameter.data = (
+                    torch.randn(parameter.shape, generator=generator) * 0.05
+                ).to(parameter.dtype)
+        stage_maps[name] = gradcam_maps(randomized, images, targets)
+    by_stage = parameter_randomization_correlations(reference, stage_maps)
+    final_stage = next(reversed(by_stage))
+    stage_median = {
+        name: _median_defined(values)[0] for name, values in by_stage.items()
+    }
 
+    refit = copy.deepcopy(model).eval()
+    with torch.no_grad():
+        features = penultimate_features(refit, images)
+    head = refit.classifier
+    head.reset_parameters()
+    optimizer = torch.optim.Adam(head.parameters(), lr=SANITY_REFIT_LR)
+    labels = torch.as_tensor(list(permuted_targets), dtype=torch.long)
+    for _ in range(SANITY_REFIT_STEPS):
+        optimizer.zero_grad()
+        loss = torch.nn.functional.cross_entropy(head(features), labels)
+        loss.backward()
+        optimizer.step()
+    label_maps = gradcam_maps(refit, images, targets)
+    label_correlations = parameter_randomization_correlations(
+        reference, {"head-refit": label_maps}
+    )["head-refit"]
+
+    common = {
+        "checkpoint_sha256": checkpoint_sha256,
+        "sample_image_ids": list(image_ids),
+        "seed": seed,
+    }
     return {
         "method": "Adebayo parameter-randomization and label-randomization checks",
-        "parameter_randomization": outcome(
-            parameter_randomization, "parameter randomization"
+        "pass_rule": {
+            "fixed_in_code": True,
+            "statistic": "median Spearman correlation with the original maps",
+            "max_median_correlation": SANITY_MAX_MEDIAN_CORRELATION,
+            "min_defined_share": SANITY_MIN_DEFINED_SHARE,
+            "parameter_randomization_stage": final_stage,
+            "label_randomization_variant": "classifier refit on permuted labels",
+        },
+        "parameter_randomization": _sanity_outcome(
+            by_stage[final_stage],
+            {
+                **common,
+                "stage_median_correlation": stage_median,
+                "final_stage": final_stage,
+            },
         ),
-        "label_randomization": outcome(label_randomization, "label randomization"),
+        "label_randomization": _sanity_outcome(
+            label_correlations,
+            {
+                **common,
+                "refit_steps": SANITY_REFIT_STEPS,
+                "refit_learning_rate": SANITY_REFIT_LR,
+            },
+        ),
     }
 
 
@@ -665,11 +797,19 @@ def write_diagnostics_export(
     generating_command: Sequence[str],
     configuration: Mapping[str, Any],
     source_artifacts: Sequence[Path | str],
+    files: Mapping[str, bytes] | None = None,
 ) -> Path:
-    """Write a provenance-bound JSON export and aligned coordinate CSV files."""
+    """Write a provenance-bound export atomically, with a SHA-256 for every file.
+
+    Everything is written into a sibling staging directory, listed with its digests
+    in ``output-manifest.json``, flushed, and only then renamed to ``output``. A
+    crash before the rename leaves no directory at ``output``, so a complete-looking
+    export is always complete. ``files`` adds already-rendered files (figures) by
+    relative path.
+    """
     directory = Path(output)
-    if (directory / "diagnostics.json").exists():
-        raise ValueError(f"refusing to replace {directory / 'diagnostics.json'}")
+    if directory.exists():
+        raise ValueError(f"refusing to replace {directory}")
     sources = []
     for source in source_artifacts:
         path = Path(source).resolve()
@@ -677,7 +817,6 @@ def write_diagnostics_export(
             raise ValueError(f"source artifact is missing: {path}")
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         sources.append({"path": str(path), "sha256": digest})
-    directory.mkdir(parents=True, exist_ok=True)
     export = {
         "schema": 1,
         "generating_command": list(generating_command),
@@ -685,20 +824,52 @@ def write_diagnostics_export(
         "source_artifacts": sources,
         "diagnostics": dict(payload),
     }
-    path = directory / "diagnostics.json"
-    path.write_text(
-        json.dumps(export, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
+    contents: dict[str, bytes] = {
+        "diagnostics.json": (
+            json.dumps(export, indent=2, sort_keys=True, allow_nan=False) + "\n"
+        ).encode("utf-8")
+    }
     for feature_set, result in payload.get("embeddings", {}).items():
         ids = result["image_ids"]
         for name, coordinates in result["coordinates"].items():
-            coordinate_path = directory / f"{feature_set}-{name}.csv"
-            with coordinate_path.open("x", encoding="utf-8", newline="") as handle:
-                writer = csv.writer(handle)
-                writer.writerow(("image_id", "x", "y"))
-                writer.writerows(
-                    (image_id, *coordinate)
-                    for image_id, coordinate in zip(ids, coordinates, strict=True)
-                )
-    return path
+            buffer = io.StringIO(newline="")
+            writer = csv.writer(buffer)
+            writer.writerow(("image_id", "x", "y"))
+            writer.writerows(
+                (image_id, *coordinate)
+                for image_id, coordinate in zip(ids, coordinates, strict=True)
+            )
+            contents[f"{feature_set}-{name}.csv"] = buffer.getvalue().encode("utf-8")
+    for relative, data in (files or {}).items():
+        if relative in contents or relative == OUTPUT_MANIFEST:
+            raise ValueError(f"export file name collides: {relative}")
+        contents[relative] = data
+    manifest = {
+        "schema": 1,
+        "files": {
+            relative: hashlib.sha256(data).hexdigest()
+            for relative, data in sorted(contents.items())
+        },
+    }
+    contents[OUTPUT_MANIFEST] = (
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    stage = directory.parent / f".{directory.name}.partial-{os.getpid()}"
+    if stage.exists():
+        shutil.rmtree(stage)
+    stage.mkdir()
+    try:
+        for relative, data in contents.items():
+            target = stage / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("xb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+        os.replace(stage, directory)
+    except BaseException:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
+    return directory / "diagnostics.json"

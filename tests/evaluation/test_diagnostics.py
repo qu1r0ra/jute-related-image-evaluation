@@ -12,6 +12,7 @@ from torch import nn
 
 from jute_disease.evaluation import (
     Authorization,
+    BoundOutput,
     FreezeRecordError,
     RunEntry,
     aggregate_leaf_scores,
@@ -24,7 +25,7 @@ from jute_disease.evaluation import (
     letterbox_leaf_mask,
     parameter_randomization_correlations,
     require_analysis,
-    sanity_check_record,
+    sanity_check_results,
     select_gradcam_sample,
     select_median_validation_run,
     validate_primary_policy_runs,
@@ -80,6 +81,11 @@ def test_analysis_gate_checks_both_analysis_and_run_membership() -> None:
         require_analysis(authorization, "embeddings-test-pass", ["unknown-fit"])
 
 
+def _absent_output(kind: str, tmp_path: Path) -> BoundOutput:
+    """A bound output nobody will read: the entry point must refuse before it does."""
+    return BoundOutput(kind, tmp_path / f"absent-{kind}.json", "0" * 64, {})
+
+
 def test_test_image_entry_point_refuses_before_manifest_or_image_access(
     tmp_path: Path,
 ) -> None:
@@ -93,6 +99,8 @@ def test_test_image_entry_point_refuses_before_manifest_or_image_access(
             tmp_path / "output",
             frozen_backbone_checkpoint=tmp_path / "absent-imagenet.ckpt",
             assignment_table_path=tmp_path / "absent-assignments.json",
+            scene_tags=_absent_output("scene_tags", tmp_path),
+            sanity_checks=_absent_output("sanity_checks", tmp_path),
         )
     assert not (tmp_path / "absent-images").exists()
 
@@ -139,10 +147,11 @@ def test_policy_sample_is_reproducible_and_keeps_disagreement_ids() -> None:
     ids = [f"id-{index}" for index in range(6)]
     truth = ["a", "a", "a", "b", "b", "b"]
     predictions = ["a", "a", "b", "b", "a", "b"]
+    agreed = dict(zip(ids, truth, strict=True))
     policies = {
-        "image-random": {"id-0": "a", "id-2": "b"},
-        "exact-copy": {"id-0": "b", "id-2": "a"},
-        "near-duplicate": {"id-0": "a", "id-2": "b"},
+        "image-random": {**agreed, "id-0": "a", "id-2": "b"},
+        "exact-copy": {**agreed, "id-0": "b", "id-2": "a"},
+        "near-duplicate": {**agreed, "id-0": "a", "id-2": "b"},
     }
     first = select_gradcam_sample(
         ids, truth, predictions, ("a", "b"), per_class=1, policy_predictions=policies
@@ -154,6 +163,18 @@ def test_policy_sample_is_reproducible_and_keeps_disagreement_ids() -> None:
     assert first["selected"]["disagreement"] == ["id-0", "id-2"]
     assert len(first["selected"]["correct"]) == 2
     assert len(first["selected"]["error"]) == 2
+    assert first["policy_disagreement_count"] == 2
+    assert first["all_policy_disagreements_included"] is True
+    incomplete = {**policies, "exact-copy": {"id-0": "b"}}
+    with pytest.raises(ValueError, match="miss test images"):
+        select_gradcam_sample(
+            ids,
+            truth,
+            predictions,
+            ("a", "b"),
+            per_class=1,
+            policy_predictions=incomplete,
+        )
 
 
 def test_primary_policy_assignment_table_is_receipt_bound(tmp_path: Path) -> None:
@@ -240,31 +261,30 @@ def test_cam_and_sanity_check_public_apis_are_deterministic() -> None:
         first, {"randomized": np.flip(first, axis=-1).copy()}
     )
     assert len(correlations["randomized"]) == 2
-    check = sanity_check_record(
-        {"status": "pass", "evidence": {"checkpoint_sha256": "a" * 64}},
-        {"status": "pass", "evidence": {"checkpoint_sha256": "a" * 64}},
-        checkpoint_sha256="a" * 64,
-    )
-    assert check["parameter_randomization"]["status"] == "pass"
-    assert (
-        sanity_check_record(
-            None,
-            None,
+
+
+def test_sanity_check_results_refuse_unaligned_inputs_and_unhashed_checkpoints() -> (
+    None
+):
+    model = nn.Linear(2, 2)
+    images = torch.zeros((2, 3, 4, 4))
+    with pytest.raises(ValueError, match="align"):
+        sanity_check_results(
+            model,
+            images,
+            [0],
+            [0, 1],
             checkpoint_sha256="a" * 64,
-        )["label_randomization"]["status"]
-        == "not-run"
-    )
-    with pytest.raises(ValueError, match="status"):
-        sanity_check_record(
-            {"status": "pending"},
-            None,
-            checkpoint_sha256="a" * 64,
+            image_ids=["a", "b"],
         )
-    with pytest.raises(ValueError, match="selected checkpoint"):
-        sanity_check_record(
-            {"status": "pass", "evidence": {"checkpoint_sha256": "b" * 64}},
-            None,
-            checkpoint_sha256="a" * 64,
+    with pytest.raises(ValueError, match="SHA-256"):
+        sanity_check_results(
+            model,
+            images,
+            [0, 1],
+            [1, 0],
+            checkpoint_sha256="not-a-digest",
+            image_ids=["a", "b"],
         )
 
 

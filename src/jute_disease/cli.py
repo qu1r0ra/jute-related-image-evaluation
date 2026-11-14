@@ -70,9 +70,13 @@ from jute_disease.data import (
 from jute_disease.data.policies import HEALTHY_CAP
 from jute_disease.evaluation import (
     RESIDUAL_AUDIT_OPERATION,
+    SANITY_CHECKS_KIND,
+    SCENE_TAGS_KIND,
     FreezeRecordError,
     TestReadRefusedError,
     authorize_test_read,
+    compute_sanity_checks,
+    compute_scene_tags,
     default_reads_log_path,
     evaluate_image_diagnostics,
     evaluate_test,
@@ -81,6 +85,9 @@ from jute_disease.evaluation import (
     planned_probe_fit_ids,
     predict_leaf_only,
     predict_test,
+    primary_policy_runs,
+    read_bound_output,
+    require_scene_tags_bound,
     verify_freeze_record,
     write_freeze_record,
     write_run_record,
@@ -831,6 +838,60 @@ def _evaluate_leaf_sample(args: argparse.Namespace) -> None:
         raise SystemExit(f"test read refused: {error}") from error
 
 
+def _evaluate_sanity_checks(args: argparse.Namespace) -> None:
+    try:
+        auth = authorize_test_read(
+            args.freeze_record,
+            args.run_record,
+            args.root,
+            args.fit_id,
+            args.target_dir,
+        )
+        result = compute_sanity_checks(
+            auth,
+            target_dir=args.target_dir,
+            image_root=args.image_root,
+            base_dir=args.run_store or args.run_record.parent,
+            assignment_table_path=args.assignment_table,
+            output=args.output,
+            root=args.root,
+            additional_logs=[args.reads_log] if args.reads_log else [],
+            model_name=args.model_name,
+        )
+    except (TestReadRefusedError, FreezeRecordError, OSError, ValueError) as error:
+        raise SystemExit(f"test read refused: {error}") from error
+    _print_json(
+        {
+            "output": str(args.output),
+            "sha256": result.sha256,
+            "parameter_randomization": result.body["parameter_randomization"]["status"],
+            "label_randomization": result.body["label_randomization"]["status"],
+        }
+    )
+
+
+def _evaluate_scene_tags(args: argparse.Namespace) -> None:
+    try:
+        record = verify_freeze_record(args.freeze_record, args.root, args.target_dir)
+        result = compute_scene_tags(
+            record,
+            root=args.root,
+            target_dir=args.target_dir,
+            image_root=args.image_root,
+            output=args.output,
+            additional_logs=[args.reads_log] if args.reads_log else [],
+        )
+    except (TestReadRefusedError, FreezeRecordError, OSError, ValueError) as error:
+        raise SystemExit(f"test read refused: {error}") from error
+    _print_json(
+        {
+            "output": str(args.output),
+            "sha256": result.sha256,
+            "images": len(result.body["scenes"]),
+        }
+    )
+
+
 def _evaluate_test(args: argparse.Namespace) -> None:
     try:
         auth = authorize_test_read(
@@ -843,16 +904,24 @@ def _evaluate_test(args: argparse.Namespace) -> None:
         default_log = default_reads_log_path(args.root)
         fit_ids = [r.fit_id for r in auth.runs]
         additional_logs = [args.reads_log] if args.reads_log else []
+        tags = None
+        if args.scene_tags:
+            tags = read_bound_output(
+                args.scene_tags,
+                SCENE_TAGS_KIND,
+                record_hash=auth.record_hash,
+                reads_log=default_log,
+            )
+            require_scene_tags_bound(tags, auth.body)
         log_test_read(
             default_log, auth.record_hash, fit_ids, additional_logs=additional_logs
         )
-        features = _read_json_file(args.features) if args.features else {}
         report = evaluate_test(
             args.target_dir,
             auth,
             args.run_store or args.run_record.parent,
-            scenes=features.get("scenes"),
-            frame_leaf_share=features.get("frame_leaf_share"),
+            scenes=None if tags is None else tags.body["scenes"],
+            frame_leaf_share=None if tags is None else tags.body["frame_leaf_share"],
             sample_size=args.sample_size,
             resamples=args.resamples,
             permutations=args.permutations,
@@ -876,17 +945,32 @@ def _evaluate_diagnostics(args: argparse.Namespace) -> None:
             args.target_dir,
         )
         fit_ids = [run.fit_id for run in auth.runs]
+        default_log = default_reads_log_path(args.root)
         additional_logs = [args.reads_log] if args.reads_log else []
+        # The run set must cover the frozen cell under all three policies; that
+        # needs no test image, so a refusal here leaves no image_diagnostics entry.
+        primary_policy_runs(auth, args.assignment_table)
+        # Both inputs must be outputs of the logged commands; checking them before
+        # the intent row means a refusal leaves no image_diagnostics entry.
+        scene_tags = read_bound_output(
+            args.scene_tags,
+            SCENE_TAGS_KIND,
+            record_hash=auth.record_hash,
+            reads_log=default_log,
+        )
+        sanity_checks = read_bound_output(
+            args.sanity_checks,
+            SANITY_CHECKS_KIND,
+            record_hash=auth.record_hash,
+            reads_log=default_log,
+        )
         log_test_read(
-            default_reads_log_path(args.root),
+            default_log,
             auth.record_hash,
             fit_ids,
             operation="image_diagnostics",
             additional_logs=additional_logs,
         )
-        context = _read_json_file(args.context)
-        if not isinstance(context, dict):
-            raise ValueError("diagnostics context must be a JSON object")
         result = evaluate_image_diagnostics(
             args.target_dir,
             auth,
@@ -895,13 +979,11 @@ def _evaluate_diagnostics(args: argparse.Namespace) -> None:
             args.output,
             frozen_backbone_checkpoint=args.frozen_backbone_checkpoint,
             assignment_table_path=args.assignment_table,
+            scene_tags=scene_tags,
+            sanity_checks=sanity_checks,
             model_name=args.model_name,
-            scenes=context.get("scenes"),
-            policy_predictions=context.get("policy_predictions"),
-            sanity_checks=context.get("sanity_checks"),
             generating_command=["jute-disease", *sys.argv[1:]],
             source_artifacts=[
-                args.context,
                 args.freeze_record,
                 args.run_record,
                 args.root / "pyproject.toml",
@@ -910,7 +992,24 @@ def _evaluate_diagnostics(args: argparse.Namespace) -> None:
         )
     except (TestReadRefusedError, FreezeRecordError, OSError, ValueError) as error:
         raise SystemExit(f"test read refused: {error}") from error
-    _print_json({"export": result["export"], "record_hash": auth.record_hash})
+    manifest_sha256 = hashlib.sha256(
+        (args.output / "output-manifest.json").read_bytes()
+    ).hexdigest()
+    log_test_read(
+        default_log,
+        auth.record_hash,
+        [],
+        operation="image_diagnostics_output",
+        additional_logs=additional_logs,
+        details={"output_manifest_sha256": manifest_sha256},
+    )
+    _print_json(
+        {
+            "export": result["export"],
+            "output_manifest_sha256": manifest_sha256,
+            "record_hash": auth.record_hash,
+        }
+    )
 
 
 def _bounds(text: str) -> tuple[int, int]:
@@ -1401,6 +1500,37 @@ def _add_gated_evaluator(actions: argparse._SubParsersAction) -> None:
     leaf_only.add_argument("--seed", type=int, default=42)
     leaf_only.set_defaults(run=_evaluate_predict_leaf_only)
 
+    sanity = actions.add_parser(
+        "sanity-checks",
+        help="Compute and log the Grad-CAM sanity checks; needs both records.",
+    )
+    sanity.add_argument("--freeze-record", type=Path, required=True)
+    sanity.add_argument("--run-record", type=Path, required=True)
+    sanity.add_argument("--target-dir", type=Path, required=True)
+    sanity.add_argument("--image-root", type=Path, required=True)
+    sanity.add_argument("--assignment-table", type=Path, required=True)
+    sanity.add_argument("--output", type=Path, required=True)
+    sanity.add_argument("--fit-id", action="append", required=True)
+    sanity.add_argument("--model-name", default="mobilenetv2_100.ra_in1k")
+    sanity.add_argument(
+        "--run-store", type=Path, help="Default: beside the run record."
+    )
+    sanity.add_argument("--root", type=Path, default=ROOT_DIR)
+    sanity.add_argument("--reads-log", type=Path)
+    sanity.set_defaults(run=_evaluate_sanity_checks)
+
+    scene_tags = actions.add_parser(
+        "scene-tags",
+        help="Tag every test image and measure frame leaf shares under the audit.",
+    )
+    scene_tags.add_argument("--freeze-record", type=Path, required=True)
+    scene_tags.add_argument("--target-dir", type=Path, required=True)
+    scene_tags.add_argument("--image-root", type=Path, required=True)
+    scene_tags.add_argument("--output", type=Path, required=True)
+    scene_tags.add_argument("--root", type=Path, default=ROOT_DIR)
+    scene_tags.add_argument("--reads-log", type=Path)
+    scene_tags.set_defaults(run=_evaluate_scene_tags)
+
     test = actions.add_parser(
         "test", help="Read test predictions; refused without both records."
     )
@@ -1408,7 +1538,9 @@ def _add_gated_evaluator(actions: argparse._SubParsersAction) -> None:
     test.add_argument("--run-record", type=Path)
     test.add_argument("--target-dir", type=Path, required=True)
     test.add_argument("--output", type=Path, required=True)
-    test.add_argument("--features", type=Path, help="Scene tags and frame leaf shares.")
+    test.add_argument(
+        "--scene-tags", type=Path, help="Output of 'evaluate scene-tags'."
+    )
     test.add_argument("--fit-id", action="append")
     test.add_argument("--run-store", type=Path, help="Default: beside the run record.")
     test.add_argument("--root", type=Path, default=ROOT_DIR)
@@ -1429,12 +1561,16 @@ def _add_gated_evaluator(actions: argparse._SubParsersAction) -> None:
     diagnostics.add_argument("--assignment-table", type=Path, required=True)
     diagnostics.add_argument("--frozen-backbone-checkpoint", type=Path, required=True)
     diagnostics.add_argument(
-        "--context",
+        "--scene-tags",
         type=Path,
         required=True,
-        help=(
-            "JSON with frozen scene tags, policy predictions and sanity-check records."
-        ),
+        help="Output of 'evaluate scene-tags'.",
+    )
+    diagnostics.add_argument(
+        "--sanity-checks",
+        type=Path,
+        required=True,
+        help="Output of 'evaluate sanity-checks'.",
     )
     diagnostics.add_argument("--output", type=Path, required=True)
     diagnostics.add_argument("--fit-id", action="append", required=True)

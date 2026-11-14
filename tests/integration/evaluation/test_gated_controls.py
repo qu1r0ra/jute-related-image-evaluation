@@ -8,11 +8,9 @@ from shutil import copytree
 
 import pytest
 
-from jute_disease import cli as cli_module
 from jute_disease.config import BENCHMARK_CONFIG
 from jute_disease.data.manifest import (
     load_manifest,
-    load_protected_test_manifest,
     write_manifest,
 )
 from jute_disease.training import RunStore, load_benchmark
@@ -364,21 +362,19 @@ def test_changed_protected_manifest_refuses_test_read_before_logging(
     assert not (root / "artifacts/evaluation/test-reads.jsonl").exists()
 
 
-def test_diagnostics_cli_gates_and_logs_authorized_manifest_read(
+def test_diagnostics_cli_refuses_a_changed_manifest_before_logging(
     tmp_path: Path,
     target: Path,
     root: Path,
     policy_dir: Path,
     mask_audit_report: Path,
     capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     record, run_record, _ = _setup_runs(
         tmp_path, target, root, policy_dir, mask_audit_report, capsys
     )
     protected_path = target / "protected-test" / "manifest.json"
-    original = protected_path.read_bytes()
-    protected_path.write_bytes(original + b" ")
+    protected_path.write_bytes(protected_path.read_bytes() + b" ")
     arguments = [
         "evaluate",
         "diagnostics",
@@ -394,8 +390,10 @@ def test_diagnostics_cli_gates_and_logs_authorized_manifest_read(
         tmp_path / "assignments.json",
         "--frozen-backbone-checkpoint",
         tmp_path / "backbone.ckpt",
-        "--context",
-        _write(tmp_path / "context.json", {}),
+        "--scene-tags",
+        tmp_path / "scene-tags.json",
+        "--sanity-checks",
+        tmp_path / "sanity-checks.json",
         "--output",
         tmp_path / "diagnostics",
         "--fit-id",
@@ -405,20 +403,7 @@ def test_diagnostics_cli_gates_and_logs_authorized_manifest_read(
     ]
     with pytest.raises(SystemExit, match="manifest bytes changed"):
         _cli(*arguments)
-    read_log = root / "artifacts/evaluation/test-reads.jsonl"
-    assert not read_log.exists()
-
-    protected_path.write_bytes(original)
-    monkeypatch.setattr(
-        cli_module,
-        "evaluate_image_diagnostics",
-        lambda *args, **kwargs: {"export": str(tmp_path / "diagnostics")},
-    )
-    _cli(*arguments)
-    rows = [json.loads(line) for line in read_log.read_text().splitlines()]
-    assert rows[-1]["operation"] == "image_diagnostics"
-    assert rows[-1]["record_hash"] == json.loads(record.read_text())["hash"]
-    assert rows[-1]["fit_ids"] == [FIT.format(0)]
+    assert not (root / "artifacts/evaluation/test-reads.jsonl").exists()
 
 
 def test_leaf_sample_cli_gates_and_logs_authorized_read(
@@ -497,7 +482,6 @@ def test_all_analyses_run_through_the_evaluator(
     passing_mask_audit_report: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    entries = load_protected_test_manifest(target).entries
     fits = {
         "full": FIT.format(0),
         "leaf_only": "fixture/leaf/seed-0",
@@ -552,17 +536,25 @@ def test_all_analyses_run_through_the_evaluator(
         "--output",
         run_record,
     )
-    features = _write(
-        tmp_path / "features.json",
-        {
-            "scenes": {e.image_id: f"scene-{i % 2}" for i, e in enumerate(entries)},
-            "frame_leaf_share": {e.image_id: 0.0 for e in entries},
-        },
+    scene_tags = tmp_path / "scene-tags.json"
+    _cli(
+        "evaluate",
+        "scene-tags",
+        "--freeze-record",
+        record,
+        "--target-dir",
+        target,
+        "--image-root",
+        target.parents[1] / "images",
+        "--root",
+        root,
+        "--output",
+        scene_tags,
     )
     _cli(
         *_test_args(tmp_path, target, root, record, run_record),
-        "--features",
-        features,
+        "--scene-tags",
+        scene_tags,
         "--sample-size",
         12,
     )
