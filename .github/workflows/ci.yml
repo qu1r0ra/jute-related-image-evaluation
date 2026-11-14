@@ -70,7 +70,7 @@ jobs:
         run: uv run --locked python scripts/audit_dependencies.py
 
       - name: Run tests
-        run: uv run pytest -m ""
+        run: uv run pytest -m "" --durations=40
 
   focused-tests:
     needs: changes
