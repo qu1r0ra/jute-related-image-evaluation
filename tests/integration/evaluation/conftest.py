@@ -41,7 +41,9 @@ def target(tmp_path_factory: pytest.TempPathFactory) -> Path:
 def policy_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """The frozen policy matrix for pools A, B and C, written by the real command."""
     base = tmp_path_factory.mktemp("policies")
-    pools = [f"{name}={frozen_pool(base / f'pool-{name}')}" for name in "ABC"]
+    pools = [
+        f"{name}={frozen_pool(base / f'pool-{name}', pool=name)}" for name in "ABC"
+    ]
     arguments = ["freeze", "policies"]
     for pool in pools:
         arguments += ["--pool", pool]
