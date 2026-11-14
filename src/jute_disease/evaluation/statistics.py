@@ -66,6 +66,19 @@ class PowerStatement:
     n_second: int
     df: float
     power: float
+    sd_factor_interval: tuple[float, float]
+    """Multipliers (low, high) of the standard error across the spread's interval."""
+    power_interval: tuple[float, float]
+    """Power (worst, best) at the high and low standard-error factors."""
+    note: str
+
+
+POWER_NOTE = (
+    "The spread of the ten validation split means is treated as known in the "
+    "headline power. It is an estimate on a few degrees of freedom, so power is "
+    "also reported across the confidence interval for the standard deviation "
+    "(chi-square interval on the Welch df); read the interval, not the point value."
+)
 
 
 @dataclass(frozen=True)
@@ -201,6 +214,11 @@ def equivalence_test(
     p-value is the larger one-sided p-value; equivalence is declared when it is
     below ``alpha``, which is the same as the (1 - 2 alpha) interval lying inside
     (-margin, +margin).
+
+    Limits. With ten split means per group the standard error is large unless
+    the split spread is small, so the test is weak: it often fails to establish
+    equivalence even when there is no effect, and that failure is not evidence
+    of an effect. Called once per pool, the tests are unadjusted across pools.
     """
     if margin <= 0 or not 0 < alpha < 0.5:
         raise ValueError("margin must be positive and alpha in (0, 0.5)")
@@ -231,6 +249,7 @@ def split_power(
     second: Sequence[float],
     effect: float = SMALLEST_EFFECT_OF_INTEREST,
     alpha: float = 0.05,
+    sd_level: float = 0.95,
 ) -> PowerStatement:
     """Power of the two-sided Welch test to detect ``effect``, at the split spread.
 
@@ -240,17 +259,33 @@ def split_power(
 
         power = P(T > t_crit) + P(T < -t_crit),   t_crit = t_{df, 1 - alpha/2}.
 
-    Cohen (1988); G*Power gives 0.5619 for sd 1, n = 10 per group, effect 1.
+    Cohen (1988); G*Power gives 0.5620 for sd 1, n = 10 per group, effect 1.
+
+    The headline value treats the spread of the validation means as known. With
+    ten means per group it is an estimate, so the statement also carries the
+    power when the standard error is scaled by the ``sd_level`` chi-square
+    interval for a standard deviation on ``df`` degrees of freedom,
+    sqrt(df / chi2_{1 - (1 - level)/2}) to sqrt(df / chi2_{(1 - level)/2}); the
+    smaller spread gives the best case and the larger the worst.
     """
-    if effect <= 0 or not 0 < alpha < 1:
-        raise ValueError("effect must be positive and alpha in (0, 1)")
+    if effect <= 0 or not 0 < alpha < 1 or not 0 < sd_level < 1:
+        raise ValueError("effect must be positive, alpha and sd_level in (0, 1)")
     _, se, df = _welch_parts(first, second)
-    noncentrality = effect / se
     critical = float(scipy_stats.t.ppf(1 - alpha / 2, df))
-    power = float(
-        scipy_stats.nct.sf(critical, df, noncentrality)
-        + scipy_stats.nct.cdf(-critical, df, noncentrality)
+
+    def power_at(error: float) -> float:
+        noncentrality = effect / error
+        return float(
+            scipy_stats.nct.sf(critical, df, noncentrality)
+            + scipy_stats.nct.cdf(-critical, df, noncentrality)
+        )
+
+    tail = (1 - sd_level) / 2
+    factors = (
+        float(math.sqrt(df / scipy_stats.chi2.ppf(1 - tail, df))),
+        float(math.sqrt(df / scipy_stats.chi2.ppf(tail, df))),
     )
+    power = power_at(se)
     a, b = np.asarray(first, dtype=float), np.asarray(second, dtype=float)
     return PowerStatement(
         effect,
@@ -261,6 +296,9 @@ def split_power(
         len(b),
         df,
         power,
+        factors,
+        (power_at(se * factors[1]), power_at(se * factors[0])),
+        POWER_NOTE,
     )
 
 

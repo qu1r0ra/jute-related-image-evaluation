@@ -1,13 +1,15 @@
-"""Nested paired bootstrap of split, training seed and test-family uncertainty.
+"""Nested bootstrap of split, training seed and test-family uncertainty.
 
 The bootstrap is descriptive (ADR 0004): it summarises how much a score moves
 under resampling of splits, seeds and test families, and it carries no
-confirmatory weight. Its empirical coverage is checked on synthetic data with a
-known truth by ``jute_disease.evaluation.coverage``.
+confirmatory weight. Its empirical coverage is reported, under named synthetic
+configurations with a known truth, by ``jute_disease.evaluation.coverage``; that
+report is not a guarantee for other designs.
 """
 
+import zlib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -45,6 +47,13 @@ class Resampling:
     samples: dict[str, np.ndarray]
     rankings: np.ndarray
     method: str
+    singleton_strata: dict[str, dict[int, int]] = field(default_factory=dict)
+    """Per system and split, the strata that hold a single family.
+
+    A singleton stratum is drawn once in every replicate, so it adds no family
+    variance; a split made mostly of singleton strata is resampled over splits
+    and seeds only. See ``resample_metrics``.
+    """
 
     def interval(self, system: str) -> Interval:
         return self._interval(self.estimates[system], self.samples[system])
@@ -174,18 +183,29 @@ def resample_metrics(
 ) -> Resampling:
     """Bootstrap splits, seeds and class-stratified test families, scoring each run.
 
-    Split and seed draws are shared by every system. Family draws are stratified
-    by each family's class set, so every class keeps its native families and the
-    class support is asserted instead of redrawn.
+    Family draws are stratified by each family's class set, so every class keeps
+    its native families.
 
-    ``family_resampling`` chooses how families are shared. ``"shared"`` (View 2)
-    needs every system to hold the same test families in each split and gives
-    them identical multiplicities. ``"per-system"`` (View 1) lets each system
-    resample its own native families independently. Checkpoint assignments, when
-    supplied, are shared across systems: seeds are resampled within each
+    ``family_resampling`` chooses what the systems share. ``"shared"`` (View 2,
+    one protected test set) needs every system to hold the same test families in
+    each split and draws split, seed and family multiplicities once, for all
+    systems, so a difference between systems is paired. ``"per-system"`` (View 1,
+    policy-native tests) resamples each system on its own: its splits, its seeds
+    within each checkpoint and its own families are drawn independently of every
+    other system's, from a generator of its own, so a difference between systems
+    is unpaired, as the Welch test of ADR 0004 treats it, and one system's draws
+    do not depend on which other systems are present. Checkpoint assignments,
+    when supplied, are shared across systems: seeds are resampled within each
     checkpoint, run scores are pooled per checkpoint across the sampled splits,
     and checkpoint means are weighted equally. Without assignments, each sampled
     split is weighted equally.
+
+    Limits of the stratified draw. A stratum with a single family is drawn once
+    in every replicate, so it contributes no family variance; the number of such
+    strata per system and split is returned in ``Resampling.singleton_strata``.
+    Because every stratum keeps its size and every class of a family travels
+    with it, ``require_class_support`` cannot fire on these draws; it is kept as
+    an explicit backstop for layouts that bypass the stratification.
     """
     if not systems or metric not in METRICS or resamples < 1 or not 0 < level < 1:
         raise ValueError("invalid systems, metric, resample count or confidence level")
@@ -248,10 +268,13 @@ def resample_metrics(
         ones = {n: np.ones(len(layouts[n][split].families)) for n in names}
         return split, seed_groups[split], ones
 
-    estimates = {name: route_score(name, [whole(s) for s in splits]) for name in names}
-    rng = np.random.default_rng(seed)
-    samples = {name: np.empty(resamples) for name in names}
-    for i in range(resamples):
+    def replicate(rng: np.random.Generator, members: list[str]) -> list:
+        """One replicate: sampled splits, seed picks and family multiplicities.
+
+        ``members`` share every draw, so a single member is resampled alone and
+        the first member's families stand for all (they are identical when
+        shared).
+        """
         drawn = [int(s) for s in rng.choice(splits, size=len(splits))]
         draws = [
             {
@@ -262,16 +285,30 @@ def resample_metrics(
         ]
         parts = []
         for split, picks in zip(drawn, draws, strict=True):
-            if shared:
-                counts = _draw_family_counts(layouts[names[0]][split], rng)
-                per_system = dict.fromkeys(names, counts)
-            else:
-                per_system = {
-                    n: _draw_family_counts(layouts[n][split], rng) for n in names
-                }
-            parts.append((split, picks, per_system))
-        for name in names:
-            samples[name][i] = route_score(name, parts)
+            counts = _draw_family_counts(layouts[members[0]][split], rng)
+            parts.append((split, picks, dict.fromkeys(members, counts)))
+        return parts
+
+    estimates = {name: route_score(name, [whole(s) for s in splits]) for name in names}
+    samples = {name: np.empty(resamples) for name in names}
+    if shared:
+        rng = np.random.default_rng(seed)
+        for i in range(resamples):
+            parts = replicate(rng, names)
+            for name in names:
+                samples[name][i] = route_score(name, parts)
+    else:
+        # Each system owns a generator keyed by the seed and its name, so its
+        # draws are independent of the other systems' and of how many there are.
+        generators = {
+            name: np.random.default_rng([seed, zlib.crc32(name.encode())])
+            for name in names
+        }
+        for i in range(resamples):
+            for name in names:
+                samples[name][i] = route_score(
+                    name, replicate(generators[name], [name])
+                )
     order = np.argsort(
         -np.stack([samples[n] for n in names], axis=1), axis=1, kind="stable"
     )
@@ -286,4 +323,11 @@ def resample_metrics(
         rankings,
         "Nested split, seed and family percentile bootstrap, descriptive; "
         f"class-stratified family draws, {family_resampling} family resampling",
+        {
+            name: {
+                split: sum(len(members) == 1 for members in layout.strata)
+                for split, layout in layouts[name].items()
+            }
+            for name in names
+        },
     )

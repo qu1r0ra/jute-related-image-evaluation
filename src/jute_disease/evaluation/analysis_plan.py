@@ -10,9 +10,10 @@ in all. The plan fixes in advance:
   together;
 * two one-sided equivalence tests (TOST), one each for Pools A and B, at the
   recorded margin ``EQUIVALENCE_MARGIN``;
-* a leakage claim on the strict View 2 subset, framed as a lower bound for
-  Pool C and computed with a paired test, because View 2 is one protected test
-  set shared by the policies;
+* a leakage claim on the strict View 2 subset of each redraw, framed as
+  expected to be conservative for Pool C (an assumption, not a proved bound) and
+  computed with a paired test, because View 2 is one protected test set per pool
+  and redraw, shared by the policies;
 * every other policy contrast as an exploratory row for the forest plot.
 """
 
@@ -88,10 +89,46 @@ SECONDARY_TESTS = (*SECONDARY_CONTRASTS, LEAKAGE_TEST)
 EQUIVALENCE_POOLS = ("A", "B")
 """Pools expected to show no leakage effect, tested for equivalence."""
 
-LOWER_BOUND_FRAMING = (
+EQUIVALENCE_CONTRASTS = tuple(
+    Contrast(pool, 1, IMAGENET_ROUTE, "image-random", "near-duplicate")
+    for pool in EQUIVALENCE_POOLS
+)
+"""The contrasts tested for equivalence, one per pool in ``EQUIVALENCE_POOLS``."""
+
+PRESPECIFIED_CONTRASTS = (
+    PRIMARY_CONTRAST,
+    *SECONDARY_CONTRASTS.values(),
+    *EQUIVALENCE_CONTRASTS,
+)
+"""Every cell-based contrast the plan fixes in advance."""
+
+
+def is_prespecified(contrast: Contrast) -> bool:
+    """Whether the contrast is one of the prespecified tests, in either orientation."""
+    ends = {contrast.minuend, contrast.subtrahend}
+    return any(
+        (contrast.pool, contrast.view, contrast.route)
+        == (fixed.pool, fixed.view, fixed.route)
+        and ends == {fixed.minuend, fixed.subtrahend}
+        for fixed in PRESPECIFIED_CONTRASTS
+    )
+
+
+LEAKAGE_FRAMING = (
     "The strict View 2 subset keeps only images with no near-duplicate partner "
     "across the split, so the estimated image-random minus near-duplicate gap is "
-    "a lower bound on the leakage effect in Pool C, not a point estimate of it."
+    "expected to be conservative for the leakage effect in Pool C. That is an "
+    "assumption, not a proved bound: the estimate is not a lower bound, and the "
+    "interval's lower limit is not that bound either; it is the lower limit of a "
+    "confidence interval for the strict-subset difference."
+)
+
+EQUIVALENCE_NOTE = (
+    "Equivalence is declared only when the whole 90% interval of the split-mean "
+    "difference lies inside the margin, so the test is weak unless the spread of "
+    "the ten split means is small relative to that margin; with a large spread a "
+    "failure to establish equivalence is expected and is not evidence of an "
+    "effect. The Pool A and Pool B tests are unadjusted for the two pools."
 )
 
 
@@ -128,6 +165,11 @@ class ExploratoryRow:
     interval: Interval
     status: str = "exploratory"
 
+    @property
+    def contrast(self) -> Contrast:
+        """The cell group this row compares, for the prespecified-set check."""
+        return Contrast(self.pool, self.view, self.route, self.minuend, self.subtrahend)
+
 
 @dataclass(frozen=True)
 class LeakageClaim:
@@ -139,7 +181,7 @@ class LeakageClaim:
     p_value: float
     interval: Interval
     n_splits: int
-    n_images: int
+    n_images: tuple[int, ...]
     view: int
     framing: str
     method: str
@@ -155,6 +197,7 @@ class AnalysisReport:
     exploratory: tuple[ExploratoryRow, ...]
     power: PowerStatement | None = None
     leakage: LeakageClaim | None = field(default=None)
+    equivalence_note: str = EQUIVALENCE_NOTE
 
 
 def split_mean_scores(by_split: Mapping[int, PredictionSet]) -> tuple[float, ...]:
@@ -192,29 +235,39 @@ def _restrict(system: PredictionSet, keep: Collection[str]) -> PredictionSet:
 def leakage_claim(
     image_random: Mapping[int, PredictionSet],
     near_duplicate: Mapping[int, PredictionSet],
-    strict_images: Collection[str],
+    strict_images: Mapping[int, Collection[str]],
 ) -> LeakageClaim:
     """The leakage claim: View 2 only, on the strict subset, paired by split.
 
-    ``strict_images`` are the image ids of the strict View 2 subset, taken from
-    the policy receipt. Both policies are scored on exactly those images, one
-    macro-F1 per split, and the per-split differences go to a paired t test.
-    Pool C's effect is a lower bound (``LOWER_BOUND_FRAMING``).
+    View 2 is one protected test set per pool and redraw (ADR 0001), so the
+    strict subset belongs to a split: ``strict_images`` maps each split to the
+    image ids of its own strict subset, taken from the policy receipt. Both
+    policies are scored on exactly those images in that split, one macro-F1 per
+    split, and the per-split differences go to a paired t test. The estimate is
+    expected to be conservative for Pool C (``LEAKAGE_FRAMING``).
     """
     if set(image_random) != set(near_duplicate) or len(image_random) < 2:
         raise ValueError("leakage claim needs the same two or more splits per policy")
-    keep = set(strict_images)
-    if not keep:
-        raise ValueError("the strict View 2 subset is empty")
+    if set(strict_images) != set(image_random):
+        raise ValueError(
+            "the strict View 2 subsets must be given for exactly the same splits "
+            "as the policies"
+        )
+    keep = {split: set(images) for split, images in strict_images.items()}
+    for split, images in keep.items():
+        if not images:
+            raise ValueError(f"the strict View 2 subset of split {split} is empty")
     for policy_sets in (image_random, near_duplicate):
         for split, system in policy_sets.items():
-            if not keep <= set(system.image_ids):
+            if not keep[split] <= set(system.image_ids):
                 raise ValueError(
                     f"split {split} lacks images of the strict View 2 subset"
                 )
-    first = split_mean_scores({k: _restrict(s, keep) for k, s in image_random.items()})
+    first = split_mean_scores(
+        {k: _restrict(s, keep[k]) for k, s in image_random.items()}
+    )
     second = split_mean_scores(
-        {k: _restrict(s, keep) for k, s in near_duplicate.items()}
+        {k: _restrict(s, keep[k]) for k, s in near_duplicate.items()}
     )
     result = paired_test(first, second)
     return LeakageClaim(
@@ -224,9 +277,9 @@ def leakage_claim(
         result.p_value,
         result.interval,
         len(first),
-        len(keep),
+        tuple(len(keep[split]) for split in sorted(keep)),
         2,
-        LOWER_BOUND_FRAMING,
+        LEAKAGE_FRAMING,
         "paired t test on strict View 2 split means",
     )
 
@@ -288,7 +341,8 @@ def analyze_split_means(
     }
     secondary[LEAKAGE_TEST] = SecondaryResult(
         LEAKAGE_TEST,
-        "strict View 2 subset: image-random minus near-duplicate (lower bound)",
+        "strict View 2 subset: image-random minus near-duplicate "
+        "(expected to be conservative)",
         leakage.method,
         leakage.estimate,
         leakage.statistic,
@@ -298,10 +352,7 @@ def analyze_split_means(
         leakage.interval,
     )
     equivalence = {}
-    prespecified = {PRIMARY_CONTRAST, *SECONDARY_CONTRASTS.values()}
-    for pool in EQUIVALENCE_POOLS:
-        contrast = Contrast(pool, 1, IMAGENET_ROUTE, "image-random", "near-duplicate")
-        prespecified.add(contrast)
+    for pool, contrast in zip(EQUIVALENCE_POOLS, EQUIVALENCE_CONTRASTS, strict=True):
         equivalence[pool] = equivalence_test(
             _scores(cells, contrast, contrast.minuend),
             _scores(cells, contrast, contrast.subtrahend),
@@ -312,7 +363,7 @@ def analyze_split_means(
         present = [p for p in POLICIES if Cell(pool, view, route, p) in cells]
         for minuend, subtrahend in combinations(present, 2):
             contrast = Contrast(pool, view, route, minuend, subtrahend)
-            if contrast in prespecified:
+            if is_prespecified(contrast):
                 continue
             result = _compare(cells, contrast)
             exploratory.append(

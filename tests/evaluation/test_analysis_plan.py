@@ -8,13 +8,16 @@ import pytest
 from jute_disease.data.policies import POLICIES
 from jute_disease.evaluation import (
     EQUIVALENCE_MARGIN,
+    LEAKAGE_TEST,
     PRIMARY_CONTRAST,
     SECONDARY_TESTS,
     Cell,
+    Contrast,
     LeakageClaim,
     PredictionSet,
     analyze_split_means,
     holm_adjust,
+    is_prespecified,
     leakage_claim,
     paired_test,
     split_mean_scores,
@@ -70,7 +73,19 @@ def _claim() -> LeakageClaim:
     return leakage_claim(
         {k: _quad(PERFECT) for k in range(3)},
         {k: _quad(WEAK[k]) for k in range(3)},
-        {"i0", "i1", "i2", "i3"},
+        {k: {"i0", "i1", "i2", "i3"} for k in range(3)},
+    )
+
+
+def _own_images(split: int, predictions: tuple[str, ...]) -> PredictionSet:
+    """Four images named for the split: each redraw has its own protected test set."""
+    return PredictionSet(
+        ("a", "b"),
+        tuple(f"r{split}-i{i}" for i in range(4)),
+        ("a", "a", "b", "b"),
+        tuple(f"r{split}-f{i}" for i in range(4)),
+        ("s",) * 4,
+        {1: predictions},
     )
 
 
@@ -185,7 +200,7 @@ def test_leakage_claim_uses_only_the_strict_view_2_subset_and_pairs_splits() -> 
             {1: (*strict_predictions, *other_predictions)},
         )
 
-    strict = {"s0", "s1", "s2", "s3"}
+    strict = {k: {"s0", "s1", "s2", "s3"} for k in range(3)}
     perfect = ("a", "a", "b", "b")
     # Near-duplicate policy: split 0 predicts "a" for every strict image
     # (macro-F1 1/3), split 1 gets one "b" wrong (F1 4/5 and 2/3, so 11/15), and
@@ -201,22 +216,82 @@ def test_leakage_claim_uses_only_the_strict_view_2_subset_and_pairs_splits() -> 
     differences = [2 / 3, 1 - 11 / 15, 0.0]
     assert claim.estimate == pytest.approx(sum(differences) / 3)
     assert claim.n_splits == 3
-    assert claim.n_images == 4
+    assert claim.n_images == (4, 4, 4)
     reference = paired_test([1.0, 1.0, 1.0], [1 / 3, 11 / 15, 1.0])
     assert claim.p_value == pytest.approx(reference.p_value)
     assert claim.interval.lower == pytest.approx(reference.interval.lower)
     assert claim.view == 2
-    assert "lower bound" in claim.framing
+
+
+def test_leakage_claim_restricts_each_split_to_its_own_strict_subset() -> None:
+    # ADR 0001: View 2 holds one protected test set per pool and redraw, so the
+    # images differ between splits and so does the strict subset. A single
+    # shared id set would be absent from most splits and would raise.
+    image_random = {k: _own_images(k, PERFECT) for k in range(3)}
+    near_duplicate = {k: _own_images(k, WEAK[k]) for k in range(3)}
+    strict = {
+        0: {f"r0-i{i}" for i in range(4)},
+        1: {f"r1-i{i}" for i in range(4)},
+        # Split 2 keeps only i1 (class a) and i3 (class b); the weak run gets
+        # both right there, so that split's difference is zero.
+        2: {"r2-i1", "r2-i3"},
+    }
+    claim = leakage_claim(image_random, near_duplicate, strict)
+    assert claim.n_images == (4, 4, 2)
+    assert claim.n_splits == 3
+    differences = [2 / 3, 1 - 11 / 15, 0.0]
+    assert claim.estimate == pytest.approx(sum(differences) / 3)
+    reference = paired_test([1.0, 1.0, 1.0], [1 / 3, 11 / 15, 1.0])
+    assert claim.p_value == pytest.approx(reference.p_value)
+
+
+def test_leakage_claim_is_worded_as_expected_to_be_conservative_not_a_bound() -> None:
+    claim = _claim()
+    assert "expected to be conservative" in claim.framing
+    assert "not a lower bound" in claim.framing
+    assert "lower limit" in claim.framing
+    report = analyze_split_means(_cells({}), claim)
+    assert "conservative" in report.secondary[LEAKAGE_TEST].label
+    assert "lower bound" not in report.secondary[LEAKAGE_TEST].label
 
 
 def test_leakage_claim_refuses_a_subset_it_cannot_score() -> None:
     sets = {k: _quad(PERFECT) for k in range(3)}
     weak = {k: _quad(WEAK[k]) for k in range(3)}
+    every = {k: {"i0", "i1", "i2", "i3"} for k in range(3)}
     with pytest.raises(ValueError, match="strict"):
-        leakage_claim(sets, weak, set())
+        leakage_claim(sets, weak, {k: set() for k in range(3)})
     with pytest.raises(ValueError, match="strict"):
-        leakage_claim(sets, weak, {"not-an-image"})
+        leakage_claim(sets, weak, {**every, 1: {"not-an-image"}})
     with pytest.raises(ValueError, match="splits"):
-        leakage_claim(sets, {0: weak[0]}, {"i0"})
+        leakage_claim(sets, {0: weak[0]}, every)
     with pytest.raises(ValueError, match="splits"):
-        leakage_claim({0: sets[0]}, {0: weak[0]}, {"i0", "i1"})
+        leakage_claim({0: sets[0]}, {0: weak[0]}, {0: {"i0", "i1"}})
+    with pytest.raises(ValueError, match="splits"):
+        leakage_claim(sets, weak, {0: {"i0"}, 1: {"i0"}})
+
+
+def test_prespecified_contrasts_are_recognised_in_either_orientation() -> None:
+    assert is_prespecified(PRIMARY_CONTRAST)
+    reversed_primary = Contrast(
+        "C", 1, ROUTE, PRIMARY_CONTRAST.subtrahend, PRIMARY_CONTRAST.minuend
+    )
+    assert is_prespecified(reversed_primary)
+    for pool in ("A", "B"):
+        assert is_prespecified(
+            Contrast(pool, 1, ROUTE, "image-random", "near-duplicate")
+        )
+    assert is_prespecified(Contrast("C", 1, ROUTE, "image-random", "exact-copy"))
+    assert not is_prespecified(Contrast("C", 2, ROUTE, "image-random", "exact-copy"))
+    assert not is_prespecified(
+        Contrast("C", 1, OTHER_ROUTE, "image-random", "near-duplicate")
+    )
+    report = analyze_split_means(_cells({}), _claim())
+    assert not any(is_prespecified(row.contrast) for row in report.exploratory)
+
+
+def test_the_report_carries_the_equivalence_caveats() -> None:
+    note = analyze_split_means(_cells({}), _claim()).equivalence_note
+    assert "not evidence of an effect" in note
+    assert "unadjusted" in note
+    assert "spread" in note

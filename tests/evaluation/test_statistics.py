@@ -209,16 +209,43 @@ def test_equivalence_test_with_known_truth_supports_null_and_rejects_effect() ->
 
 def test_split_power_reproduces_g_power_value_for_unit_spread() -> None:
     # Cohen (1988); G*Power, two-sample t, d = 1, n = 10 per group, two-sided
-    # alpha 0.05: power 0.5619. Ten values +-sqrt(9/10) have sample sd exactly 1.
+    # alpha 0.05: power 0.5620. Ten values +-sqrt(9/10) have sample sd exactly 1.
     z = math.sqrt(9 / 10)
     values = [z, -z] * 5
     statement = split_power(values, values, effect=1.0)
     assert statement.sd_first == pytest.approx(1.0)
     assert statement.sd_second == pytest.approx(1.0)
     assert statement.df == pytest.approx(18.0)
-    assert statement.power == pytest.approx(0.5619, abs=5e-4)
+    assert statement.power == pytest.approx(0.5620, abs=1e-4)
     assert statement.effect == 1.0
     assert statement.alpha == 0.05
+
+
+def test_split_power_reports_power_across_an_interval_for_the_spread() -> None:
+    # The ten validation means give an estimated, not a known, spread. For unit
+    # sample sd and 18 df the 95% chi-square interval is (8.231, 31.526), so the
+    # standard error may be off by sqrt(18/31.526) = 0.756 to sqrt(18/8.231) =
+    # 1.479 times. Power is reported at both ends.
+    z = math.sqrt(9 / 10)
+    values = [z, -z] * 5
+    statement = split_power(values, values, effect=1.0)
+    low, high = statement.sd_factor_interval
+    assert low == pytest.approx(0.756, abs=1e-3)
+    assert high == pytest.approx(1.479, abs=1e-3)
+    worst, best = statement.power_interval
+    assert worst < statement.power < best
+    # Independent check: noncentral t with noncentrality 1 / (se * factor),
+    # se = sqrt(2/10), straight from scipy.
+    from scipy import stats
+
+    se = math.sqrt(2 / 10)
+    critical = stats.t.ppf(0.975, 18)
+    for factor, power in ((high, worst), (low, best)):
+        ncp = 1.0 / (se * factor)
+        expected = stats.nct.sf(critical, 18, ncp) + stats.nct.cdf(-critical, 18, ncp)
+        assert power == pytest.approx(expected, abs=1e-9)
+    assert "known" in statement.note
+    assert "interval" in statement.note
 
 
 def test_split_power_uses_the_two_point_effect_by_default_and_grows_with_effect() -> (

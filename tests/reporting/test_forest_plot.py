@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from jute_disease.evaluation import ExploratoryRow, Interval
+from jute_disease.evaluation import (
+    PRIMARY_CONTRAST,
+    SECONDARY_CONTRASTS,
+    Contrast,
+    ExploratoryRow,
+    Interval,
+)
 from jute_disease.reporting.forest_plot import (
     EXPLORATORY_TITLE,
     forest_figure,
@@ -56,4 +62,40 @@ def test_only_exploratory_rows_can_be_plotted(tmp_path: Path) -> None:
         write_forest_plot([prespecified], tmp_path / "forest.png")
     with pytest.raises(ValueError, match="no rows"):
         write_forest_plot([], tmp_path / "forest.png")
+    assert not (tmp_path / "forest.png").exists()
+
+
+@pytest.mark.parametrize(
+    "contrast",
+    [
+        PRIMARY_CONTRAST,
+        *SECONDARY_CONTRASTS.values(),
+        Contrast("A", 1, PRIMARY_CONTRAST.route, "image-random", "near-duplicate"),
+        Contrast("B", 1, PRIMARY_CONTRAST.route, "image-random", "near-duplicate"),
+    ],
+)
+def test_a_prespecified_contrast_is_refused_whatever_its_status(
+    contrast: Contrast, tmp_path: Path
+) -> None:
+    # The status string is only a label on the row, so it cannot be the guard:
+    # a prespecified test mislabelled "exploratory" must still stay off the plot.
+    row = ExploratoryRow(
+        label=contrast.label,
+        pool=contrast.pool,
+        view=contrast.view,
+        route=contrast.route,
+        minuend=contrast.minuend,
+        subtrahend=contrast.subtrahend,
+        method="welch",
+        estimate=0.04,
+        statistic=5.0,
+        df=18.0,
+        p_value=0.001,
+        interval=Interval(0.04, 0.02, 0.06, 0.95),
+        status="exploratory",
+    )
+    with pytest.raises(ValueError, match="prespecified"):
+        forest_figure([*_rows(), row])
+    with pytest.raises(ValueError, match="prespecified"):
+        write_forest_plot([row], tmp_path / "forest.png")
     assert not (tmp_path / "forest.png").exists()

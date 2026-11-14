@@ -9,17 +9,26 @@ from pathlib import Path
 
 from matplotlib.figure import Figure
 
-from jute_disease.evaluation import ExploratoryRow
+from jute_disease.evaluation import ExploratoryRow, is_prespecified
 
 EXPLORATORY_TITLE = "Exploratory contrasts, not prespecified (macro-F1 difference)"
 
 
 def forest_figure(rows: Sequence[ExploratoryRow]) -> Figure:
-    """Draw one estimate-and-interval line per exploratory row, top to bottom."""
+    """Draw one estimate-and-interval line per exploratory row, top to bottom.
+
+    A row is refused if its contrast is one of the prespecified tests (the
+    primary, the secondaries and the A/B equivalence contrasts), whatever its
+    ``status`` label says: the label is data on the row, the contrast is what it
+    compares.
+    """
     if not rows:
         raise ValueError("no rows to plot")
     if any(row.status != "exploratory" for row in rows):
         raise ValueError("the forest plot holds exploratory rows only")
+    held = [row.label for row in rows if is_prespecified(row.contrast)]
+    if held:
+        raise ValueError(f"prespecified contrasts stay off the forest plot: {held}")
     figure = Figure(figsize=(8, 0.3 * len(rows) + 1.5), layout="constrained")
     axis = figure.subplots()
     positions = list(range(len(rows)))[::-1]

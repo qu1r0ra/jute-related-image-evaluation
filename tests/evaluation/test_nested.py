@@ -98,6 +98,92 @@ def test_per_system_draws_are_independent_across_identical_systems() -> None:
     assert abs(per_system.difference("x", "y").estimate) < 1e-12
 
 
+def _graded_split(correct: int) -> PredictionSet:
+    """Four classes with one family each; the first ``correct`` are predicted right.
+
+    Every stratum is a singleton, so family draws add no noise and accuracy is
+    exactly correct / 4 in every draw: only the split draw can move the score.
+    """
+    classes = ("a", "b", "c", "d")
+    return PredictionSet(
+        classes,
+        tuple(f"i{i}" for i in range(4)),
+        classes,
+        tuple(f"f{i}" for i in range(4)),
+        ("s",) * 4,
+        {1: tuple(c if i < correct else "a" for i, c in enumerate(classes))},
+    )
+
+
+def test_per_system_mode_draws_splits_independently_so_differences_are_unpaired() -> (
+    None
+):
+    # View 1 is unpaired (ADR 0004): two systems that share split IDs must not
+    # share split draws. Identical systems make the point exactly: sharing the
+    # draw gives a difference of zero in every replicate, while independent
+    # draws give a difference whose variance is twice a single system's.
+    splits = {k: _graded_split(k + 1) for k in range(4)}
+    systems = {"x": splits, "y": splits}
+    shared = resample_metrics(
+        systems, "accuracy", 4000, seed=6, family_resampling="shared"
+    )
+    assert np.array_equal(shared.samples["x"], shared.samples["y"])
+    unpaired = resample_metrics(
+        systems, "accuracy", 4000, seed=6, family_resampling="per-system"
+    )
+    assert not np.array_equal(unpaired.samples["x"], unpaired.samples["y"])
+    single = np.var(unpaired.samples["x"])
+    difference = np.var(unpaired.samples["x"] - unpaired.samples["y"])
+    assert difference / single == pytest.approx(2.0, rel=0.2)
+    interval = unpaired.difference("x", "y")
+    assert interval.lower < 0 < interval.upper
+
+
+def test_per_system_mode_keeps_the_estimates_and_marginal_draws_of_each_system() -> (
+    None
+):
+    splits = {k: _graded_split(k + 1) for k in range(4)}
+    alone = resample_metrics(
+        {"x": splits}, "accuracy", 500, seed=8, family_resampling="per-system"
+    )
+    together = resample_metrics(
+        {"x": splits, "y": splits},
+        "accuracy",
+        500,
+        seed=8,
+        family_resampling="per-system",
+    )
+    assert together.estimates["x"] == alone.estimates["x"] == pytest.approx(0.625)
+    # The first system's draws do not depend on how many other systems there are.
+    assert np.array_equal(together.samples["x"], alone.samples["x"])
+
+
+def test_singleton_strata_are_reported_per_split() -> None:
+    # Class "a" has three single-image families (one stratum of three), class
+    # "b" has one family (a singleton stratum) and one family carries both
+    # labels (a second singleton stratum). A singleton stratum contributes no
+    # family variance, because its only family is drawn once in every replicate.
+    system = PredictionSet(
+        ("a", "b"),
+        ("i0", "i1", "i2", "i3", "i4", "i5"),
+        ("a", "a", "a", "b", "a", "b"),
+        ("f0", "f1", "f2", "f3", "mixed", "mixed"),
+        ("s",) * 6,
+        {1: ("a", "a", "a", "b", "a", "b")},
+    )
+    lone = _graded_split(2)
+    result = resample_metrics(
+        {"s": {0: system}, "t": {0: system}},
+        "accuracy",
+        20,
+        seed=1,
+        family_resampling="shared",
+    )
+    assert result.singleton_strata == {"s": {0: 2}, "t": {0: 2}}
+    graded = resample_metrics({"s": {0: lone, 1: lone}}, "accuracy", 20, seed=1)
+    assert graded.singleton_strata == {"s": {0: 4, 1: 4}}
+
+
 def test_class_stratified_draws_never_change_the_macro_f1_estimand() -> None:
     # Class "b" has one family and is always mispredicted; class "a" has many
     # families and is always right. Macro-F1 over the two supported classes is

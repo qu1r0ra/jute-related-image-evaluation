@@ -521,14 +521,26 @@ def _evaluate_aggregate(args: argparse.Namespace) -> None:
 
 
 def _evaluate_bootstrap_coverage(args: argparse.Namespace) -> None:
-    from jute_disease.evaluation import simulate_coverage
+    from jute_disease.evaluation import coverage_grid, simulate_coverage
 
     try:
-        report = asdict(
-            simulate_coverage(
-                replicates=args.replicates, resamples=args.resamples, seed=args.seed
+        if args.grid:
+            report = [
+                asdict(item)
+                for item in coverage_grid(
+                    replicates=args.replicates,
+                    resamples=args.resamples,
+                    seed=args.seed,
+                )
+            ]
+        else:
+            report = asdict(
+                simulate_coverage(
+                    replicates=args.replicates,
+                    resamples=args.resamples,
+                    seed=args.seed,
+                )
             )
-        )
     except ValueError as error:
         raise SystemExit(f"bootstrap coverage blocked: {error}") from error
     if args.output is not None:
@@ -547,6 +559,12 @@ def _add_bootstrap_coverage(actions: argparse._SubParsersAction) -> None:
     coverage.add_argument("--replicates", type=int, default=200)
     coverage.add_argument("--resamples", type=int, default=200)
     coverage.add_argument("--seed", type=int, default=42)
+    coverage.add_argument(
+        "--grid",
+        action="store_true",
+        help="Report coverage over family count and split spread, for a mean "
+        "and a two-system difference, instead of one configuration.",
+    )
     coverage.add_argument("--output", type=Path)
     coverage.set_defaults(run=_evaluate_bootstrap_coverage)
 
