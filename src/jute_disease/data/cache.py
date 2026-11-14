@@ -21,10 +21,12 @@ import hashlib
 import io
 import json
 import os
+import sys
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -37,6 +39,9 @@ REPORT_FILE = "cache_report.json"
 DECISION_FILE = "cache_decision.json"
 INDEX_FILE = "cache_index.json"
 INDEX_VERSION = 1
+LOCK_FILE = ".cache_index.lock"
+LOCK_TIMEOUT_SECONDS = 600.0
+LOCK_POLL_SECONDS = 0.05
 REPLACE_ATTEMPTS = 8
 DEFAULT_BUDGET_SECONDS = 15 * 60
 DEFAULT_MAX_BYTES = 20 * 1024**3
@@ -261,28 +266,84 @@ def build_image_cache(
     return report
 
 
+if sys.platform == "win32":
+    import msvcrt
+
+    def _try_lock(descriptor: int) -> None:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+
+    def _unlock(descriptor: int) -> None:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+
+else:
+    import fcntl
+
+    def _try_lock(descriptor: int) -> None:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def _unlock(descriptor: int) -> None:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+
+
+@contextmanager
+def _index_lock(root: Path, timeout: float = LOCK_TIMEOUT_SECONDS) -> Iterator[None]:
+    """Hold the cross-process lock on the index of ``root``.
+
+    The lock is an advisory lock on a sidecar file, so it is released when the
+    holder exits, however it exits. Threads, processes and builders of any
+    manifest all queue on it.
+
+    Raises:
+        ImageCacheError: the lock was not free within ``timeout`` seconds.
+    """
+    deadline = time.monotonic() + timeout
+    with (Path(root) / LOCK_FILE).open("ab") as handle:
+        descriptor = handle.fileno()
+        while True:
+            try:
+                _try_lock(descriptor)
+                break
+            except OSError as error:
+                if time.monotonic() >= deadline:
+                    raise ImageCacheError(
+                        f"Timed out after {timeout:g}s waiting for another builder "
+                        f"to finish publishing the index under {root}"
+                    ) from error
+                time.sleep(LOCK_POLL_SECONDS)
+        try:
+            yield
+        finally:
+            _unlock(descriptor)
+
+
 def _publish_index(
     root: Path, spec: PreprocessingSpec, rows: dict[str, dict[str, object]]
 ) -> str:
     """Merge ``rows`` into the index of ``root`` and publish it atomically.
 
     Rows are only ever added or refreshed, so builders of different manifests
-    share one cache; builders of the same manifest write identical bytes.
+    share one cache. The read, the merge and the replace happen under one lock:
+    without it two builders read the same index and the later replace erases the
+    other's additions, though both report success.
     """
-    merged = {**_read_index(root, spec), **rows}
-    text = (
-        json.dumps(
-            {
-                "version": INDEX_VERSION,
-                "spec_digest": spec.digest(),
-                "images": merged,
-            },
-            indent=1,
-            sort_keys=True,
+    with _index_lock(root):
+        _INDEX_MEMO.pop(Path(root) / INDEX_FILE, None)
+        merged = {**_read_index(root, spec), **rows}
+        text = (
+            json.dumps(
+                {
+                    "version": INDEX_VERSION,
+                    "spec_digest": spec.digest(),
+                    "images": merged,
+                },
+                indent=1,
+                sort_keys=True,
+            )
+            + "\n"
         )
-        + "\n"
-    )
-    _write_text_atomic(root / INDEX_FILE, text)
+        _write_text_atomic(root / INDEX_FILE, text)
     return _sha256_bytes(text.encode("utf-8"))
 
 

@@ -24,7 +24,7 @@ from jute_disease.data import (
     is_cache_complete,
     verify_image_cache,
 )
-from jute_disease.data.cache import downsize
+from jute_disease.data.cache import _index_lock, downsize
 
 
 def _cache(
@@ -169,6 +169,15 @@ def test_concurrent_builders_leave_one_valid_cache(
         == identity
     )
     assert {report.index_sha256 for report in reports} == {reports[0].index_sha256}
+
+
+def test_index_lock_excludes_a_second_holder_until_released(tmp_path: Path) -> None:
+    with _index_lock(tmp_path):
+        with pytest.raises(ImageCacheError, match="Timed out"):
+            with _index_lock(tmp_path, timeout=0.2):
+                pass
+    with _index_lock(tmp_path, timeout=0.2):
+        pass
 
 
 def test_reports_are_published_atomically(
