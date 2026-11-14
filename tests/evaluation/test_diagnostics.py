@@ -16,6 +16,7 @@ from jute_disease.evaluation import (
     FreezeRecordError,
     RunEntry,
     aggregate_leaf_scores,
+    class_covering_sample,
     diagnostic_configuration,
     embedding_coordinates,
     evaluate_image_diagnostics,
@@ -288,17 +289,182 @@ def test_sanity_check_results_refuse_unaligned_inputs_and_unhashed_checkpoints()
         )
 
 
-def test_leaf_attention_gate_withholds_unless_all_checks_pass() -> None:
-    assert not leaf_score_gate(
-        parameter_randomization=True,
-        label_randomization=False,
-        mask_audit_passed=True,
-    )["reported"]
-    assert leaf_score_gate(
-        parameter_randomization=True,
-        label_randomization=True,
-        mask_audit_passed=True,
-    )["reported"]
+class _TinyBackbone(nn.Module):
+    """A timm-shaped backbone with BatchNorm, nested blocks and a conv head."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv_stem = nn.Conv2d(3, 4, 3, padding=1)
+        self.bn1 = nn.BatchNorm2d(4)
+        self.blocks = nn.Sequential(
+            nn.Sequential(nn.Conv2d(4, 4, 3, padding=1), nn.BatchNorm2d(4)),
+            nn.Sequential(nn.Conv2d(4, 4, 3, padding=1)),
+        )
+        self.conv_head = nn.Conv2d(4, 6, 1)
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        hidden = self.blocks(torch.relu(self.bn1(self.conv_stem(images))))
+        return torch.relu(self.conv_head(hidden)).mean(dim=(2, 3))
+
+
+class _TinyExtractor(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.backbone = _TinyBackbone()
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        return self.backbone(images)
+
+
+class _TinyClassifier(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.feature_extractor = _TinyExtractor()
+        self.classifier = nn.Linear(6, 3)
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        return self.classifier(self.feature_extractor(images))
+
+
+def _sanity_inputs() -> tuple[nn.Module, torch.Tensor, list[int], list[int]]:
+    torch.manual_seed(5)
+    model = _TinyClassifier().eval()
+    images = torch.rand((6, 3, 8, 8), generator=torch.Generator().manual_seed(1))
+    with torch.no_grad():
+        targets = [int(row.argmax()) for row in model(images)]
+    return model, images, targets, [0, 1, 2, 0, 1, 2]
+
+
+def _run_sanity(
+    inputs: tuple[nn.Module, torch.Tensor, list[int], list[int]],
+) -> dict[str, object]:
+    model, images, targets, labels = inputs
+    return sanity_check_results(
+        model,
+        images,
+        targets,
+        labels,
+        checkpoint_sha256="a" * 64,
+        image_ids=[f"img-{index}" for index in range(len(targets))],
+    )
+
+
+def test_sanity_checks_give_identical_results_for_identical_inputs() -> None:
+    inputs = _sanity_inputs()
+    assert _run_sanity(inputs) == _run_sanity(inputs)
+
+
+def test_sanity_checks_leave_the_global_random_state_and_model_untouched() -> None:
+    inputs = _sanity_inputs()
+    before = {key: value.clone() for key, value in inputs[0].state_dict().items()}
+    torch.manual_seed(123)
+    expected = torch.rand(3)
+    torch.manual_seed(123)
+    _run_sanity(inputs)
+    assert torch.equal(torch.rand(3), expected)
+    for key, value in inputs[0].state_dict().items():
+        assert torch.equal(value, before[key])
+
+
+def test_a_constant_randomized_map_counts_as_changed_not_undefined() -> None:
+    reference = np.random.default_rng(0).random((2, 4, 4))
+    changed = parameter_randomization_correlations(
+        reference, {"stage": np.zeros_like(reference)}
+    )
+    assert changed["stage"] == [0.0, 0.0]
+    undefined = parameter_randomization_correlations(
+        np.zeros_like(reference), {"stage": reference}
+    )
+    assert undefined["stage"] == [None, None]
+
+
+def test_an_inverted_map_is_as_correlated_as_an_identical_one() -> None:
+    reference = np.random.default_rng(0).random((2, 4, 4))
+    correlations = parameter_randomization_correlations(
+        reference, {"inverted": -reference, "same": reference.copy()}
+    )
+    assert correlations["inverted"] == pytest.approx([1.0, 1.0])
+    assert correlations["same"] == pytest.approx([1.0, 1.0])
+
+
+def test_parameter_randomization_reinitialises_each_layer_by_default() -> None:
+    result = _run_sanity(_sanity_inputs())
+    rule = result["pass_rule"]
+    assert rule["parameter_randomization_initialisation"] == (
+        "each layer's default reset_parameters, seeded"
+    )
+    medians = result["parameter_randomization"]["evidence"]["stage_median_correlation"]
+    assert len(medians) == 6
+    assert len(set(medians.values())) > 2
+
+
+def test_label_randomization_is_reported_against_a_true_label_control() -> None:
+    result = _run_sanity(_sanity_inputs())
+    label = result["label_randomization"]
+    assert label["status"] == "descriptive"
+    evidence = label["evidence"]
+    assert evidence["gates_leaf_score"] is False
+    assert evidence["median_correlation"] is not None
+    assert evidence["control_median_correlation"] is not None
+    assert evidence["refit_steps"] == 100
+    assert evidence["control"] == "same seed, steps and sample, refit on true labels"
+    assert result["pass_rule"]["label_randomization_gates_leaf_score"] is False
+
+
+def test_pass_rule_records_the_prespecified_heuristic_thresholds() -> None:
+    rule = _run_sanity(_sanity_inputs())["pass_rule"]
+    assert rule["fixed_in_code"] is True
+    assert rule["statistic"] == "median absolute Spearman correlation"
+    assert rule["max_median_correlation"] == 0.5
+    assert rule["min_defined_share"] == 0.5
+    assert rule["sample_size"] == 60
+    assert rule["prespecified_heuristic"] is True
+    assert rule["significance_test"] is False
+    assert rule["applies_to"] == "the sampled images only"
+
+
+def test_sanity_checks_refuse_a_single_class_sample() -> None:
+    model, images, targets, _ = _sanity_inputs()
+    with pytest.raises(ValueError, match="two classes"):
+        sanity_check_results(
+            model,
+            images,
+            targets,
+            [1] * len(targets),
+            checkpoint_sha256="a" * 64,
+            image_ids=[f"img-{index}" for index in range(len(targets))],
+        )
+
+
+def test_class_covering_sample_keeps_every_class_and_is_deterministic() -> None:
+    ids = [f"img-{index:03d}" for index in range(100)]
+    labels = ["a"] * 90 + ["b"] * 8 + ["c"] * 2
+    sample = class_covering_sample(ids, labels, 12, seed=0)
+    assert len(sample) == 12
+    assert sample == class_covering_sample(ids, labels, 12, seed=0)
+    assert {labels[ids.index(image_id)] for image_id in sample} == {"a", "b", "c"}
+    assert class_covering_sample(ids, labels, 500, seed=0) == tuple(sorted(ids))
+    capped = class_covering_sample(ids, labels, 2, seed=0)
+    assert len(capped) == 2
+
+
+def test_class_covering_sample_rejects_invalid_inputs() -> None:
+    with pytest.raises(ValueError, match="invalid"):
+        class_covering_sample(["a"], ["x", "y"], 1, seed=0)
+    with pytest.raises(ValueError, match="invalid"):
+        class_covering_sample(["a"], ["x"], 0, seed=0)
+
+
+def test_leaf_attention_gate_withholds_unless_both_gating_checks_pass() -> None:
+    assert not leaf_score_gate(parameter_randomization=False, mask_audit_passed=True)[
+        "reported"
+    ]
+    assert not leaf_score_gate(parameter_randomization=True, mask_audit_passed=False)[
+        "reported"
+    ]
+    gate = leaf_score_gate(parameter_randomization=True, mask_audit_passed=True)
+    assert gate["reported"]
+    assert "label_randomization" not in gate["checks"]
 
 
 def test_export_records_command_configuration_and_source_hash(tmp_path: Path) -> None:

@@ -343,8 +343,19 @@ def test_sanity_checks_are_computed_and_logged(
     selected = body["selected_fit_id"]
     assert selected in env.primary_ids
     assert body["parameter_randomization"]["status"] in ("pass", "fail")
-    assert body["label_randomization"]["status"] in ("pass", "fail")
+    assert body["label_randomization"]["status"] == "descriptive"
+    assert body["label_randomization"]["evidence"]["control_median_correlation"] >= 0
     assert body["pass_rule"]["fixed_in_code"] is True
+    assert body["pass_rule"]["sample_size"] == 60
+    assert body["pass_rule"]["prespecified_heuristic"] is True
+    sample = body["sample"]
+    assert sample["requested_size"] == 60
+    assert sample["size"] == len(
+        body["parameter_randomization"]["evidence"]["sample_image_ids"]
+    )
+    assert sample["classes_missing_from_sample"] == []
+    assert sample["classes_without_test_images"] == []
+    assert all(count >= 1 for count in sample["class_counts"].values())
     # The status follows from the computed correlations, not from an input.
     stages = body["parameter_randomization"]["evidence"]["stage_median_correlation"]
     assert stages

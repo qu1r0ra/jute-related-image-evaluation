@@ -82,9 +82,14 @@ options. `--assignment-table` must be the table whose digest is recorded in
 every fit receipt. The inputs are outputs of two logged commands, run first
 under the same freeze record:
 
-- `jute-disease evaluate sanity-checks` computes the parameter- and
-  label-randomization checks on the validation-median primary-cell checkpoint
-  with a pass rule fixed in code.
+- `jute-disease evaluate sanity-checks` computes parameter randomization, plus a
+  head-refit label-randomization variant (not Adebayo data-randomization
+  retraining), on the validation-median primary-cell checkpoint. The pass rule is
+  fixed in code and its thresholds (60 sampled images, median absolute Spearman
+  correlation below 0.5, at least half defined) are prespecified heuristics, not a
+  significance test; they apply to the sampled images only. The label variant is
+  descriptive, reported beside a true-label control refit, and does not gate the
+  leaf score.
 - `jute-disease evaluate scene-tags` computes a scene tag and frame leaf share
   for every test image with the thresholds and backend of the frozen mask audit.
 

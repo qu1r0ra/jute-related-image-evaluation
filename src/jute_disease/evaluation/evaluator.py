@@ -389,7 +389,6 @@ def evaluate_image_diagnostics(
     mask_audit_passed = bool(authorization.body.get("mask_audit", {}).get("passed"))
     gate = leaf_score_gate(
         parameter_randomization=checks["parameter_randomization"]["status"] == "pass",
-        label_randomization=checks["label_randomization"]["status"] == "pass",
         mask_audit_passed=mask_audit_passed,
     )
     from jute_disease.reporting import compute_training_costs

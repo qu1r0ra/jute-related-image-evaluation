@@ -14,12 +14,12 @@ import io
 import json
 import os
 import tempfile
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import torch
 from PIL import Image
 
@@ -34,7 +34,7 @@ from jute_disease.data import (
     require_colour_threshold,
 )
 from jute_disease.data.manifest import load_complete_manifest
-from jute_disease.evaluation.breakdowns import stratified_sample
+from jute_disease.evaluation.breakdowns import class_covering_sample
 from jute_disease.evaluation.diagnostics import (
     GRADCAM_ANALYSIS_ID,
     SANITY_SAMPLE_SIZE,
@@ -305,7 +305,7 @@ def compute_sanity_checks(
     additional_logs: Sequence[Path] = (),
     model_name: str = "mobilenetv2_100.ra_in1k",
 ) -> BoundOutput:
-    """Compute both Grad-CAM sanity checks on the selected run and log them.
+    """Compute the Grad-CAM sanity checks on the selected run and log them.
 
     The intent row is appended before any test image is opened. The pass rule is
     fixed in :mod:`jute_disease.evaluation.diagnostics`; nothing here takes a
@@ -334,13 +334,34 @@ def compute_sanity_checks(
     )
     manifest = load_complete_manifest(target_dir)
     entries = tuple(sorted(manifest.partition("test"), key=lambda e: e.image_id))
-    sample_ids = stratified_sample(
+    sample_ids = class_covering_sample(
         [e.image_id for e in entries],
         [e.label for e in entries],
         SANITY_SAMPLE_SIZE,
         SANITY_SEED,
     )
     by_id = {entry.image_id: entry for entry in entries}
+    sample_counts = Counter(by_id[image_id].label for image_id in sample_ids)
+    available_counts = Counter(entry.label for entry in entries)
+    sample_evidence = {
+        "requested_size": SANITY_SAMPLE_SIZE,
+        "size": len(sample_ids),
+        "seed": SANITY_SEED,
+        "strategy": "at least one image per class, rest class-proportional",
+        "class_counts": {
+            label: sample_counts.get(label, 0) for label in manifest.labels
+        },
+        "available_class_counts": {
+            label: available_counts.get(label, 0) for label in manifest.labels
+        },
+        "classes_missing_from_sample": [
+            label for label in manifest.labels if sample_counts.get(label, 0) == 0
+        ],
+        "classes_without_test_images": [
+            label for label in manifest.labels if available_counts.get(label, 0) == 0
+        ],
+        "sample_shortfall": max(0, SANITY_SAMPLE_SIZE - len(entries)),
+    }
     dataset = ManifestDataset(manifest, "test", image_root)
     from jute_disease.models.dl import Classifier, TimmBackbone, read_checkpoint_state
 
@@ -356,13 +377,12 @@ def compute_sanity_checks(
     with torch.no_grad():
         targets = [int(row.argmax().item()) for row in model(images)]
     class_index = {label: index for index, label in enumerate(manifest.labels)}
-    truth = np.asarray([class_index[by_id[i].label] for i in sample_ids])
-    permuted = np.random.default_rng(SANITY_SEED).permutation(truth)
+    truth = [class_index[by_id[i].label] for i in sample_ids]
     results = sanity_check_results(
         model,
         images,
         targets,
-        [int(value) for value in permuted],
+        truth,
         checkpoint_sha256=str(selected.checkpoint_sha256),
         image_ids=sample_ids,
     )
@@ -374,6 +394,7 @@ def compute_sanity_checks(
         "checkpoint_sha256": selected.checkpoint_sha256,
         "assignment_table_sha256": assignment["sha256"],
         "sample_image_ids_sha256": _ids_digest(sample_ids),
+        "sample": sample_evidence,
         **results,
     }
     digest = write_bound_output(

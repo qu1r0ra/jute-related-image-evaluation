@@ -44,12 +44,16 @@ UMAP_NEIGHBORS = (15, 50)
 CAM_SAMPLE_PER_CLASS = 8
 CAM_SAMPLE_SEED = 0
 OUTPUT_MANIFEST = "output-manifest.json"
-SANITY_SAMPLE_SIZE = 8
+# The three sanity-check constants below (sample size, cutoff, defined share) are
+# prespecified heuristic thresholds, not the output of a significance test. A
+# verdict describes the sampled images only and does not generalise past them.
+SANITY_SAMPLE_SIZE = 60
 SANITY_SEED = 0
 SANITY_MAX_MEDIAN_CORRELATION = 0.5
 SANITY_MIN_DEFINED_SHARE = 0.5
 SANITY_REFIT_STEPS = 100
 SANITY_REFIT_LR = 0.1
+SANITY_PERMUTATION_ATTEMPTS = 100
 
 
 def diagnostic_configuration() -> dict[str, Any]:
@@ -545,7 +549,13 @@ def letterbox_leaf_mask(mask: np.ndarray, content_mask: np.ndarray) -> np.ndarra
 def parameter_randomization_correlations(
     reference: np.ndarray, randomized: Mapping[str, np.ndarray]
 ) -> dict[str, list[float | None]]:
-    """Record map sensitivity at each parameter-randomization stage."""
+    """Record absolute Spearman correlation with the reference at each stage.
+
+    A constant reference map has no rank order, so its correlation is ``None``.
+    A constant randomized map against a varying reference is evidence that the map
+    changed, so it scores 0. The sign is dropped so an inverted map is as
+    correlated as an identical one.
+    """
     baseline = np.asarray(reference, dtype=np.float64)
     if baseline.ndim != 3:
         raise ValueError("reference CAMs must have shape (images, height, width)")
@@ -560,10 +570,13 @@ def parameter_randomization_correlations(
         for before, after in zip(baseline, values, strict=True):
             if not np.isfinite(before).all() or not np.isfinite(after).all():
                 raise ValueError("CAM maps must contain finite values")
-            if np.ptp(before) == 0 or np.ptp(after) == 0:
+            if np.ptp(before) == 0:
                 correlations.append(None)
                 continue
-            correlation = float(spearmanr(before.ravel(), after.ravel()).statistic)
+            if np.ptp(after) == 0:
+                correlations.append(0.0)
+                continue
+            correlation = abs(float(spearmanr(before.ravel(), after.ravel()).statistic))
             correlations.append(correlation if np.isfinite(correlation) else None)
         result[stage] = correlations
     return result
@@ -615,66 +628,131 @@ def _sanity_outcome(
     }
 
 
+def _reset_to_default_initialisation(module: nn.Module) -> None:
+    """Re-initialise every parameterised layer with its own framework default."""
+    for layer in module.modules():
+        if next(layer.parameters(recurse=False), None) is None:
+            continue
+        reset = getattr(layer, "reset_parameters", None)
+        if not callable(reset):
+            raise ValueError(
+                f"cannot re-initialise {type(layer).__name__}: no reset_parameters"
+            )
+        reset()
+
+
+def _permuted_labels(labels: Sequence[int], seed: int) -> list[int]:
+    """A seeded permutation of the true labels that differs from them."""
+    values = np.asarray(labels, dtype=np.int64)
+    rng = np.random.default_rng(seed)
+    for _ in range(SANITY_PERMUTATION_ATTEMPTS):
+        candidate = rng.permutation(values)
+        if (candidate != values).any():
+            return [int(value) for value in candidate]
+    raise ValueError("could not permute the labels into a different assignment")
+
+
+def _head_refit_correlations(
+    model: nn.Module,
+    images: torch.Tensor,
+    features: torch.Tensor,
+    labels: Sequence[int],
+    targets: Sequence[int],
+    reference: np.ndarray,
+    seed: int,
+) -> list[float | None]:
+    """Refit only the classifier on ``labels``; score its maps against the original."""
+    refit = copy.deepcopy(model).eval()
+    head = refit.classifier
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(seed)
+        head.reset_parameters()
+    optimizer = torch.optim.Adam(head.parameters(), lr=SANITY_REFIT_LR)
+    target_labels = torch.as_tensor(list(labels), dtype=torch.long)
+    for _ in range(SANITY_REFIT_STEPS):
+        optimizer.zero_grad()
+        loss = torch.nn.functional.cross_entropy(head(features), target_labels)
+        loss.backward()
+        optimizer.step()
+    maps = gradcam_maps(refit, images, targets)
+    return parameter_randomization_correlations(reference, {"head-refit": maps})[
+        "head-refit"
+    ]
+
+
 def sanity_check_results(
     model: nn.Module,
     images: torch.Tensor,
     targets: Sequence[int],
-    permuted_targets: Sequence[int],
+    true_labels: Sequence[int],
     *,
     checkpoint_sha256: str,
     image_ids: Sequence[str],
     seed: int = SANITY_SEED,
 ) -> dict[str, Any]:
-    """Compute both Adebayo checks, with a pass rule fixed here and not supplied.
+    """Compute the Grad-CAM sanity checks, with a pass rule fixed here.
 
-    Parameter randomization re-draws the weights of the classifier and then of
-    each backbone stage from the top down and compares each stage's maps with the
-    original maps. Label randomization refits only the classifier on permuted
-    labels over the checkpoint's own penultimate features (a head-refit variant
-    of the full retraining the original method describes) and compares maps.
-    A check passes when the median Spearman correlation with the original maps
-    at the final stage is below the cutoff and enough correlations are defined.
+    Parameter randomization (Adebayo et al.) re-initialises the classifier and then
+    each backbone stage from the top down, every layer with its own default
+    initialisation drawn from a seeded generator, and compares each stage's maps
+    with the original maps. It passes when the median absolute Spearman
+    correlation at the final stage is below the cutoff and enough correlations are
+    defined. A constant randomized map counts as changed; a constant reference map
+    is undefined.
+
+    The label-randomization variant refits only the classifier on a seeded
+    permutation of ``true_labels`` over the checkpoint's own penultimate features.
+    It is not the data-randomization retraining of the original method. A control
+    refit on the true labels, with the same seed, steps and sample, shows how far
+    the maps move without any label randomization. On the synthetic fixtures the
+    two cannot be told apart, so this check is descriptive and never opens or
+    closes the leaf-score gate.
+
+    The three thresholds (sample size, correlation cutoff, defined share) are
+    prespecified heuristics, not a significance test, and apply only to the
+    sampled images. Every random draw is seeded, so identical inputs give
+    identical results and the global random state is left as it was.
     """
-    if len(targets) != images.shape[0] or len(permuted_targets) != len(targets):
-        raise ValueError("images, targets and permuted targets must align")
+    if len(targets) != images.shape[0] or len(true_labels) != len(targets):
+        raise ValueError("images, targets and true labels must align")
     if len(checkpoint_sha256) != 64 or any(
         char not in "0123456789abcdef" for char in checkpoint_sha256
     ):
         raise ValueError("sanity checks need the selected checkpoint SHA-256")
+    if len(set(true_labels)) < 2:
+        raise ValueError("label randomization needs at least two classes in the sample")
     reference = gradcam_maps(model, images, targets)
-    generator = torch.Generator().manual_seed(seed)
 
     randomized = copy.deepcopy(model).eval()
     stage_maps: dict[str, np.ndarray] = {}
-    for name, modules in randomization_stages(randomized):
-        for module in modules:
-            for parameter in module.parameters():
-                parameter.data = (
-                    torch.randn(parameter.shape, generator=generator) * 0.05
-                ).to(parameter.dtype)
-        stage_maps[name] = gradcam_maps(randomized, images, targets)
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(seed)
+        for name, modules in randomization_stages(randomized):
+            for module in modules:
+                _reset_to_default_initialisation(module)
+            stage_maps[name] = gradcam_maps(randomized, images, targets)
     by_stage = parameter_randomization_correlations(reference, stage_maps)
     final_stage = next(reversed(by_stage))
     stage_median = {
         name: _median_defined(values)[0] for name, values in by_stage.items()
     }
 
-    refit = copy.deepcopy(model).eval()
     with torch.no_grad():
-        features = penultimate_features(refit, images)
-    head = refit.classifier
-    head.reset_parameters()
-    optimizer = torch.optim.Adam(head.parameters(), lr=SANITY_REFIT_LR)
-    labels = torch.as_tensor(list(permuted_targets), dtype=torch.long)
-    for _ in range(SANITY_REFIT_STEPS):
-        optimizer.zero_grad()
-        loss = torch.nn.functional.cross_entropy(head(features), labels)
-        loss.backward()
-        optimizer.step()
-    label_maps = gradcam_maps(refit, images, targets)
-    label_correlations = parameter_randomization_correlations(
-        reference, {"head-refit": label_maps}
-    )["head-refit"]
+        features = penultimate_features(model, images)
+    permuted = _head_refit_correlations(
+        model,
+        images,
+        features,
+        _permuted_labels(true_labels, seed),
+        targets,
+        reference,
+        seed,
+    )
+    control = _head_refit_correlations(
+        model, images, features, true_labels, targets, reference, seed
+    )
+    permuted_median, permuted_share = _median_defined(permuted)
+    control_median, control_share = _median_defined(control)
 
     common = {
         "checkpoint_sha256": checkpoint_sha256,
@@ -682,14 +760,25 @@ def sanity_check_results(
         "seed": seed,
     }
     return {
-        "method": "Adebayo parameter-randomization and label-randomization checks",
+        "method": (
+            "Adebayo parameter randomization, plus a head-refit label-randomization "
+            "variant (not Adebayo data-randomization retraining)"
+        ),
         "pass_rule": {
             "fixed_in_code": True,
-            "statistic": "median Spearman correlation with the original maps",
+            "statistic": "median absolute Spearman correlation",
             "max_median_correlation": SANITY_MAX_MEDIAN_CORRELATION,
             "min_defined_share": SANITY_MIN_DEFINED_SHARE,
+            "sample_size": SANITY_SAMPLE_SIZE,
+            "prespecified_heuristic": True,
+            "significance_test": False,
+            "applies_to": "the sampled images only",
             "parameter_randomization_stage": final_stage,
+            "parameter_randomization_initialisation": (
+                "each layer's default reset_parameters, seeded"
+            ),
             "label_randomization_variant": "classifier refit on permuted labels",
+            "label_randomization_gates_leaf_score": False,
         },
         "parameter_randomization": _sanity_outcome(
             by_stage[final_stage],
@@ -699,14 +788,28 @@ def sanity_check_results(
                 "final_stage": final_stage,
             },
         ),
-        "label_randomization": _sanity_outcome(
-            label_correlations,
-            {
+        "label_randomization": {
+            "status": "descriptive",
+            "evidence": {
                 **common,
                 "refit_steps": SANITY_REFIT_STEPS,
                 "refit_learning_rate": SANITY_REFIT_LR,
+                "median_correlation": permuted_median,
+                "defined_share": permuted_share,
+                "permuted_correlations": permuted,
+                "control": "same seed, steps and sample, refit on true labels",
+                "control_median_correlation": control_median,
+                "control_defined_share": control_share,
+                "control_correlations": control,
+                "gates_leaf_score": False,
+                "reason": (
+                    "on synthetic fixtures a head refit on the true labels moved the "
+                    "maps as much as a refit on permuted labels, so this variant "
+                    "cannot separate label dependence from refit movement; it is "
+                    "reported, not gated"
+                ),
             },
-        ),
+        },
     }
 
 
@@ -773,20 +876,22 @@ def aggregate_leaf_scores(
 
 
 def leaf_score_gate(
-    *, parameter_randomization: bool, label_randomization: bool, mask_audit_passed: bool
+    *, parameter_randomization: bool, mask_audit_passed: bool
 ) -> dict[str, Any]:
-    """Report whether the protocol permits a leaf-score summary."""
-    allowed = parameter_randomization and label_randomization and mask_audit_passed
+    """Report whether the protocol permits a leaf-score summary.
+
+    The head-refit label-randomization variant is descriptive and does not gate.
+    """
+    allowed = parameter_randomization and mask_audit_passed
     return {
         "reported": allowed,
         "checks": {
             "parameter_randomization": parameter_randomization,
-            "label_randomization": label_randomization,
             "adr_0002_mask_audit": mask_audit_passed,
         },
         "reason": None
         if allowed
-        else "withheld until both sanity checks and mask audit pass",
+        else "withheld until parameter randomization and the mask audit pass",
     }
 
 

@@ -148,3 +148,39 @@ def stratified_sample(
         )
         chosen.extend(ranked[: quota[label]])
     return tuple(sorted(chosen))
+
+
+def class_covering_sample(
+    image_ids: Sequence[str], labels: Sequence[str], size: int, seed: int
+) -> tuple[str, ...]:
+    """Sample ``size`` images with at least one per class, ranked by a seeded hash.
+
+    One image per class is reserved first, so no class is dropped while the sample
+    has room. The rest is filled class-proportionally. When ``size`` is smaller than
+    the number of classes, only the first ``size`` classes by hash rank are covered;
+    the caller reports which classes are missing.
+    """
+    if len(image_ids) != len(labels) or size < 1:
+        raise ValueError("invalid sample inputs")
+    if size >= len(image_ids):
+        return tuple(sorted(image_ids))
+
+    def rank(image_id: str) -> str:
+        return hashlib.sha256(f"{seed}:{image_id}".encode()).hexdigest()
+
+    by_class: dict[str, list[str]] = defaultdict(list)
+    for image_id, label in zip(image_ids, labels, strict=True):
+        by_class[label].append(image_id)
+    reserved = sorted((min(ids, key=rank) for ids in by_class.values()), key=rank)[
+        :size
+    ]
+    reserved_set = set(reserved)
+    rest = [i for i in image_ids if i not in reserved_set]
+    rest_labels = [
+        label
+        for i, label in zip(image_ids, labels, strict=True)
+        if i not in reserved_set
+    ]
+    remaining = size - len(reserved)
+    filled = stratified_sample(rest, rest_labels, remaining, seed) if remaining else ()
+    return tuple(sorted({*reserved, *filled}))
