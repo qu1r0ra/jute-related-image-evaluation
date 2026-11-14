@@ -71,15 +71,21 @@ def _signature(info: os.stat_result) -> tuple[int, int, int]:
 
 
 def _stable_digest(path: Path, before: os.stat_result) -> str:
-    """Hash one file and fail if it changed while it was being read."""
+    """Hash one file and fail if it changed while it was being read.
+
+    Path and handle stats are not interchangeable on Windows (the change time
+    differs), so each is compared only with a stat taken the same way.
+    """
     with path.open("rb") as handle:
         opened = os.fstat(handle.fileno())
         digest = hashlib.file_digest(handle, "sha256").hexdigest()
         closed = os.fstat(handle.fileno())
     after = path.lstat()
-    if not (
-        _signature(before) == _signature(opened) == _signature(closed)
-        and _signature(before) == _signature(after)
+    if (
+        _signature(before) != _signature(after)
+        or _signature(opened) != _signature(closed)
+        or before.st_size != opened.st_size
+        or before.st_mtime_ns != opened.st_mtime_ns
     ):
         raise ValueError(f"Transfer file changed while hashing: {path.name}")
     return digest
