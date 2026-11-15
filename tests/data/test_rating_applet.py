@@ -638,7 +638,7 @@ def test_browser_save_refuses_a_revision_changed_before_refresh(
 
             page.keyboard.press("W")
             page.get_by_text(
-            "Couldn't save this choice: The sitting changed. Reload it. Reload to check the value before making another choice.",
+                "Couldn't save this choice: The sitting changed. Reload it. Reload to check the value before making another choice.",
                 exact=True,
             ).wait_for()
             assert page.get_by_role("button", name="Field").is_disabled()
@@ -854,7 +854,11 @@ def test_browser_rates_and_finishes_synthetic_scene(tmp_path: Path) -> None:
     @app.before_request
     def fail_first_finish() -> object:
         nonlocal fail_finish_once
-        if request.method == "POST" and request.path == "/api/finish" and fail_finish_once:
+        if (
+            request.method == "POST"
+            and request.path == "/api/finish"
+            and fail_finish_once
+        ):
             fail_finish_once = False
             return jsonify(error="Synthetic finish failure."), 409
         return None
@@ -885,7 +889,9 @@ def test_browser_rates_and_finishes_synthetic_scene(tmp_path: Path) -> None:
             page.get_by_role("button", name="Confirm finish sitting").click()
             page.get_by_text("Sitting finished", exact=False).wait_for()
             page.reload()
-            page.get_by_text("This sitting is finished and read-only.", exact=True).wait_for()
+            page.get_by_text(
+                "This sitting is finished and read-only.", exact=True
+            ).wait_for()
             page.get_by_text("Read-only", exact=True).wait_for()
             browser.close()
     finally:
@@ -1013,9 +1019,12 @@ def test_browser_failed_save_is_not_claimed_saved_and_can_resume(
                 "A previous save did not confirm. The current value was reloaded from the sitting; review it before continuing.",
                 exact=True,
             ).wait_for()
-            assert page.evaluate(
-                "sessionStorage.getItem('rating-applet-recovery-position')"
-            ) is None
+            assert (
+                page.evaluate(
+                    "sessionStorage.getItem('rating-applet-recovery-position')"
+                )
+                is None
+            )
             page.get_by_role("button", name="Unknown").wait_for(state="visible")
             assert page.get_by_role("button", name="Unknown").is_enabled()
             page.get_by_role("button", name="Unknown").click()
@@ -1023,9 +1032,12 @@ def test_browser_failed_save_is_not_claimed_saved_and_can_resume(
             assert page.get_by_text(
                 "1 completed · 1 remaining", exact=True
             ).is_visible()
-            assert page.evaluate(
-                "sessionStorage.getItem('rating-applet-recovery-position')"
-            ) is None
+            assert (
+                page.evaluate(
+                    "sessionStorage.getItem('rating-applet-recovery-position')"
+                )
+                is None
+            )
             page.get_by_role("button", name="Next").click()
             page.get_by_text("Item 2 of 2", exact=True).wait_for()
             page.reload()
@@ -1125,15 +1137,11 @@ def test_browser_mask_keyboard_undo_and_unreadable_image(tmp_path: Path) -> None
             page.get_by_role("img", name="Image for this item").wait_for()
             page.keyboard.press("1")
             page.get_by_text("Saved", exact=True).wait_for()
-            assert page.evaluate(
-                "document.activeElement.dataset.value"
-            ) == "pass"
+            assert page.evaluate("document.activeElement.dataset.value") == "pass"
             page.evaluate("document.activeElement.blur()")
             page.keyboard.press("w")
             page.get_by_text("Saved", exact=True).wait_for()
-            assert page.evaluate(
-                "document.activeElement.dataset.value"
-            ) == "field"
+            assert page.evaluate("document.activeElement.dataset.value") == "field"
             page.get_by_role("button", name="Next").wait_for(state="visible")
             page.wait_for_function("!document.querySelector('#next').disabled")
             page.get_by_role("button", name="Undo last choice").click()
@@ -1423,8 +1431,9 @@ def test_browser_rates_pair_with_keyboard_zoom_swap_and_finish(tmp_path: Path) -
             )
             assert all(
                 image_width <= frame_width and image_height <= frame_height
-                for (image_width, image_height), (frame_width, frame_height)
-                in zip(preview_sizes, panel_sizes, strict=True)
+                for (image_width, image_height), (frame_width, frame_height) in zip(
+                    preview_sizes, panel_sizes, strict=True
+                )
             )
             preview_widths = page.locator("#pair-frames img").evaluate_all(
                 "images => images.map(image => Number.parseFloat(image.style.width))"
@@ -1628,18 +1637,27 @@ def test_browser_rates_pair_with_keyboard_zoom_swap_and_finish(tmp_path: Path) -
             finish.dblclick()
             page.get_by_role("button", name="Confirm finish sitting").wait_for()
             assert page.evaluate("document.activeElement.id") == "finish"
-            assert page.request.get(
-                f"http://127.0.0.1:{server.server_port}/api/sitting"
-            ).json()["read_only"] is False
+            assert (
+                page.request.get(
+                    f"http://127.0.0.1:{server.server_port}/api/sitting"
+                ).json()["read_only"]
+                is False
+            )
             page.keyboard.press("Enter")
-            assert page.request.get(
-                f"http://127.0.0.1:{server.server_port}/api/sitting"
-            ).json()["read_only"] is False
+            assert (
+                page.request.get(
+                    f"http://127.0.0.1:{server.server_port}/api/sitting"
+                ).json()["read_only"]
+                is False
+            )
             page.keyboard.press("Escape")
             assert page.get_by_role("button", name="Confirm finish sitting").is_hidden()
-            assert page.request.get(
-                f"http://127.0.0.1:{server.server_port}/api/sitting"
-            ).json()["read_only"] is False
+            assert (
+                page.request.get(
+                    f"http://127.0.0.1:{server.server_port}/api/sitting"
+                ).json()["read_only"]
+                is False
+            )
 
             finish.click()
             page.get_by_role("button", name="Confirm finish sitting").wait_for()
@@ -1708,23 +1726,32 @@ def test_browser_pair_layout_uses_desktop_space_and_holds_at_1000x700(
             assert all(width >= 400 and height >= 500 for width, height in sizes_1440)
             assert abs(sizes_1440[0][0] - sizes_1440[1][0]) <= 1
             assert abs(sizes_1440[0][1] - sizes_1440[1][1]) <= 1
-            assert page.locator(".workspace").evaluate(
-                "workspace => getComputedStyle(workspace).gridTemplateColumns.split(' ').length"
-            ) == 2
+            assert (
+                page.locator(".workspace").evaluate(
+                    "workspace => getComputedStyle(workspace).gridTemplateColumns.split(' ').length"
+                )
+                == 2
+            )
 
             page.set_viewport_size({"width": 1920, "height": 1080})
             sizes_1920 = layout()
             assert all(width >= 540 and height >= 600 for width, height in sizes_1920)
-            assert page.locator("nav").evaluate(
-                "navigation => getComputedStyle(navigation).position"
-            ) == "sticky"
+            assert (
+                page.locator("nav").evaluate(
+                    "navigation => getComputedStyle(navigation).position"
+                )
+                == "sticky"
+            )
 
             page.set_viewport_size({"width": 1000, "height": 700})
             sizes_1000 = layout()
             assert all(width >= 280 and height >= 300 for width, height in sizes_1000)
-            assert page.locator(".workspace").evaluate(
-                "workspace => getComputedStyle(workspace).gridTemplateColumns.split(' ').length"
-            ) == 2
+            assert (
+                page.locator(".workspace").evaluate(
+                    "workspace => getComputedStyle(workspace).gridTemplateColumns.split(' ').length"
+                )
+                == 2
+            )
             buttons = page.locator("[aria-label='Rating choices'] .rating-choice")
             assert buttons.count() == 4
             navigation = page.locator("nav").bounding_box()
