@@ -78,7 +78,7 @@ The stylesheet uses neutral surfaces and text, with a blue focus outline as its 
 
 ## Layout
 
-The main region is centered up to `1500px` with `1.5rem` padding. At wider widths, the workspace uses a `1.4fr` image column and a `1fr` choice column with a `2rem` gap. Pair images sit in two equal columns with a `4 / 3` frame ratio. At `1050px` the workspace becomes one column and panel height is viewport-constrained; at `640px` pair panels also become one column. Image wells scroll when their content exceeds the frame; pair scrolling is synchronized. Sitting navigation stays at the bottom of the viewport when needed.
+The main region is centered up to `1900px` with `1.5rem` padding. Above `1050px`, the workspace gives the image region more width with `1.7fr` images and a `minmax(22rem, 1fr)` choice column separated by `1.5rem`. Pair frames remain equal-width and use `min(56vh, 660px)` height so more of the viewport is available for image inspection. Between `961px` and `1050px`, a compact two-column workspace keeps image panels and rating buttons visible together; below `961px`, choices move beneath the images. Pair panels stack below `640px`. At `1000 × 700`, each pair panel remains at least `260px` high, all four rating buttons fit above the sticky navigation, and the definitions can continue below the viewport. Image wells scroll when scaled content exceeds the frame; pair scrolling is synchronized, and zoom keeps the approximate scroll position when the image bounds change. Sitting navigation stays sticky at the bottom when needed.
 
 ## Elevation & Depth
 
@@ -97,8 +97,9 @@ Buttons use a `0.25rem` corner radius and a thin border. Image panels are rectan
 - **Focus:** `3px` solid blue outline with `3px` offset.
 
 ### Image panels
-- **Pair layout:** Two equal-width panels at wide sizes, each with a `4 / 3` frame.
-- **Image fit:** Previews preserve aspect ratio; full-resolution images can scroll inside the frame.
+- **Pair layout:** Two equal-width panels at wide sizes, each sized to the available image column and viewport height.
+- **Image fit:** Previews and originals preserve aspect ratio. Shared 1×–4× zoom works in both modes; fit preview scales both sides by the same rule and may enlarge a small preview without adding detail. Full-resolution images and enlarged previews can scroll inside the frame.
+- **Finish flow:** Separate finish and confirmation controls keep accidental repeated activation from confirming a read-only transition. Confirmation is keyboard reachable, Escape cancels it, and a changed rating disarms it.
 
 ## Do's and Don'ts
 

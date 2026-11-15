@@ -1,22 +1,23 @@
 # Synthetic design review
 
-This file owns evidence from synthetic interface review. `PRODUCT.md` owns product constraints, `DESIGN.md` summarizes the current CSS, and `README.md` owns operation and required owner-viewer provenance. No real study images, ratings or protected data were used.
+This file records synthetic interface evidence. `PRODUCT.md` owns product constraints, `DESIGN.md` summarizes the current CSS, and `README.md` owns operation and required owner-viewer provenance. No real study images or ratings were read or used for this review.
 
-## Review findings
+## Fable recheck
 
-- The earlier synthetic review covered equal pair-panel sizing, opaque gray wells, choice labels, rubric text and sitting navigation at a desktop viewport. Pair scrolling has since been synchronized.
-- Keyboard review covered visible focus, named choices, pressed states, save/progress status, image-load gating, and failed-save recovery.
-- Synthetic browser behavior covered keyboard choices, undo, full-resolution inspection, synchronized zoom, actual-pixel sizing, swap, reset on item change, mixed pair/scene/mask rows, finish and read-only reopening.
-- HTTP checks covered rating allowlists, opaque image routes, path containment, no-store responses and invalid requests.
-- A Windows CLI smoke test used a synthetic pair sitting and pool root; it checked the page, choice API, image routes, no-store headers, save and finish.
+- Finish now arms a warning and exposes a separate confirmation button. A double-click or repeated Enter on Finish cannot confirm; Enter on the separately focused confirmation can. Escape or a changed rating disarms the confirmation.
+- Pair panels are equal-sized and taller at desktop widths. The browser regression checks 1440 × 900 and 1920 × 1080; at 1000 × 700, it checks that both panels, all four rating buttons, and sticky navigation fit in the viewport. Definitions may extend below the fold at that compact size.
+- The shared 1×–4× slider scales both images in fit preview and full-resolution modes. Zoom retains the normalized viewed point where the new scroll range allows it, and pair panning remains synchronized. The optional 1:1 image-pixel view remains distinct.
+- Fit preview may enlarge small previews to fill each panel according to the same aspect-preserving rule. This does not add detail; the explicit 1:1 option remains available for source-pixel inspection. The tradeoff is documented in `README.md` and `DESIGN.md`.
+- A failed save stores a one-time recovery position. Once reload has fetched and rendered that row's current value from the sitting, the marker is cleared and the user sees a review message. Navigation or another reload no longer repeats a stale recovery warning.
+- Successful save/navigation returns focus to the initiating control when it remains available and focus has not moved. A keyboard rating shortcut from the page body moves focus to the selected rating. Navigation moves to the item heading when the previous control no longer exists. Image, save, item-load and finish failures identify the failed action and the next recovery step; a confirmed finish remains visibly read-only, including after reload.
 
-## Detector and browser evidence
+## Verification evidence
 
-- A separate synthetic design audit found rendered zoom, image-readiness gating and long-session usability problems. The subsequent implementation changed zoom sizing, synchronized pair panning, save recovery, keyboard navigation and finish confirmation. The implementation worker reported 32 focused tests passing and a clean static detector; the changed interface still needs a fresh running-page design review.
+- `uv run python -m pytest tests/data/test_rating_applet.py -q -p no:cacheprovider`: **33 passed**. The suite uses generated images, a temporary synthetic kit and sitting, and Playwright Chromium 159.0.8154.6. Browser assertions cover the finish confirmation regression, Escape/rating-change cancellation, save and image failures, stale recovery clearing, focus restoration, preview zoom, pan retention, equal panels, and the three viewport sizes above.
+- `uv run ruff check src/jute_disease/rating_applet/__init__.py tests/data/test_rating_applet.py`: passed.
+- `node --check src/jute_disease/rating_applet/static/app.js`: passed.
+- The applet-local Impeccable detector, `.agents/skills/impeccable/scripts/impeccable.cmd detect --json static/`, returned no findings. The design sidecar JSON also parsed successfully.
 
-- Impeccable 4.9.1 `detect` on `static/` reported no findings. The `npm run design-check` target scans the two CSS/JS files with regex rules; its output says parsed-page rules were not run. Treat this as a scoped static check, not a complete accessibility or usability audit.
-- Synthetic browser interaction review: Chromium 159.0.8154.6 at 1200 × 900. It checked keyboard shortcuts, accessible choice names, pressed states, focus, save/progress status, readable-image gating and failed-save recovery.
-- Windows visual review: Chrome 157 at 1200 × 900. Pair frames fit their columns and sitting navigation remained in view. The accessibility snapshot showed image and rating group names, generic image alt text, labeled zoom and sitting navigation; no console errors were observed.
-- Python Playwright browser coverage and the Windows CLI smoke use generated fixtures. These checks do not establish the viewing conditions of a real owner sitting.
+## Limits
 
-The review aid is installed under this applet. No repository-wide Impeccable hook or automatic worker dispatch is configured. For each real owner sitting, capture instrument version, browser and version, display resolution, browser viewport size, browser zoom and operating-system display scaling in study methods as required by [#235](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/235) and [#237](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/237).
+The detector is a static scan and does not certify accessibility or interaction quality. The browser suite uses Chromium at its test viewport and synthetic assets; it does not establish screen-reader behavior, other browser rendering, physical monitor scaling, or how a real owner sitting will look under its actual viewing conditions. For each real sitting, capture the instrument version, browser and version, display resolution, viewport, browser zoom and operating-system display scaling in study methods, as required by [#235](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/235) and [#237](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/237).

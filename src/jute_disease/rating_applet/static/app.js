@@ -12,6 +12,8 @@ let swapped = false;
 let imageGeneration = 0;
 let finishArmed = false;
 let syncingPan = false;
+let focusEpoch = 0;
+let pendingPan = null;
 
 const groups = {
   rating: {
@@ -65,8 +67,23 @@ function controls() {
   $('previous').disabled = busy || failed || position <= 1;
   $('next').disabled = busy || failed || !readable || !complete() || position >= state.total;
   $('finish').disabled = busy || failed || !readable || state.read_only || state.completed !== state.total;
+  $('confirm-finish').disabled = busy || failed || !readable || state.read_only || !finishArmed;
   $('cancel-finish').disabled = busy;
   $('undo').disabled = busy || failed || state.read_only || !history.length;
+}
+
+function rememberFocus() {
+  return { element: document.activeElement, epoch: focusEpoch };
+}
+
+function restoreFocus(snapshot, fallback = null) {
+  if (focusEpoch !== snapshot.epoch || document.activeElement !== document.body) return;
+  const element = snapshot.element;
+  if (element && element !== document.body && element.isConnected && !element.hidden && !element.disabled) {
+    element.focus();
+  } else if (fallback?.isConnected) {
+    fallback.focus();
+  }
 }
 
 function addPairRubric(container) {
@@ -141,11 +158,44 @@ function imageUrl(side, variant) {
     : `/images/${position}/${variant}`;
 }
 
-function applyScale() {
+function panPositions() {
+  return [...document.querySelectorAll('.pair-image-frame, #image-frame')].map(frame => ({
+    left: Math.max(0, frame.scrollWidth - frame.clientWidth),
+    top: Math.max(0, frame.scrollHeight - frame.clientHeight),
+    x: frame.scrollLeft / Math.max(1, frame.scrollWidth - frame.clientWidth),
+    y: frame.scrollTop / Math.max(1, frame.scrollHeight - frame.clientHeight)
+  }));
+}
+
+function restorePan(positions) {
+  if (!positions) return;
+  const frames = [...document.querySelectorAll('.pair-image-frame, #image-frame')];
+  frames.forEach((frame, index) => {
+    const point = positions[index];
+    if (!point) return;
+    frame.scrollLeft = point.x * Math.max(0, frame.scrollWidth - frame.clientWidth);
+    frame.scrollTop = point.y * Math.max(0, frame.scrollHeight - frame.clientHeight);
+  });
+  const firstPairFrame = frames.find(frame => frame.classList.contains('pair-image-frame'));
+  if (firstPairFrame) syncPairPan(firstPairFrame);
+}
+
+function applyScale(positions = panPositions()) {
   const scale = actualPixels ? 1 : Number($('scale').value);
   document.querySelectorAll('#image-frame img, #pair-frames img').forEach(picture => {
-    picture.style.width = full ? `${picture.naturalWidth * scale}px` : '';
+    const frame = picture.closest('.image-frame');
+    if (!picture.naturalWidth || !frame) return;
+    const fitScale = Math.min(
+      frame.clientWidth / picture.naturalWidth,
+      frame.clientHeight / picture.naturalHeight
+    );
+    const width = picture.naturalWidth * (full ? 1 : fitScale) * scale;
+    picture.style.width = `${width}px`;
+    picture.style.height = 'auto';
+    picture.style.maxWidth = 'none';
+    picture.style.maxHeight = 'none';
   });
+  restorePan(positions);
 }
 
 function syncPairPan(source) {
@@ -165,8 +215,9 @@ function syncPairPan(source) {
   syncingPan = false;
 }
 
-function loadImages() {
+function loadImages(positions = panPositions()) {
   const generation = ++imageGeneration;
+  pendingPan = positions;
   const sides = item.kind === 'pair' ? ['a', 'b'] : [null];
   const pictures = [...document.querySelectorAll('#image-frame img, #pair-frames img')];
   let loaded = 0;
@@ -181,14 +232,15 @@ function loadImages() {
       if (loaded === sides.length) {
         readable = true;
         $('image-status').textContent = '';
-        applyScale();
+        applyScale(pendingPan);
+        pendingPan = null;
         controls();
       }
     };
     picture.onerror = () => {
       if (generation !== imageGeneration) return;
       readable = false;
-      $('image-status').textContent = 'Image unavailable. Resolve the issue before advancing.';
+      $('image-status').textContent = 'This image could not be loaded. Rating and navigation are blocked. Check that its file is available, then reload the sitting.';
       controls();
     };
     picture.src = imageUrl(side, full ? 'original' : 'preview');
@@ -231,6 +283,8 @@ function setImageSources() {
 
 async function show(nextPosition) {
   if (busy || failed || !state) return;
+  const hadItem = Boolean(item);
+  const focus = rememberFocus();
   busy = true;
   controls();
   try {
@@ -254,19 +308,38 @@ async function show(nextPosition) {
     $('actual-pixels').setAttribute('aria-pressed', 'false');
     $('swap').setAttribute('aria-pressed', 'false');
     $('finish').textContent = 'Finish sitting';
+    $('finish').setAttribute('aria-expanded', 'false');
+    $('confirm-finish').hidden = true;
     $('cancel-finish').hidden = true;
-    $('notice').textContent = '';
+    $('notice').textContent = state.finished
+      ? 'This sitting is finished and read-only.'
+      : state.read_only ? 'This sitting is read-only; no changes can be saved.' : '';
     choices();
     setImageSources();
+    busy = false;
+    controls();
+    restoreFocus(focus, hadItem ? $('position') : null);
+    return true;
   } catch (error) {
-    $('notice').textContent = error.message;
+    $('notice').textContent = `Couldn't open this item: ${friendlyError(error)} Reload the sitting to try again.`;
+    busy = false;
+    controls();
+    restoreFocus(focus, hadItem ? $('position') : null);
+    return false;
   }
-  busy = false;
-  controls();
+}
+
+function friendlyError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return message === 'Failed to fetch' || message === 'Request failed.'
+    ? 'The local app did not return a response.'
+    : message;
 }
 
 async function save(field, value, undo = false) {
   if (busy || failed || !readable || state.read_only || value === item[field]) return;
+  disarmFinish();
+  const focus = rememberFocus();
   const oldValue = item[field];
   busy = true;
   $('save').textContent = 'Saving…';
@@ -287,10 +360,15 @@ async function save(field, value, undo = false) {
   } catch (error) {
     failed = true;
     sessionStorage.setItem('rating-applet-recovery-position', String(position));
-    $('save').textContent = `${error.message} Reload to verify the saved state.`;
+    $('save').textContent = `Couldn't save this choice: ${friendlyError(error)} Reload to check the value before making another choice.`;
   }
   busy = false;
   controls();
+  const fallback = focus.element === document.body
+    ? [...document.querySelectorAll('.choice button')].find(button =>
+      button.dataset.field === field && button.dataset.value === value)
+    : null;
+  restoreFocus(focus, fallback);
 }
 
 $('previous').onclick = () => show(position - 1);
@@ -299,50 +377,78 @@ $('undo').onclick = async () => {
   const change = history.pop();
   if (change) await save(change.field, change.value, true);
 };
-$('finish').onclick = async () => {
-  if (!finishArmed) {
-    finishArmed = true;
-    $('finish').textContent = 'Confirm finish';
-    $('cancel-finish').hidden = false;
-    $('notice').textContent = 'Finishing makes this sitting read-only. Confirm to finish.';
-    return;
-  }
+$('finish').onclick = () => {
+  if (finishArmed) return;
+  finishArmed = true;
+  $('finish').setAttribute('aria-expanded', 'true');
+  $('confirm-finish').hidden = false;
+  $('cancel-finish').hidden = false;
+  $('notice').textContent = 'Finishing makes this sitting read-only. Choose “Confirm finish sitting” to continue.';
+  controls();
+};
+$('confirm-finish').onclick = async () => {
+  if (!finishArmed || busy || failed || state.read_only) return;
   busy = true;
   controls();
   try {
-    await json('/api/finish', {
+    const result = await json('/api/finish', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ revision: state.revision })
     });
-    await refresh();
+    state.revision = result.revision;
+    state.read_only = true;
+    state.finished = true;
+    let refreshMessage = '';
+    try {
+      await refresh();
+    } catch (error) {
+      refreshMessage = ` The finish was confirmed, but status could not refresh: ${friendlyError(error)} Reload to verify.`;
+      state.read_only = true;
+      state.finished = true;
+      $('mode').textContent = 'Read-only';
+    }
     finishArmed = false;
     $('finish').textContent = 'Finish sitting';
+    $('finish').setAttribute('aria-expanded', 'false');
+    $('confirm-finish').hidden = true;
     $('cancel-finish').hidden = true;
-    $('notice').textContent = 'Sitting finished. Take a break before the next sitting.';
+    $('notice').textContent = `Sitting finished and read-only. Take a break before the next sitting.${refreshMessage}`;
   } catch (error) {
     failed = true;
-    $('notice').textContent = error.message;
+    $('notice').textContent = `Couldn't finish the sitting: ${friendlyError(error)} Reload to check its state. If it remains editable, you can try finishing again.`;
   }
   busy = false;
   controls();
 };
-$('cancel-finish').onclick = () => {
+function disarmFinish() {
+  if (!finishArmed) return;
   finishArmed = false;
   $('finish').textContent = 'Finish sitting';
+  $('finish').setAttribute('aria-expanded', 'false');
+  $('confirm-finish').hidden = true;
   $('cancel-finish').hidden = true;
   $('notice').textContent = '';
+  controls();
+}
+$('cancel-finish').onclick = () => {
+  const shouldRestore = document.activeElement === $('confirm-finish') ||
+    document.activeElement === $('cancel-finish');
+  disarmFinish();
+  if (shouldRestore) $('finish').focus();
 };
 $('zoom').onclick = () => {
+  const positions = panPositions();
   full = !full;
   actualPixels = false;
   $('scale').value = 1;
   $('actual-pixels').setAttribute('aria-pressed', 'false');
   $('zoom').textContent = full ? 'Fit preview' : 'Inspect full resolution';
   $('image-status').textContent = 'Loading image…';
-  loadImages();
+  loadImages(positions);
 };
 $('actual-pixels').onclick = () => {
+  const positions = panPositions();
   if (!full) {
     full = true;
     $('zoom').textContent = 'Fit preview';
@@ -350,14 +456,14 @@ $('actual-pixels').onclick = () => {
     actualPixels = true;
     $('actual-pixels').setAttribute('aria-pressed', 'true');
     $('actual-pixels').textContent = 'Use zoom scale';
-    loadImages();
+    loadImages(positions);
     return;
   }
   actualPixels = !actualPixels;
   $('actual-pixels').setAttribute('aria-pressed', String(actualPixels));
   $('actual-pixels').textContent = actualPixels ? 'Use zoom scale' : '1:1 image pixels';
   if (actualPixels) $('scale').value = 1;
-  applyScale();
+  applyScale(positions);
 };
 $('swap').onclick = () => {
   swapped = !swapped;
@@ -367,12 +473,27 @@ $('swap').onclick = () => {
   $('swap').setAttribute('aria-pressed', String(swapped));
 };
 $('scale').oninput = () => {
+  const positions = panPositions();
   actualPixels = false;
   $('actual-pixels').setAttribute('aria-pressed', 'false');
   $('actual-pixels').textContent = '1:1 image pixels';
-  applyScale();
+  applyScale(positions);
 };
+document.addEventListener('focusin', () => { focusEpoch += 1; });
+document.addEventListener('pointerdown', () => {
+  if (busy) focusEpoch += 1;
+}, true);
+window.addEventListener('blur', () => { focusEpoch += 1; });
+window.addEventListener('resize', () => applyScale());
 document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && finishArmed && !busy) {
+    event.preventDefault();
+    const shouldRestore = document.activeElement === $('confirm-finish') ||
+      document.activeElement === $('cancel-finish');
+    disarmFinish();
+    if (shouldRestore) $('finish').focus();
+    return;
+  }
   const target = event.target;
   if (
     busy || failed || event.ctrlKey || event.altKey || event.metaKey ||
@@ -412,15 +533,15 @@ document.addEventListener('keydown', event => {
     const recoveryPosition = Number(
       sessionStorage.getItem('rating-applet-recovery-position')
     );
-    const startPosition = Number.isInteger(recoveryPosition) &&
-      recoveryPosition >= 1 && recoveryPosition <= state.total
-      ? recoveryPosition
-      : state.position;
+    const hasRecovery = Number.isInteger(recoveryPosition) &&
+      recoveryPosition >= 1 && recoveryPosition <= state.total;
+    const startPosition = hasRecovery ? recoveryPosition : state.position;
     await show(startPosition);
-    if (startPosition === recoveryPosition) {
-      $('notice').textContent = 'A previous save did not confirm. Review this item before continuing.';
+    if (hasRecovery && position === recoveryPosition && item) {
+      sessionStorage.removeItem('rating-applet-recovery-position');
+      $('notice').textContent = 'A previous save did not confirm. The current value was reloaded from the sitting; review it before continuing.';
     }
   } catch (error) {
-    $('notice').textContent = error.message;
+    $('notice').textContent = `Couldn't load the sitting: ${friendlyError(error)} Check the app and sitting, then reload.`;
   }
 })();

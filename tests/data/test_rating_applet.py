@@ -187,6 +187,7 @@ def test_finish_requires_completion_and_protects_sitting(tmp_path: Path) -> None
     )
     reopened = create_app(sheet).test_client()
     assert reopened.get("/api/sitting").json["read_only"] is True
+    assert reopened.get("/api/sitting").json["finished"] is True
     assert (
         reopened.post(
             "/api/items/1",
@@ -637,7 +638,7 @@ def test_browser_save_refuses_a_revision_changed_before_refresh(
 
             page.keyboard.press("W")
             page.get_by_text(
-                "The sitting changed. Reload it. Reload to verify the saved state.",
+            "Couldn't save this choice: The sitting changed. Reload it. Reload to check the value before making another choice.",
                 exact=True,
             ).wait_for()
             assert page.get_by_role("button", name="Field").is_disabled()
@@ -832,6 +833,7 @@ def test_preview_cache_is_private_and_refreshes_when_source_changes(
 def test_browser_rates_and_finishes_synthetic_scene(tmp_path: Path) -> None:
     from threading import Thread
 
+    from flask import jsonify, request
     from PIL import Image
     from playwright.sync_api import sync_playwright
     from werkzeug.serving import make_server
@@ -846,7 +848,18 @@ def test_browser_rates_and_finishes_synthetic_scene(tmp_path: Path) -> None:
         "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\nsecret,scene,image.png,,,,,\n",
         encoding="utf-8",
     )
-    server = make_server("127.0.0.1", 0, create_app(sheet), threaded=True)
+    app = create_app(sheet)
+    fail_finish_once = True
+
+    @app.before_request
+    def fail_first_finish() -> object:
+        nonlocal fail_finish_once
+        if request.method == "POST" and request.path == "/api/finish" and fail_finish_once:
+            fail_finish_once = False
+            return jsonify(error="Synthetic finish failure."), 409
+        return None
+
+    server = make_server("127.0.0.1", 0, app, threaded=True)
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -857,17 +870,23 @@ def test_browser_rates_and_finishes_synthetic_scene(tmp_path: Path) -> None:
             page.get_by_role("button", name="Field").click()
             page.get_by_text("Saved", exact=True).wait_for()
             page.get_by_role("button", name="Finish sitting").click()
-            page.get_by_role("button", name="Confirm finish").wait_for()
+            page.get_by_role("button", name="Confirm finish sitting").wait_for()
             assert page.get_by_text("Read-only", exact=True).count() == 0
-            page.get_by_role("button", name="Cancel").click()
+            page.get_by_role("button", name="Confirm finish sitting").click()
+            page.get_by_text(
+                "Couldn't finish the sitting: Synthetic finish failure. Reload to check its state. If it remains editable, you can try finishing again.",
+                exact=True,
+            ).wait_for()
+            assert page.get_by_text("Read-only", exact=True).count() == 0
+            page.reload()
             page.get_by_role("button", name="Finish sitting").wait_for()
-            assert page.get_by_text("Read-only", exact=True).count() == 0
             page.get_by_role("button", name="Finish sitting").click()
-            page.get_by_role("button", name="Confirm finish").wait_for()
-            page.get_by_role("button", name="Confirm finish").click()
+            page.get_by_role("button", name="Confirm finish sitting").wait_for()
+            page.get_by_role("button", name="Confirm finish sitting").click()
             page.get_by_text("Sitting finished", exact=False).wait_for()
             page.reload()
-            page.get_by_text("Read-only", exact=False).wait_for()
+            page.get_by_text("This sitting is finished and read-only.", exact=True).wait_for()
+            page.get_by_text("Read-only", exact=True).wait_for()
             browser.close()
     finally:
         server.shutdown()
@@ -917,9 +936,11 @@ def test_browser_delayed_save_blocks_more_input_until_confirmed(tmp_path: Path) 
             assert page.get_by_role("button", name="Field").is_disabled()
             assert page.get_by_role("button", name="Next").is_disabled()
             assert page.get_by_text("Item 1 of 1", exact=True).is_visible()
+            page.locator("#position").evaluate("heading => heading.focus()")
             release_save.set()
             page.get_by_text("Saved", exact=True).wait_for()
             assert page.get_by_text("Item 1 of 1", exact=True).is_visible()
+            assert page.evaluate("document.activeElement.id") == "position"
             browser.close()
     finally:
         release_save.set()
@@ -977,7 +998,8 @@ def test_browser_failed_save_is_not_claimed_saved_and_can_resume(
             page.get_by_text("Item 1 of 2", exact=True).wait_for()
             page.get_by_role("button", name="Unknown").click()
             page.get_by_text(
-                "Synthetic save failure. Reload to verify the saved state.", exact=True
+                "Couldn't save this choice: Synthetic save failure. Reload to check the value before making another choice.",
+                exact=True,
             ).wait_for()
             assert page.get_by_role("button", name="Unknown").is_disabled()
             assert page.get_by_role("button", name="Next").is_disabled()
@@ -988,9 +1010,12 @@ def test_browser_failed_save_is_not_claimed_saved_and_can_resume(
             page.reload()
             page.get_by_text("Item 1 of 2", exact=True).wait_for()
             page.get_by_text(
-                "A previous save did not confirm. Review this item before continuing.",
+                "A previous save did not confirm. The current value was reloaded from the sitting; review it before continuing.",
                 exact=True,
             ).wait_for()
+            assert page.evaluate(
+                "sessionStorage.getItem('rating-applet-recovery-position')"
+            ) is None
             page.get_by_role("button", name="Unknown").wait_for(state="visible")
             assert page.get_by_role("button", name="Unknown").is_enabled()
             page.get_by_role("button", name="Unknown").click()
@@ -998,6 +1023,14 @@ def test_browser_failed_save_is_not_claimed_saved_and_can_resume(
             assert page.get_by_text(
                 "1 completed · 1 remaining", exact=True
             ).is_visible()
+            assert page.evaluate(
+                "sessionStorage.getItem('rating-applet-recovery-position')"
+            ) is None
+            page.get_by_role("button", name="Next").click()
+            page.get_by_text("Item 2 of 2", exact=True).wait_for()
+            page.reload()
+            page.get_by_text("Item 2 of 2", exact=True).wait_for()
+            assert page.get_by_text("A previous save did not confirm.").count() == 0
             browser.close()
     finally:
         server.shutdown()
@@ -1092,7 +1125,15 @@ def test_browser_mask_keyboard_undo_and_unreadable_image(tmp_path: Path) -> None
             page.get_by_role("img", name="Image for this item").wait_for()
             page.keyboard.press("1")
             page.get_by_text("Saved", exact=True).wait_for()
+            assert page.evaluate(
+                "document.activeElement.dataset.value"
+            ) == "pass"
+            page.evaluate("document.activeElement.blur()")
             page.keyboard.press("w")
+            page.get_by_text("Saved", exact=True).wait_for()
+            assert page.evaluate(
+                "document.activeElement.dataset.value"
+            ) == "field"
             page.get_by_role("button", name="Next").wait_for(state="visible")
             page.wait_for_function("!document.querySelector('#next').disabled")
             page.get_by_role("button", name="Undo last choice").click()
@@ -1105,7 +1146,10 @@ def test_browser_mask_keyboard_undo_and_unreadable_image(tmp_path: Path) -> None
             page.get_by_role("button", name="Fit preview").wait_for()
             page.wait_for_function("!document.querySelector('#next').disabled")
             page.get_by_role("button", name="Next").click()
-            page.get_by_text("Image unavailable.", exact=False).wait_for()
+            page.get_by_text(
+                "This image could not be loaded. Rating and navigation are blocked. Check that its file is available, then reload the sitting.",
+                exact=True,
+            ).wait_for()
             assert page.get_by_role("button", name="Next").is_disabled()
             assert page.get_by_role("button", name="Field").is_disabled()
             assert page.get_by_role("button", name="Clean background").is_disabled()
@@ -1377,7 +1421,23 @@ def test_browser_rates_pair_with_keyboard_zoom_swap_and_finish(tmp_path: Path) -
                 "frames => frames.map(frame => [Math.round(frame.querySelector('img').getBoundingClientRect().width), "
                 "Math.round(frame.querySelector('img').getBoundingClientRect().height)])"
             )
-            assert preview_sizes == panel_sizes
+            assert all(
+                image_width <= frame_width and image_height <= frame_height
+                for (image_width, image_height), (frame_width, frame_height)
+                in zip(preview_sizes, panel_sizes, strict=True)
+            )
+            preview_widths = page.locator("#pair-frames img").evaluate_all(
+                "images => images.map(image => Number.parseFloat(image.style.width))"
+            )
+            page.locator("#scale").evaluate(
+                "input => { input.value = '2'; input.dispatchEvent(new Event('input', {bubbles: true})); }"
+            )
+            preview_zoom_widths = page.locator("#pair-frames img").evaluate_all(
+                "images => images.map(image => Number.parseFloat(image.style.width))"
+            )
+            assert preview_zoom_widths == pytest.approx(
+                [width * 2 for width in preview_widths]
+            )
             assert page.locator("#pair-frames").evaluate(
                 "container => [...container.querySelectorAll('.pair-image-frame')].every(frame => "
                 "frame.getBoundingClientRect().right <= container.getBoundingClientRect().right + 1)"
@@ -1454,11 +1514,22 @@ def test_browser_rates_pair_with_keyboard_zoom_swap_and_finish(tmp_path: Path) -
                 "a.scrollTop / maxTop, b.scrollTop / (b.scrollHeight - b.clientHeight)]; }"
             )
             assert pan == pytest.approx([0.4, 0.4, 0.3, 0.3], abs=0.02)
+            page.locator("#scale").evaluate(
+                "input => { input.value = '3'; input.dispatchEvent(new Event('input', {bubbles: true})); }"
+            )
+            retained_pan = page.locator(".pair-image-frame").evaluate_all(
+                "frames => { const [a, b] = frames; return ["
+                "a.scrollLeft / (a.scrollWidth - a.clientWidth), "
+                "b.scrollLeft / (b.scrollWidth - b.clientWidth), "
+                "a.scrollTop / (a.scrollHeight - a.clientHeight), "
+                "b.scrollTop / (b.scrollHeight - b.clientHeight)]; }"
+            )
+            assert retained_pan == pytest.approx([0.4, 0.4, 0.3, 0.3], abs=0.02)
 
             page.locator("#zoom").focus()
             page.keyboard.press("2")
             page.get_by_text(
-                "Synthetic pair save failure. Reload to verify the saved state.",
+                "Couldn't save this choice: Synthetic pair save failure. Reload to check the value before making another choice.",
                 exact=True,
             ).wait_for()
             assert page.get_by_role("button", name="Next").is_disabled()
@@ -1495,6 +1566,7 @@ def test_browser_rates_pair_with_keyboard_zoom_swap_and_finish(tmp_path: Path) -
             page.locator("#zoom").focus()
             page.keyboard.press("]")
             page.get_by_text("Item 2 of 4", exact=True).wait_for()
+            assert page.evaluate("document.activeElement.id") == "zoom"
             page.wait_for_function(
                 "[...document.querySelectorAll('#pair-frames img')].every(i => i.complete && i.naturalWidth > 0)"
             )
@@ -1542,17 +1614,128 @@ def test_browser_rates_pair_with_keyboard_zoom_swap_and_finish(tmp_path: Path) -
             page.get_by_role("button", name="Clean background").click()
             page.get_by_text("Saved", exact=True).wait_for()
             page.get_by_role("button", name="Finish sitting").click()
-            page.get_by_role("button", name="Confirm finish").wait_for()
+            page.get_by_role("button", name="Confirm finish sitting").wait_for()
             assert page.get_by_text(
-                "Finishing makes this sitting read-only. Confirm to finish.", exact=True
+                "Finishing makes this sitting read-only. Choose “Confirm finish sitting” to continue.",
+                exact=True,
             ).is_visible()
             assert page.get_by_text("Read-only", exact=True).count() == 0
-            page.get_by_role("button", name="Confirm finish").click()
+            page.get_by_role("button", name="Field").click()
+            page.get_by_text("Saved", exact=True).wait_for()
+            assert page.get_by_role("button", name="Confirm finish sitting").is_hidden()
+
+            finish = page.get_by_role("button", name="Finish sitting")
+            finish.dblclick()
+            page.get_by_role("button", name="Confirm finish sitting").wait_for()
+            assert page.evaluate("document.activeElement.id") == "finish"
+            assert page.request.get(
+                f"http://127.0.0.1:{server.server_port}/api/sitting"
+            ).json()["read_only"] is False
+            page.keyboard.press("Enter")
+            assert page.request.get(
+                f"http://127.0.0.1:{server.server_port}/api/sitting"
+            ).json()["read_only"] is False
+            page.keyboard.press("Escape")
+            assert page.get_by_role("button", name="Confirm finish sitting").is_hidden()
+            assert page.request.get(
+                f"http://127.0.0.1:{server.server_port}/api/sitting"
+            ).json()["read_only"] is False
+
+            finish.click()
+            page.get_by_role("button", name="Confirm finish sitting").wait_for()
+            page.keyboard.press("Tab")
+            assert page.evaluate("document.activeElement.id") == "confirm-finish"
+            page.keyboard.press("Enter")
             page.get_by_text("Sitting finished", exact=False).wait_for()
             page.reload()
-            page.get_by_text("Read-only", exact=False).wait_for()
+            page.get_by_text("Read-only", exact=True).wait_for()
             assert page.get_by_role("button", name="Near-duplicate").is_disabled()
             assert "private-pair" not in page.content()
+            browser.close()
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+@pytest.mark.serial
+def test_browser_pair_layout_uses_desktop_space_and_holds_at_1000x700(
+    tmp_path: Path,
+) -> None:
+    from threading import Thread
+
+    from PIL import Image
+    from playwright.sync_api import sync_playwright
+    from werkzeug.serving import make_server
+
+    pool = tmp_path / "pool"
+    pool.mkdir()
+    Image.new("RGB", (1200, 800), "#7799aa").save(pool / "a.png")
+    Image.new("RGB", (800, 1200), "#aa9977").save(pool / "b.png")
+    (tmp_path / "kit.json").write_text(
+        json.dumps(
+            {"items": [{"item_id": "synthetic-pair", "kind": "pair", "pool": "A"}]}
+        ),
+        encoding="utf-8",
+    )
+    sheet = tmp_path / "sitting-001.csv"
+    sheet.write_text(
+        "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\n"
+        "synthetic-pair,pair,A/a.png,A/b.png,,,,\n",
+        encoding="utf-8",
+    )
+    server = make_server(
+        "127.0.0.1", 0, create_app(sheet, pool_roots={"A": pool}), threaded=True
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 900})
+            page.goto(f"http://127.0.0.1:{server.server_port}/")
+            page.wait_for_function(
+                "[...document.querySelectorAll('.pair-image-frame img')].length === 2 "
+                "&& [...document.querySelectorAll('.pair-image-frame img')].every(i => i.complete && i.naturalWidth > 0)"
+            )
+
+            def layout() -> list[list[int]]:
+                return page.locator(".pair-image-frame").evaluate_all(
+                    "frames => frames.map(frame => [Math.round(frame.clientWidth), Math.round(frame.clientHeight)])"
+                )
+
+            sizes_1440 = layout()
+            assert all(width >= 400 and height >= 500 for width, height in sizes_1440)
+            assert abs(sizes_1440[0][0] - sizes_1440[1][0]) <= 1
+            assert abs(sizes_1440[0][1] - sizes_1440[1][1]) <= 1
+            assert page.locator(".workspace").evaluate(
+                "workspace => getComputedStyle(workspace).gridTemplateColumns.split(' ').length"
+            ) == 2
+
+            page.set_viewport_size({"width": 1920, "height": 1080})
+            sizes_1920 = layout()
+            assert all(width >= 540 and height >= 600 for width, height in sizes_1920)
+            assert page.locator("nav").evaluate(
+                "navigation => getComputedStyle(navigation).position"
+            ) == "sticky"
+
+            page.set_viewport_size({"width": 1000, "height": 700})
+            sizes_1000 = layout()
+            assert all(width >= 280 and height >= 300 for width, height in sizes_1000)
+            assert page.locator(".workspace").evaluate(
+                "workspace => getComputedStyle(workspace).gridTemplateColumns.split(' ').length"
+            ) == 2
+            buttons = page.locator("[aria-label='Rating choices'] .rating-choice")
+            assert buttons.count() == 4
+            navigation = page.locator("nav").bounding_box()
+            assert navigation is not None
+            for index in range(buttons.count()):
+                button = buttons.nth(index)
+                box = button.bounding_box()
+                assert box is not None and box["y"] + box["height"] <= navigation["y"]
+            assert page.locator("#finish").is_visible()
+            assert page.locator("nav").evaluate(
+                "navigation => navigation.getBoundingClientRect().bottom <= 700"
+            )
             browser.close()
     finally:
         server.shutdown()
