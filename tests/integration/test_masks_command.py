@@ -496,3 +496,29 @@ def test_fixture_still_runs_end_to_end_on_the_colour_threshold_backend(
     assert report["fixture_mode"] is True
     assert report["mask_backend"]["model"] == "excess-green-otsu-largest-component"
     assert report["mask_quality"]["fail_rate"]["gate_pass"] is True
+
+
+def test_calibration_fits_and_prints_the_tags_of_a_set_with_no_unknown_image(
+    freeze: dict[str, Path], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scenes = [SCENES[index % 2] for index in range(100)]
+    development = _write_records(tmp_path, "dev", scenes, tagged=True, start=0)
+    output = tmp_path / "thresholds.json"
+    capsys.readouterr()
+
+    main(
+        [
+            "data",
+            "masks-calibrate",
+            str(development),
+            "--output",
+            str(output),
+            "--target-dir",
+            str(freeze["target"]),
+        ]
+    )
+
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["development_tags"] == ["clean-background", "field"]
+    assert printed["background_fraction_min"] == 0.0
+    assert json.loads(output.read_text(encoding="utf-8")) == printed
