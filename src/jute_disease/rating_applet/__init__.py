@@ -20,6 +20,7 @@ from PIL import Image, ImageOps
 from jute_disease.data import MASK_RUBRIC, audit_row_complete, validate_audit_row
 
 _VERSION = "1.0.0"
+_PREVIEW_SIZE = (1400, 1400)
 _LOCKS: dict[str, Lock] = {}
 _LOCKS_GUARD = Lock()
 
@@ -277,13 +278,38 @@ def create_app(sheet: Path) -> Flask:
                 path = (root / row[field]).resolve(strict=True)
                 if not path.is_relative_to(root) or not path.is_file():
                     raise ValueError("Image outside kit")
-                with Image.open(path) as source:
-                    picture = ImageOps.exif_transpose(source).convert("RGB")
-                    if variant == "preview":
-                        picture.thumbnail((1400, 1400), Image.Resampling.LANCZOS)
-                    output = io.BytesIO()
-                    picture.save(output, format="PNG")
-                output.seek(0)
+                source_bytes = path.read_bytes()
+                if variant == "preview":
+                    cache_key = _digest(
+                        f"{_VERSION}:preview:{_PREVIEW_SIZE}:".encode()
+                        + source_bytes
+                    )
+                    cache = runtime / "previews" / f"{cache_key}.png"
+                    if not cache.is_file():
+                        cache.parent.mkdir(parents=True, exist_ok=True)
+                        with Image.open(io.BytesIO(source_bytes)) as source:
+                            picture = ImageOps.exif_transpose(source).convert("RGB")
+                            picture.thumbnail(_PREVIEW_SIZE, Image.Resampling.LANCZOS)
+                            temp_name = ""
+                            try:
+                                with tempfile.NamedTemporaryFile(
+                                    dir=cache.parent, delete=False, suffix=".tmp"
+                                ) as temp:
+                                    temp_name = temp.name
+                                    picture.save(temp, format="PNG")
+                                    temp.flush()
+                                    os.fsync(temp.fileno())
+                                os.replace(temp_name, cache)
+                            finally:
+                                if temp_name and os.path.exists(temp_name):
+                                    os.unlink(temp_name)
+                    output = io.BytesIO(cache.read_bytes())
+                else:
+                    with Image.open(io.BytesIO(source_bytes)) as source:
+                        picture = ImageOps.exif_transpose(source).convert("RGB")
+                        output = io.BytesIO()
+                        picture.save(output, format="PNG")
+                    output.seek(0)
                 response = send_file(output, mimetype="image/png", max_age=0)
                 response.headers["Cache-Control"] = "no-store"
                 return response

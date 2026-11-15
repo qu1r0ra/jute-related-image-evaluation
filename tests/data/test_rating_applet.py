@@ -504,6 +504,46 @@ def test_image_routes_only_serve_contained_sitting_images(tmp_path: Path) -> Non
     assert client.get("/images/3/original").status_code == 404
 
 
+def test_preview_cache_is_private_and_refreshes_when_source_changes(
+    tmp_path: Path,
+) -> None:
+    from io import BytesIO
+
+    from PIL import Image
+
+    kit = tmp_path / "kit"
+    kit.mkdir()
+    (kit / "kit.json").write_text('{"scene_rubric": {"anchors": {}}}', encoding="utf-8")
+    source = kit / "image.png"
+    Image.new("RGB", (1800, 900), "red").save(source)
+    sheet = kit / "sitting-001.csv"
+    sheet.write_text(
+        "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\n"
+        "private,scene,image.png,,,,,\n",
+        encoding="utf-8",
+    )
+    original = source.read_bytes()
+    client = create_app(sheet).test_client()
+
+    first = client.get("/images/1/preview")
+
+    assert first.status_code == 200
+    cache = kit / ".rating-applet" / sheet.name / "previews"
+    cached_files = list(cache.glob("*.png"))
+    assert len(cached_files) == 1
+    assert source.read_bytes() == original
+    first_color = Image.open(BytesIO(first.data)).getpixel((20, 20))
+    assert first_color == (255, 0, 0)
+    Image.new("RGB", (1800, 900), "blue").save(source)
+
+    second = client.get("/images/1/preview")
+
+    assert second.status_code == 200
+    assert len(list(cache.glob("*.png"))) == 2
+    assert Image.open(BytesIO(second.data)).getpixel((20, 20)) == (0, 0, 255)
+    assert b"private" not in second.data
+
+
 @pytest.mark.serial
 def test_browser_rates_and_finishes_synthetic_scene(tmp_path: Path) -> None:
     from threading import Thread
