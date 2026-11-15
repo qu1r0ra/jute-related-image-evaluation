@@ -13,7 +13,7 @@ This file records synthetic interface evidence. `PRODUCT.md` owns product constr
 
 ## Verification evidence
 
-- `uv run python -m pytest tests/data/test_rating_applet.py -q -p no:cacheprovider`: **33 passed**. The suite uses generated images, a temporary synthetic kit and sitting, and Playwright Chromium 159.0.8154.6. Browser assertions cover the finish confirmation regression, Escape/rating-change cancellation, save and image failures, stale recovery clearing, focus restoration, preview zoom, pan retention, equal panels, and the three viewport sizes above.
+- `uv run python -m pytest tests/data/test_rating_applet.py -q -p no:cacheprovider`: **33 passed**. The suite uses generated images, a temporary synthetic kit and sitting, and Playwright Chromium 159.0.8154.6. Browser assertions cover the finish confirmation regression, Escape/rating-change cancellation, save and image failures, stale recovery clearing, focus restoration including after finishing, rendered preview zoom, pan retention, equal panels, and the three viewport sizes above.
 - `uv run ruff check src/jute_disease/rating_applet/__init__.py tests/data/test_rating_applet.py`: passed.
 - `node --check src/jute_disease/rating_applet/static/app.js`: passed.
 - The applet-local Impeccable detector, `.agents/skills/impeccable/scripts/impeccable.cmd detect --json static/`, returned no findings. The design sidecar JSON also parsed successfully.

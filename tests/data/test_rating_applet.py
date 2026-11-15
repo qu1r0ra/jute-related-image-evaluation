@@ -1433,7 +1433,7 @@ def test_browser_rates_pair_with_keyboard_zoom_swap_and_finish(tmp_path: Path) -
                 "input => { input.value = '2'; input.dispatchEvent(new Event('input', {bubbles: true})); }"
             )
             preview_zoom_widths = page.locator("#pair-frames img").evaluate_all(
-                "images => images.map(image => Number.parseFloat(image.style.width))"
+                "images => images.map(image => image.getBoundingClientRect().width)"
             )
             assert preview_zoom_widths == pytest.approx(
                 [width * 2 for width in preview_widths]
@@ -1647,6 +1647,7 @@ def test_browser_rates_pair_with_keyboard_zoom_swap_and_finish(tmp_path: Path) -
             assert page.evaluate("document.activeElement.id") == "confirm-finish"
             page.keyboard.press("Enter")
             page.get_by_text("Sitting finished", exact=False).wait_for()
+            assert page.evaluate("document.activeElement.id") == "position"
             page.reload()
             page.get_by_text("Read-only", exact=True).wait_for()
             assert page.get_by_role("button", name="Near-duplicate").is_disabled()

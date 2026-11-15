@@ -388,6 +388,7 @@ $('finish').onclick = () => {
 };
 $('confirm-finish').onclick = async () => {
   if (!finishArmed || busy || failed || state.read_only) return;
+  const focus = rememberFocus();
   busy = true;
   controls();
   try {
@@ -420,6 +421,7 @@ $('confirm-finish').onclick = async () => {
   }
   busy = false;
   controls();
+  restoreFocus(focus, $('position'));
 };
 function disarmFinish() {
   if (!finishArmed) return;
