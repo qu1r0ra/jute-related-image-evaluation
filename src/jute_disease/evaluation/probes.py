@@ -45,6 +45,10 @@ BACKGROUND_WITHHELD = (
     "not reported because the ADR 0002 mask audit did not pass; the background "
     "inputs are built from masks the audit did not clear"
 )
+LEAF_ONLY_WITHHELD = (
+    "not reported because the ADR 0002 mask audit did not pass; the leaf-only "
+    "inputs are built from masks the audit did not clear"
+)
 DETECTED_BACKGROUND = (
     "background-only input (leaf blanked) carries label information, which can "
     "include leaf shape or aspect ratio"

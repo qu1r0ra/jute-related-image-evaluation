@@ -69,6 +69,7 @@ from jute_disease.evaluation.freeze_record import (
 )
 from jute_disease.evaluation.probes import (
     BACKGROUND_WITHHELD,
+    LEAF_ONLY_WITHHELD,
     PERMUTATIONS,
     background_probe,
     border_probe,
@@ -185,9 +186,14 @@ def evaluate_test(
         "complete": bool(leaf_required) and not uncovered,
         "missing": uncovered,
     }
+    audit_passed = bool(authorization.body["mask_audit"]["passed"])
     for system in sorted(s for s, v in runs if v == "leaf_only"):
-        leaf = build(system, "leaf_only")
         entry = report["systems"].setdefault(system, {})
+        # ADR 0002 gates leaf-only results on the mask audit, as the probe is.
+        if not audit_passed:
+            entry["leaf_only"] = {"reported": False, "withheld": LEAF_ONLY_WITHHELD}
+            continue
+        leaf = build(system, "leaf_only")
         entry["leaf_only"] = _plain(evaluate_predictions(leaf))
         if (system, "full") in runs:
             entry["full_on_leaf_sample"] = _plain(
@@ -195,7 +201,6 @@ def evaluate_test(
             )
 
     options = {"resamples": resamples, "permutations": permutations, "seed": seed}
-    audit_passed = bool(authorization.body["mask_audit"]["passed"])
     for system in sorted(s for s, v in runs if v == "background_only"):
         # ADR 0002 gates the probe on the mask audit, as the border headline is.
         if audit_passed:

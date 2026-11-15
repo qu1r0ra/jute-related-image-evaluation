@@ -591,7 +591,8 @@ def test_all_analyses_run_through_the_evaluator(
     )
     system = report["systems"]["mobilenet_v2_direct"]
     assert system["class_scene_cells"] and system["scene_summaries"]
-    assert system["leaf_only"] and system["full_on_leaf_sample"]
+    assert system["leaf_only"] and "withheld" not in system["leaf_only"]
+    assert system["full_on_leaf_sample"]
     assert system["background_probe"]["statement"]
     border = system["border_probe"]
     for result in (system["background_probe"], border["unrestricted"]):
@@ -641,6 +642,25 @@ def test_a_failed_mask_audit_withholds_the_background_statement(
     assert "audit did not pass" in probe["withheld"]
     assert "statement" not in probe and "detected" not in probe
     assert "p_value" not in probe
+
+
+def test_a_failed_mask_audit_withholds_the_leaf_only_scores(
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ADR 0002 gates leaf-only results on the audit as well as the probe."""
+    report, _ = _analyses_report(
+        tmp_path, target, root, policy_dir, mask_audit_report, capsys
+    )
+    system = report["systems"]["mobilenet_v2_direct"]
+    assert system["leaf_only"]["reported"] is False
+    assert "audit did not pass" in system["leaf_only"]["withheld"]
+    assert "full_on_leaf_sample" not in system
+    assert report["leaf_only_coverage"]["complete"] is True
 
 
 def test_a_passed_mask_audit_reports_the_background_statement(
