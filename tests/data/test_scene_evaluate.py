@@ -10,11 +10,12 @@ from PIL import Image
 from jute_disease.cli import main
 from jute_disease.data import (
     POOL_POPULATIONS,
+    ColorThresholdBackend,
+    SceneThresholds,
     compare_scene_tags,
     run_scene_test,
     score_scene_test,
 )
-from jute_disease.data.masks import ColorThresholdBackend, SceneThresholds
 
 RUBRIC = "scene-tag-v2"
 CLEAN, FIELD, UNKNOWN = "clean-background", "field", "unknown"

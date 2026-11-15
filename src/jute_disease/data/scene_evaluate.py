@@ -24,6 +24,7 @@ from typing import Any
 
 from PIL import Image
 
+from jute_disease.data.fingerprints import file_sha256
 from jute_disease.data.masks import (
     SCENE_RUBRIC_VERSION,
     SCENE_TAGS,
@@ -53,10 +54,6 @@ RECHECK_COLUMNS = ("image_id", "path", "scene_tag", "rubric_version")
 CLEAN, UNKNOWN = "clean-background", "unknown"
 INSUFFICIENT = "insufficient evidence"
 _RESERVED_JUDGE_NAMES = {"image_id", "owner", "path"}
-
-
-def _file_sha256(path: Path) -> str:
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 def _canonical_digest(value: Mapping[str, Any]) -> str:
@@ -225,9 +222,9 @@ def compare_scene_tags(
         "seed": seed,
         "images": len(ids),
         "inputs": {
-            "held_out": _file_sha256(held_out),
-            "owner_first_pass": _file_sha256(owner),
-            "judges": {name: _file_sha256(judges[name]) for name in names},
+            "held_out": file_sha256(held_out),
+            "owner_first_pass": file_sha256(owner),
+            "judges": {name: file_sha256(judges[name]) for name in names},
         },
         "judges": {
             name: _judge_agreement(
@@ -435,7 +432,7 @@ def _classify(
         path = Path(record["path"])
         if not path.is_file():
             raise ValueError(f"held-out image is missing: {path}")
-        if _file_sha256(path) != record["image_id"]:
+        if file_sha256(path) != record["image_id"]:
             raise ValueError(f"held-out image does not match its image ID: {path}")
         with Image.open(path) as opened:
             image = opened.convert("RGB")
@@ -483,9 +480,9 @@ def run_scene_test(
     compared = json.loads(compare_file.read_text(encoding="utf-8"))
     if compared.get("schema") != SCENE_COMPARE_SCHEMA:
         raise ValueError(f"{compare_file} is not a scene comparison record")
-    if _file_sha256(held_out) != compared["inputs"]["held_out"]:
+    if file_sha256(held_out) != compared["inputs"]["held_out"]:
         raise ValueError("the held-out set differs from the one the compare step read")
-    if _file_sha256(owner) != compared["inputs"]["owner_first_pass"]:
+    if file_sha256(owner) != compared["inputs"]["owner_first_pass"]:
         raise ValueError(
             "the owner's first-pass tags differ from the ones the compare step read"
         )
@@ -545,12 +542,12 @@ def run_scene_test(
         "rubric_version": SCENE_RUBRIC_VERSION,
         "inputs": {
             "held_out": compared["inputs"]["held_out"],
-            "thresholds": _file_sha256(thresholds),
-            "compare": _file_sha256(compare_file),
+            "thresholds": file_sha256(thresholds),
+            "compare": file_sha256(compare_file),
             "owner_first_pass": compared["inputs"]["owner_first_pass"],
             "judges": compared["inputs"]["judges"],
-            "final_tags": _file_sha256(final),
-            "recheck_tags": None if recheck is None else _file_sha256(recheck),
+            "final_tags": file_sha256(final),
+            "recheck_tags": None if recheck is None else file_sha256(recheck),
         },
         "mask_backend": {"model": backend.model, "version": backend.version},
         **scores,
