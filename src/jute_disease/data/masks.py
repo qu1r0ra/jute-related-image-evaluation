@@ -13,6 +13,11 @@ import numpy as np
 from PIL import Image
 
 SCENE_TAGS = ("clean-background", "field", "unknown")
+REQUIRED_DEVELOPMENT_TAGS = ("clean-background", "field")
+TWO_TAG_METHOD = (
+    "100-image grid search maximizing two-tag scene macro-F1; "
+    "no unknown development image, background cutoff fixed at 0"
+)
 MASK_RUBRIC_VERSION = "leaf-mask-v1"
 SCENE_RUBRIC_VERSION = "scene-tag-v2"
 MASK_QUALITY_RATINGS = ("pass", "minor", "fail")
@@ -123,8 +128,27 @@ class SceneThresholds:
     method: str = "100-image grid search maximizing scene macro-F1"
     mask_model: str = "excess-green-otsu-largest-component"
     mask_version: str = "1"
+    # Scene tags the development set held; None for thresholds stored before
+    # the tags were recorded, which always held all three.
+    development_tags: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
+        if self.development_tags is not None:
+            tags = set(self.development_tags)
+            if (
+                not tags <= set(SCENE_TAGS)
+                or not tags >= set(REQUIRED_DEVELOPMENT_TAGS)
+                or len(tags) != len(self.development_tags)
+            ):
+                raise ValueError(
+                    "development tags must be scene tags that include "
+                    "clean-background and field"
+                )
+            if "unknown" not in tags and self.background_fraction_min != 0:
+                raise ValueError(
+                    "background cutoff must be 0 when the development tags "
+                    "hold no unknown image"
+                )
         if not 0 <= self.background_fraction_min <= 1:
             raise ValueError("background cutoff must be in [0, 1]")
         if not 0 <= self.color_uniformity_min <= 1:
@@ -146,7 +170,7 @@ class SceneThresholds:
             raise ValueError("development digest must be a SHA-256 hex digest")
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        stored: dict[str, Any] = {
             "version": SCENE_RUBRIC_VERSION,
             "background_fraction_min": self.background_fraction_min,
             "color_uniformity_min": self.color_uniformity_min,
@@ -163,6 +187,9 @@ class SceneThresholds:
             "mask_version": self.mask_version,
             "categories": list(SCENE_TAGS),
         }
+        if self.development_tags is not None:
+            stored["development_tags"] = list(self.development_tags)
+        return stored
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SceneThresholds:
@@ -181,6 +208,11 @@ class SceneThresholds:
             method=str(data["method"]),
             mask_model=str(data["mask_model"]),
             mask_version=str(data["mask_version"]),
+            development_tags=(
+                tuple(str(tag) for tag in data["development_tags"])
+                if "development_tags" in data
+                else None
+            ),
         )
 
 
@@ -285,7 +317,11 @@ def fit_scene_thresholds(
     mask_model: str = ColorThresholdBackend.model,
     mask_version: str = ColorThresholdBackend.version,
 ) -> SceneThresholds:
-    """Fit two scene cutoffs on exactly 100 labeled development images."""
+    """Fit the scene cutoffs on exactly 100 labeled development images.
+
+    A set with no ``unknown`` image fixes the background cutoff at 0, so no
+    image is classed ``unknown``, and fits only the uniformity cutoff.
+    """
     if len(observations) != 100:
         raise ValueError("scene calibration requires exactly 100 development images")
     ids = [item.image_id for item in observations]
@@ -295,14 +331,18 @@ def fit_scene_thresholds(
     source_hashes = [item.source_sha256 for item in observations]
     if len(set(source_hashes)) != 100:
         raise ValueError("development images must have unique source content")
-    if set(labels) != set(SCENE_TAGS):
-        raise ValueError("development images must represent all three scene tags")
+    if not set(labels) >= set(REQUIRED_DEVELOPMENT_TAGS):
+        raise ValueError(
+            "development images must represent both clean-background and field"
+        )
+    development_tags = tuple(tag for tag in SCENE_TAGS if tag in set(labels))
+    has_unknown = "unknown" in development_tags
 
     background = np.array([o.features.background_fraction for o in observations])
     uniformity = np.array([o.features.color_uniformity for o in observations])
     category = {name: i for i, name in enumerate(SCENE_TAGS)}
     truth = np.array([category[tag] for tag in labels], dtype=np.int64)
-    background_cutoffs = _cutoff_candidates(background)
+    background_cutoffs = _cutoff_candidates(background) if has_unknown else [0.0]
     uniformity_cutoffs = _cutoff_candidates(uniformity)
     best_score = -1.0
     best_cutoffs = (0.0, 0.0)
@@ -317,7 +357,7 @@ def fit_scene_thresholds(
                     category["field"],
                 ),
             )
-            score = _macro_f1(truth, predicted, len(SCENE_TAGS))
+            score = _macro_f1(truth, predicted, len(development_tags))
             candidate = (score, -background_min, -uniformity_min)
             current = (best_score, -best_cutoffs[0], -best_cutoffs[1])
             if candidate > current:
@@ -345,8 +385,10 @@ def fit_scene_thresholds(
         ),
         development_digest=digest,
         score=best_score,
+        method=SceneThresholds.method if has_unknown else TWO_TAG_METHOD,
         mask_model=mask_model,
         mask_version=mask_version,
+        development_tags=development_tags,
     )
 
 

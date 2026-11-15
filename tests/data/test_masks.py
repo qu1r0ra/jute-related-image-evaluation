@@ -1,4 +1,5 @@
 import hashlib
+import json
 from pathlib import Path
 
 import numpy as np
@@ -137,3 +138,139 @@ def test_mask_artifacts_store_provenance_and_overlay(tmp_path: Path) -> None:
             model_version="fixture-1",
             rubric_version="leaf-mask-v1",
         )
+
+
+def _observation(index: int, tag: str, features: SceneFeatures) -> SceneObservation:
+    return SceneObservation(
+        f"dev-{index:03d}",
+        features,
+        tag,
+        hashlib.sha256(f"source-{index}".encode()).hexdigest(),
+    )
+
+
+def _two_tag_observations() -> list[SceneObservation]:
+    groups = (
+        ("clean-background", 40, SceneFeatures(0.9, 0.9)),
+        ("clean-background", 10, SceneFeatures(0.1, 0.6)),
+        ("field", 45, SceneFeatures(0.8, 0.3)),
+        ("field", 5, SceneFeatures(0.05, 0.7)),
+    )
+    observations: list[SceneObservation] = []
+    for tag, count, features in groups:
+        for _ in range(count):
+            observations.append(_observation(len(observations), tag, features))
+    return observations
+
+
+def _three_tag_observations() -> list[SceneObservation]:
+    cycle = (
+        ("clean-background", SceneFeatures(0.9, 0.99)),
+        ("field", SceneFeatures(0.9, 0.5)),
+        ("unknown", SceneFeatures(0.2, 0.99)),
+    )
+    return [_observation(index, *cycle[index % 3]) for index in range(100)]
+
+
+def test_two_tag_development_set_fits_with_no_unknown_class() -> None:
+    observations = _two_tag_observations()
+
+    thresholds = fit_scene_thresholds(observations)
+
+    assert thresholds.background_fraction_min == 0.0
+    assert thresholds.development_tags == ("clean-background", "field")
+    assert all(
+        classify_scene(item.features, thresholds) != "unknown" for item in observations
+    )
+    assert SceneThresholds.from_dict(thresholds.to_dict()) == thresholds
+
+
+def test_two_tag_uniformity_cutoff_is_the_hand_computed_macro_f1_optimum() -> None:
+    # Uniformity values are 0.3 (45 field), 0.6 (10 clean), 0.7 (5 field) and
+    # 0.9 (40 clean), so the candidate cutoffs are 0, 0.45, 0.65, 0.8 and 1.
+    # Two-tag macro-F1 at each: 1/3, 0.9499 (clean 100/105, field 90/95),
+    # 0.8496 (80/95, 90/105), 0.8990 (80/90, 100/110) and 1/3.
+    thresholds = fit_scene_thresholds(_two_tag_observations())
+
+    assert thresholds.color_uniformity_min == pytest.approx(0.45)
+    assert thresholds.score == pytest.approx((100 / 105 + 90 / 95) / 2)
+
+
+@pytest.mark.parametrize(
+    "tags",
+    [("field", "unknown"), ("clean-background", "unknown"), ("field",)],
+)
+def test_development_set_without_clean_background_or_field_is_refused(
+    tags: tuple[str, ...],
+) -> None:
+    observations = [
+        _observation(index, tags[index % len(tags)], SceneFeatures(0.5, 0.5))
+        for index in range(100)
+    ]
+
+    with pytest.raises(ValueError, match="clean-background and field"):
+        fit_scene_thresholds(observations)
+
+
+def test_three_tag_fit_keeps_its_cutoffs_and_digest_material() -> None:
+    observations = _three_tag_observations()
+    material = [
+        {
+            "image_id": item.image_id,
+            "scene_tag": item.scene_tag,
+            "source_sha256": item.source_sha256,
+            "background_fraction": item.features.background_fraction,
+            "color_uniformity": item.features.color_uniformity,
+        }
+        for item in sorted(observations, key=lambda item: item.image_id)
+    ]
+    digest = hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+    thresholds = fit_scene_thresholds(observations)
+    stored = thresholds.to_dict()
+
+    assert thresholds.background_fraction_min == pytest.approx(0.55)
+    assert thresholds.color_uniformity_min == pytest.approx(0.745)
+    assert thresholds.score == 1.0
+    assert thresholds.development_digest == digest
+    assert thresholds.method == "100-image grid search maximizing scene macro-F1"
+    assert stored.pop("development_tags") == [
+        "clean-background",
+        "field",
+        "unknown",
+    ]
+    assert set(stored) == {
+        "version",
+        "background_fraction_min",
+        "color_uniformity_min",
+        "development_ids",
+        "development_sources",
+        "development_digest",
+        "development_count",
+        "score",
+        "method",
+        "mask_model",
+        "mask_version",
+        "categories",
+    }
+
+
+def test_thresholds_stored_before_the_tag_record_still_load() -> None:
+    legacy = fit_scene_thresholds(_three_tag_observations()).to_dict()
+    del legacy["development_tags"]
+
+    restored = SceneThresholds.from_dict(legacy)
+
+    assert restored.development_tags is None
+    assert restored.background_fraction_min == legacy["background_fraction_min"]
+    assert restored.to_dict() == legacy
+
+
+def test_thresholds_refuse_a_tag_record_outside_the_scene_tags() -> None:
+    stored = fit_scene_thresholds(_two_tag_observations()).to_dict()
+
+    for tags in (["clean-background", "sky"], ["field", "unknown"]):
+        with pytest.raises(ValueError, match="development tags"):
+            SceneThresholds.from_dict({**stored, "development_tags": tags})
