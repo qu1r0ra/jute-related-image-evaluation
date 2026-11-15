@@ -512,7 +512,7 @@ document.addEventListener('keydown', event => {
     return;
   }
   if (
-    /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) ||
+    /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target.closest('.zoom') ||
     target.isContentEditable
   ) return;
   if (!readable) return;

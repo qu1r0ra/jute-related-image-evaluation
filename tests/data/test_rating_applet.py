@@ -1536,6 +1536,15 @@ def test_browser_rates_pair_with_keyboard_zoom_swap_and_finish(tmp_path: Path) -
             assert retained_pan == pytest.approx([0.4, 0.4, 0.3, 0.3], abs=0.02)
 
             page.locator("#zoom").focus()
+            prior_requests = requests.count(
+                f"http://127.0.0.1:{server.server_port}/api/items/1"
+            )
+            page.keyboard.press("2")
+            assert (
+                requests.count(f"http://127.0.0.1:{server.server_port}/api/items/1")
+                == prior_requests
+            )
+            page.evaluate("document.activeElement.blur()")
             page.keyboard.press("2")
             page.get_by_text(
                 "Couldn't save this choice: Synthetic pair save failure. Reload to check the value before making another choice.",
