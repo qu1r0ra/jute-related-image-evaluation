@@ -40,16 +40,15 @@ def _locked(runtime: Path) -> Iterator[None]:
         if os.name == "nt":
             import msvcrt
 
-            handle.seek(0)
-            if not handle.read(1):
-                handle.write(b"0")
-                handle.flush()
+            deadline = time.monotonic() + 30
             while True:
                 try:
                     handle.seek(0)
                     msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
                     break
                 except OSError:
+                    if time.monotonic() >= deadline:
+                        raise
                     time.sleep(0.05)
         else:
             import fcntl
@@ -151,6 +150,15 @@ def _state(runtime: Path, content: bytes) -> tuple[bool, bool]:
         ) from exc
 
 
+def _revision(runtime: Path, content: bytes) -> str:
+    """Include history so an earlier byte-identical state is still stale."""
+    history = hashlib.sha256(content)
+    for line in (runtime / "events.jsonl").read_bytes().splitlines():
+        if json.loads(line)["type"] in {"commit", "finish", "reopen"}:
+            history.update(line)
+    return history.hexdigest()
+
+
 def _collected(sheet: Path) -> bool:
     return any(
         (sheet.parent / name).exists()
@@ -181,12 +189,12 @@ def create_app(sheet: Path) -> Flask:
     session = uuid.uuid4().hex
     app = Flask(__name__)
     with _locked(runtime):
-        content, _, rows = _read(sheet)
         try:
-            _, initialized = _state(runtime, content)
-        except ValueError:
-            initialized = False
+            content, _, rows = _read(sheet)
+            _state(runtime, content)
+        except OSError, ValueError, KeyError, csv.Error:
             # Preserve the evidence; requests report the recovery state below.
+            pass
         else:
             backup = runtime / f"{session}.backup"
             with backup.open("xb") as handle:
@@ -221,17 +229,22 @@ def create_app(sheet: Path) -> Flask:
                     position=position,
                     completed=sum(complete),
                     total=len(rows),
-                    revision=_digest(content),
+                    revision=_revision(runtime, content),
                     read_only=finished or _collected(sheet),
                 )
-        except OSError, ValueError:
+        except OSError, ValueError, KeyError, csv.Error:
             return jsonify(
-                error="Recovery required. Preserve the sheet and private backup; inspect the journal before continuing."
+                error=(
+                    "Recovery required. Preserve the sheet and private backup; "
+                    "inspect the journal before continuing."
+                )
             ), 409
 
     @app.post("/api/items/<int:position>")
     def save(position: int) -> object:
-        data = request.get_json(silent=True) or {}
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify(error="Invalid request."), 400
         try:
             with _locked(runtime):
                 content, columns, rows = _read(sheet)
@@ -240,7 +253,7 @@ def create_app(sheet: Path) -> Flask:
                     raise ValueError("No adoption record")
                 if finished or _collected(sheet):
                     return jsonify(error="This sitting is read-only."), 403
-                if data.get("revision") != _digest(content):
+                if data.get("revision") != _revision(runtime, content):
                     return jsonify(error="The sitting changed. Reload it."), 409
                 if not 1 <= position <= len(rows):
                     return jsonify(error="Unknown position."), 404
@@ -250,13 +263,15 @@ def create_app(sheet: Path) -> Flask:
                     "scene": {"scene_tag"},
                 }
                 field = data.get("field")
-                if field not in allowed.get(row["kind"], set()) or not isinstance(
-                    data.get("value"), str
+                if (
+                    not isinstance(field, str)
+                    or field not in allowed.get(row["kind"], set())
+                    or not isinstance(data.get("value"), str)
                 ):
                     return jsonify(error="Invalid choice."), 400
                 previous = row[field]
                 if data["value"] == previous:
-                    return jsonify(revision=_digest(content))
+                    return jsonify(revision=_revision(runtime, content))
                 row[field] = data["value"]
                 try:
                     validate_audit_row(row)
@@ -294,19 +309,30 @@ def create_app(sheet: Path) -> Flask:
                     if sheet.read_bytes() != content:
                         raise ValueError("Sheet changed during save")
                     os.replace(temp_name, sheet)
+                    if os.name != "nt":
+                        directory = os.open(sheet.parent, os.O_RDONLY)
+                        try:
+                            os.fsync(directory)
+                        finally:
+                            os.close(directory)
                     _append(runtime, {"type": "commit", "transaction": transaction})
                 finally:
                     if temp_name and os.path.exists(temp_name):
                         os.unlink(temp_name)
-                return jsonify(revision=_digest(updated))
-        except OSError, ValueError:
+                return jsonify(revision=_revision(runtime, updated))
+        except OSError, ValueError, KeyError, csv.Error:
             return jsonify(
-                error="Save failed or recovery is required. Reload and inspect the private backup if the problem persists."
+                error=(
+                    "Save failed or recovery is required. Reload and inspect "
+                    "the private backup if the problem persists."
+                )
             ), 409
 
     @app.post("/api/finish")
     def finish() -> object:
-        data = request.get_json(silent=True) or {}
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify(error="Invalid request."), 400
         try:
             with _locked(runtime):
                 content, _, rows = _read(sheet)
@@ -316,7 +342,7 @@ def create_app(sheet: Path) -> Flask:
                 if finished or _collected(sheet):
                     return jsonify(error="This sitting is read-only."), 403
                 if (
-                    data.get("revision") != _digest(content)
+                    data.get("revision") != _revision(runtime, content)
                     or not rows
                     or not all(map(audit_row_complete, rows))
                 ):
@@ -327,8 +353,8 @@ def create_app(sheet: Path) -> Flask:
                     runtime,
                     {"type": "finish", "digest": _digest(content), "session": session},
                 )
-                return jsonify(read_only=True, revision=_digest(content))
-        except OSError, ValueError:
+                return jsonify(read_only=True, revision=_revision(runtime, content))
+        except OSError, ValueError, KeyError, csv.Error:
             return jsonify(error="Finish failed; recovery may be required."), 409
 
     return app
