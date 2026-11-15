@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from jute_disease import cli as cli_module
+from jute_disease import evaluation as evaluation_package
 from jute_disease.cli import main
 from jute_disease.config import BENCHMARK_CONFIG
 from jute_disease.data import ColorThresholdBackend, load_manifest
@@ -404,7 +404,7 @@ def test_test_read_refused_without_records_and_permitted_after(
             "record_hash": auth.record_hash,
         }
 
-    monkeypatch.setattr(cli_module, "evaluate_test", _authorized_stub)
+    monkeypatch.setattr(evaluation_package, "evaluate_test", _authorized_stub)
     _cli(
         *arguments,
         "--freeze-record",

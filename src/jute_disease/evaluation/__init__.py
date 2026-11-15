@@ -1,7 +1,6 @@
 from importlib import import_module
 from typing import Any
 
-from jute_disease.evaluation.metrics import EVAL_METRICS, TRAIN_METRICS, format_metrics
 from jute_disease.evaluation.resampling import (
     CONFIDENCE_LEVEL,
     EVAL_SEED,
@@ -44,6 +43,9 @@ from jute_disease.evaluation.statistics import (
 )
 
 _LAZY_EXPORTS = {
+    "EVAL_METRICS": (".metrics", "EVAL_METRICS"),
+    "TRAIN_METRICS": (".metrics", "TRAIN_METRICS"),
+    "format_metrics": (".metrics", "format_metrics"),
     "PRIMARY_CONTRAST": (".analysis_plan", "PRIMARY_CONTRAST"),
     "SECONDARY_TESTS": (".analysis_plan", "SECONDARY_TESTS"),
     "AnalysisReport": (".analysis_plan", "AnalysisReport"),
