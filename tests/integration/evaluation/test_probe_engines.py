@@ -59,10 +59,34 @@ BORDER_CNN = FitSpec(
     accumulation=1,
     variant="border",
 )
+BACKGROUND_CLASSICAL = FitSpec(
+    "probe/background/classical/lr-raw",
+    FitKind.CLASSICAL,
+    42,
+    estimator="lr",
+    features="raw",
+    variant="background_only",
+)
+BACKGROUND_CNN = FitSpec(
+    "probe/background/cnn/tiny/seed-42",
+    FitKind.TARGET,
+    42,
+    system="tiny",
+    model="resnet18",
+    micro_batch=8,
+    accumulation=1,
+    variant="background_only",
+)
 FULL_CLASSICAL = FitSpec(
     "classical/lr-raw", FitKind.CLASSICAL, 42, estimator="lr", features="raw"
 )
-PROBES = (BORDER_CLASSICAL, PAD_CUE, BORDER_CNN)
+PROBES = (
+    BORDER_CLASSICAL,
+    PAD_CUE,
+    BORDER_CNN,
+    BACKGROUND_CLASSICAL,
+    BACKGROUND_CNN,
+)
 EVERY_FIT = (*PROBES, FULL_CLASSICAL)
 
 
@@ -215,6 +239,20 @@ def test_a_full_fit_cannot_be_filed_as_a_probe(
         _record(freeze, store, FULL_CLASSICAL, tmp_path, variant="border")
 
 
+def test_a_full_fit_cannot_be_filed_as_a_background_probe(
+    freeze: Path,
+    store: Path,
+    target: Path,
+    image_root: Path,
+    root: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _predict(capsys, freeze, FULL_CLASSICAL.fit_id, store, target, image_root, root)
+    with pytest.raises(SystemExit, match="variant"):
+        _record(freeze, store, FULL_CLASSICAL, tmp_path, variant="background_only")
+
+
 def test_a_border_probe_reads_the_test_images_through_its_own_variant(
     freeze: Path,
     store: Path,
@@ -234,6 +272,25 @@ def test_a_border_probe_reads_the_test_images_through_its_own_variant(
     assert border["images"] == full["images"]
 
 
+def test_a_background_probe_reads_the_test_images_through_its_own_variant(
+    freeze: Path,
+    store: Path,
+    target: Path,
+    image_root: Path,
+    root: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The background fit and the full fit share features, not the leaf pixels."""
+    background = _predict(
+        capsys, freeze, BACKGROUND_CLASSICAL.fit_id, store, target, image_root, root
+    )
+    full = _predict(
+        capsys, freeze, FULL_CLASSICAL.fit_id, store, target, image_root, root
+    )
+    assert background["predictions_sha256"] != full["predictions_sha256"]
+    assert background["images"] == full["images"]
+
+
 def test_a_variant_changes_a_fit_identity_and_its_absence_changes_nothing() -> None:
     recipe = _recipe()
     manifests = {"train": "a" * 64}
@@ -244,7 +301,10 @@ def test_a_variant_changes_a_fit_identity_and_its_absence_changes_nothing() -> N
     pad = fit_identity(
         replace(FULL_CLASSICAL, variant="pad_cue"), recipe, manifests, None
     )
-    assert len({plain, border, pad}) == 3
+    background = fit_identity(
+        replace(FULL_CLASSICAL, variant="background_only"), recipe, manifests, None
+    )
+    assert len({plain, border, pad, background}) == 4
     # Pinned before the field existed: receipts of fits made earlier stay valid.
     recorded = fit_identity(
         FULL_CLASSICAL, load_benchmark(BENCHMARK_CONFIG).recipe, manifests, None

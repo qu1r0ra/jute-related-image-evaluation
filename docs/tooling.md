@@ -24,6 +24,8 @@ Preprocessing identity revision 2 covers the shared 256-pixel letterbox, bilinea
 
 `jute-disease queue plan` and `queue status` list every declared fit and need no policy directory. `queue run` over the full matrix requires `--policy-dir`, the directory of receipted policy manifests (with `assignments.json`), and reads each pool's images from `--pool-a-root`, `--pool-b-root` and `--pool-c-root` (falling back to `--image-root`). The same options reach `just queue-run` and `just queue-unattended` (an optional leading timeout in seconds, then the options). Tuning fits (`classical/tune/...`, `cnn/tune/...`, `source/tune/...`) run before the finals that reuse their selection and write a `tuning.json` that records `test_accessed: false`.
 
+`queue run --probes` replaces the plan with the probe stage only (the tuning fits the probes reuse, then the pad-cue, border and background-only fits), so it does not repeat the main plan. Run the plain `queue run` and then `queue run --probes` before a confirmatory `evaluate test`: the test read refuses when any scored fit of the freeze record has no lineage-bound run, and it names the missing fit IDs.
+
 ### Manuscript export fixture
 
 Run `just manuscript-fixture artifacts/manuscript-fixture` to exercise a

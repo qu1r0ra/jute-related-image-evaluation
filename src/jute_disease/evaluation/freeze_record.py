@@ -534,7 +534,25 @@ class RunEntry:
 VARIANTS = ("full", "leaf_only", "background_only", "border", "pad_cue")
 # Variants whose fits train on their own pixels; a run of one of them must be of a
 # fit that trained on it, and no other run may borrow such a fit.
-TRAINED_VARIANTS = frozenset({"border", "pad_cue"})
+TRAINED_VARIANTS = frozenset({"border", "pad_cue", "background_only"})
+# Fits that leave no test-scorable model: a prepare fit builds a feature cache, a
+# tuning fit writes only its selection, and a source fit is a stage a target
+# builds on. The freeze record lists them, but no run can ever cover them.
+UNSCORED_FIT_PREFIXES = (
+    "classical/prepare/",
+    "classical/tune/",
+    "cnn/tune/",
+    "source/",
+)
+
+
+def scored_fit_ids(fit_ids: Iterable[str]) -> set[str]:
+    """The fit IDs a run record must cover, without prepare, tuning and source fits."""
+    return {
+        fit_id for fit_id in fit_ids if not fit_id.startswith(UNSCORED_FIT_PREFIXES)
+    }
+
+
 PREDICTION_RECEIPT_SCHEMA = 1
 LEAF_RECEIPT_SCHEMA = 1
 
@@ -1041,9 +1059,9 @@ class Authorization:
 
     @property
     def missing_fit_ids(self) -> tuple[str, ...]:
-        """Frozen fits with no authorized run; a read without them is not the matrix."""
+        """Scored frozen fits with no authorized run; a read without them is partial."""
         covered = {run.fit_id for run in self.runs}
-        return tuple(sorted(set(self.body.get("fit_ids", ())) - covered))
+        return tuple(sorted(scored_fit_ids(self.body.get("fit_ids", ())) - covered))
 
 
 def _verify_mask_audit(bound: object, root: Path | str) -> None:
@@ -1175,8 +1193,16 @@ def authorize_test_read(
     root: Path | str,
     fit_ids: Sequence[str] | None = None,
     target_dir: Path | str | None = None,
+    *,
+    require_full_matrix: bool = False,
 ) -> Authorization:
-    """Return the authorized runs, or refuse the test read."""
+    """Return the authorized runs, or refuse the test read.
+
+    With ``require_full_matrix`` the read is refused, before anything is logged,
+    unless the run record holds a lineage-bound run of every scored fit ID the
+    freeze record lists (all but prepare, tuning and source fits), whichever subset
+    ``fit_ids`` selects to read. The refusal names the missing IDs.
+    """
     record = verify_freeze_record(freeze_record, root, target_dir)
     body = record["body"]
     if run_record is None or not Path(run_record).is_file():
@@ -1188,8 +1214,14 @@ def authorize_test_read(
     if run_body.get("freeze_record_hash") != record["hash"]:
         raise TestReadRefusedError("run record belongs to a different freeze record")
     fits = run_body["fits"]
-    wanted = list(fits) if fit_ids is None else list(fit_ids)
     listed = set(body["fit_ids"])
+    if require_full_matrix and (absent := sorted(scored_fit_ids(listed) - set(fits))):
+        raise TestReadRefusedError(
+            "test read refused: the freeze record lists fits with no lineage-bound "
+            f"run in the run record: {', '.join(absent)}; run `queue run --probes` "
+            "and every fit's predict-test, then record the runs again"
+        )
+    wanted = list(fits) if fit_ids is None else list(fit_ids)
     for fit_id in wanted:
         if fit_id not in listed or fit_id not in fits:
             raise TestReadRefusedError(

@@ -13,9 +13,11 @@ from jute_disease.data.manifest import (
     load_manifest,
     write_manifest,
 )
-from jute_disease.training import RunStore, load_benchmark
+from jute_disease.evaluation.freeze_record import scored_fit_ids
+from jute_disease.evaluation.probes import planned_probe_fit_ids
+from jute_disease.training import FitKind, RunStore, load_benchmark
 
-from .conftest import audit_manifest_of
+from .conftest import MINIMAL_PAD_CUE_FIT, audit_manifest_of, minimal_benchmark
 from .test_gated_evaluator import (
     FIT,
     LEAF_FIT,
@@ -26,6 +28,7 @@ from .test_gated_evaluator import (
     _issue_receipts,
     _leaf_run,
     _outcomes,
+    _pad_cue_run,
     _probe_ids,
     _spec,
     _write,
@@ -147,12 +150,17 @@ def _setup_runs(
         mask_audit_report,
         capsys,
         [FIT.format(0), leaf],
+        config=minimal_benchmark(tmp_path),
     )
     store = RunStore(tmp_path / "runs")
     full = _complete_fit(store, target, FIT.format(0), 0, 3)
     _write(
         tmp_path / "runs" / "runs.json",
-        [full, _leaf_run(store, target, leaf, FIT.format(0), 0, 2)],
+        [
+            full,
+            _leaf_run(store, target, leaf, FIT.format(0), 0, 2),
+            _pad_cue_run(store, target),
+        ],
     )
     _issue_receipts(store, record)
     run_record = tmp_path / "runs" / "run-record.json"
@@ -491,7 +499,7 @@ def test_all_analyses_run_through_the_evaluator(
         "leaf_only": "fixture/leaf/seed-0",
         "background_only": "fixture/background/seed-0",
         "border": "fixture/border/seed-0",
-        "pad_cue": "fixture/pad/seed-0",
+        "pad_cue": MINIMAL_PAD_CUE_FIT,
     }
     record = _freeze(
         tmp_path,
@@ -500,7 +508,8 @@ def test_all_analyses_run_through_the_evaluator(
         policy_dir,
         passing_mask_audit_report,
         capsys,
-        list(fits.values()),
+        [fit for variant, fit in fits.items() if variant != "pad_cue"],
+        config=minimal_benchmark(tmp_path),
     )
     sample_args = ["--freeze-record", record, "--target-dir", target, "--root", root]
     capsys.readouterr()
@@ -525,7 +534,7 @@ def test_all_analyses_run_through_the_evaluator(
             runs.append(_leaf_run(store, target, fit_id, fits["full"], 0, 5, sample))
             continue
         system = "pad" if variant == "pad_cue" else SYSTEM
-        trained = variant if variant in ("border", "pad_cue") else ""
+        trained = variant if variant in ("border", "pad_cue", "background_only") else ""
         run = _complete_fit(store, target, fit_id, 0, 5, system=system, variant=trained)
         runs.append({**run, "variant": variant, "of": None})
     _write(tmp_path / "runs" / "runs.json", runs)
@@ -595,11 +604,13 @@ def test_two_runs_for_one_system_and_seed_are_refused(
         mask_audit_report,
         capsys,
         [FIT.format(0), "fixture/dup"],
+        config=minimal_benchmark(tmp_path),
     )
     store = RunStore(tmp_path / "runs")
     runs = [
         _complete_fit(store, target, FIT.format(0), 0, 3),
         _complete_fit(store, target, "fixture/dup", 0, 3),
+        _pad_cue_run(store, target),
     ]
     _write(tmp_path / "runs" / "runs.json", runs)
     _issue_receipts(store, record)
@@ -616,3 +627,19 @@ def test_two_runs_for_one_system_and_seed_are_refused(
     )
     with pytest.raises(SystemExit, match="more than one run"):
         _cli(*_test_args(tmp_path, target, root, record, run_record))
+
+
+def test_the_fits_a_confirmatory_read_needs_are_those_that_leave_predictions() -> None:
+    """Prepare, tuning and source fits write no test-scorable model of their own."""
+    benchmark = load_benchmark(BENCHMARK_CONFIG)
+    declared = benchmark.fits()
+    expected = {
+        fit.fit_id
+        for fit in declared
+        if fit.phase != "tune" and fit.kind in (FitKind.CLASSICAL, FitKind.TARGET)
+    }
+    assert scored_fit_ids(fit.fit_id for fit in declared) == expected
+    assert expected
+    assert set(planned_probe_fit_ids(benchmark)) <= scored_fit_ids(
+        planned_probe_fit_ids(benchmark)
+    )

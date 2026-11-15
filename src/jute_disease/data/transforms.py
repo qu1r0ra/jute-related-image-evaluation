@@ -21,11 +21,14 @@ from PIL.Image import Image
 
 from jute_disease.config import DEFAULT_SEED, IMAGE_SIZE
 from jute_disease.data.probe_pixels import (
+    BACKGROUND_VARIANT,
     BORDER_VARIANT,
     FRAME_WIDTH_PX,
     PROBE_VARIANTS,
+    background_only_image,
     frame_mask,
     frame_only_image,
+    letterbox_leaf_mask,
 )
 
 if TYPE_CHECKING:
@@ -118,6 +121,13 @@ class ImagePipeline:
         if variant:
             # The variant is part of what the pixels are, so every cache keys on it.
             self.description += f";variant={variant}"
+        if variant == BACKGROUND_VARIANT:
+            # The gated colour-threshold mask decides which pixels are leaf, so
+            # its identity is part of what the pixels are.
+            from jute_disease.data.masks import ColorThresholdBackend
+
+            self._backend = ColorThresholdBackend()
+            self.description += f";mask={self._backend.model}@{self._backend.version}"
         self._states: dict[int, torch.Tensor] = {}
 
     def __call__(
@@ -127,6 +137,9 @@ class ImagePipeline:
         from torchvision.transforms import functional as F
 
         image = PILImage.fromarray(np.asarray(img)).convert("RGB")
+        leaf = None
+        if self.variant == BACKGROUND_VARIANT:
+            leaf = self._backend.predict(image).mask
         width, height = image.size
         width, height = letterbox_dimensions(width, height, self.size)
         image = F.resize(
@@ -153,6 +166,13 @@ class ImagePipeline:
                 frame_only_image(np.asarray(image), valid_mask, FRAME_WIDTH_PX)
             )
             valid_mask = frame
+        elif leaf is not None:
+            # Only the background survives; the leaf and the padding are blanked.
+            leaf = letterbox_leaf_mask(leaf, valid_mask)
+            image = PILImage.fromarray(
+                background_only_image(np.asarray(image), leaf, valid_mask)
+            )
+            valid_mask = valid_mask & ~leaf
         if self.is_train:
             import torch
 
@@ -201,7 +221,8 @@ def create_pipeline(
     """Build the fixed ADR 0002 preprocessing and optional training augmentation.
 
     ``variant`` names a probe's input ("border" keeps only the frame of the
-    resized image); the empty default is the ordinary pipeline.
+    resized image, "background_only" only the pixels the audited colour-threshold
+    mask leaves); the empty default is the ordinary pipeline.
     """
     if size < 1:
         raise ValueError("Image size must be positive")

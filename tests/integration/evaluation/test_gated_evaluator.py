@@ -20,7 +20,7 @@ from jute_disease.evaluation import (
 )
 from jute_disease.training import RunStore, load_benchmark
 
-from .conftest import audit_manifest_of
+from .conftest import MINIMAL_PAD_CUE_FIT, audit_manifest_of, minimal_benchmark
 
 LABEL_COUNT = 2
 SYSTEM = "mobilenet_v2_direct"
@@ -41,8 +41,8 @@ def _cli(*args: object) -> None:
     main([str(a) for a in args])
 
 
-def _declared_fits() -> list[str]:
-    benchmark = load_benchmark(BENCHMARK_CONFIG)
+def _declared_fits(config: Path = BENCHMARK_CONFIG) -> list[str]:
+    benchmark = load_benchmark(config)
     return [fit.fit_id for fit in benchmark.fits()]
 
 
@@ -52,11 +52,16 @@ def _write(path: Path, payload: object) -> Path:
     return path
 
 
-def _spec(tmp_path: Path, extra_fits: list[str], probes: list[str]) -> Path:
+def _spec(
+    tmp_path: Path,
+    extra_fits: list[str],
+    probes: list[str],
+    config: Path = BENCHMARK_CONFIG,
+) -> Path:
     return _write(
         tmp_path / "spec.json",
         {
-            "fit_ids": _declared_fits() + probes + extra_fits,
+            "fit_ids": _declared_fits(config) + probes + extra_fits,
             "analysis_ids": ANALYSES,
             "selections": {"cnn/tune/pool-A": 1.0},
             "letterbox_decision": {"choice": "letterbox"},
@@ -81,9 +86,11 @@ def _outcomes(tmp_path: Path) -> Path:
     )
 
 
-def _probe_ids(capsys: pytest.CaptureFixture[str]) -> list[str]:
+def _probe_ids(
+    capsys: pytest.CaptureFixture[str], config: Path = BENCHMARK_CONFIG
+) -> list[str]:
     capsys.readouterr()
-    _cli("evaluate", "probe-plan")
+    _cli("evaluate", "probe-plan", "--benchmark", config)
     return json.loads(capsys.readouterr().out)
 
 
@@ -97,12 +104,15 @@ def _freeze(
     extra_fits: list[str],
     name: str = "freeze-record.json",
     reads_log: Path | None = None,
+    config: Path = BENCHMARK_CONFIG,
 ) -> Path:
     arguments: list[object] = [
         "evaluate",
         "freeze-record",
+        "--benchmark",
+        config,
         "--spec",
-        _spec(tmp_path, extra_fits, _probe_ids(capsys)),
+        _spec(tmp_path, extra_fits, _probe_ids(capsys, config), config),
         "--outcomes",
         _outcomes(tmp_path),
         "--output",
@@ -281,6 +291,14 @@ def _complete_fit(
     }
 
 
+def _pad_cue_run(store: RunStore, target: Path) -> dict[str, object]:
+    """The run of the one scored fit of ``minimal_benchmark``."""
+    run = _complete_fit(
+        store, target, MINIMAL_PAD_CUE_FIT, 42, 4, system="pad", variant="pad_cue"
+    )
+    return {**run, "variant": "pad_cue", "of": None}
+
+
 def _leaf_run(
     store: RunStore,
     target: Path,
@@ -373,9 +391,10 @@ def test_test_read_refused_without_records_and_permitted_after(
         mask_audit_report,
         capsys,
         [FIT.format(0), FIT.format(1), LEAF_FIT.format(0), LEAF_FIT.format(1)],
+        config=minimal_benchmark(tmp_path),
     )
     store = RunStore(tmp_path / "runs")
-    runs = _record_runs(target, store)
+    runs = [*_record_runs(target, store), _pad_cue_run(store, target)]
     _issue_receipts(store, freeze)
     runs_file = _write(tmp_path / "runs.json", runs)
     with pytest.raises(SystemExit, match="no run record"):
@@ -424,6 +443,64 @@ def test_test_read_refused_without_records_and_permitted_after(
         and row["record_hash"] == json.loads(freeze.read_text())["hash"]
         for row in rows
     )
+
+
+def test_confirmatory_test_read_refuses_a_frozen_fit_with_no_lineage_bound_run(
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    missing = ["probe/background/classical/lr-crafted", "probe/border/classical/lr"]
+    freeze = _freeze(
+        tmp_path,
+        target,
+        root,
+        policy_dir,
+        mask_audit_report,
+        capsys,
+        [
+            FIT.format(0),
+            FIT.format(1),
+            LEAF_FIT.format(0),
+            LEAF_FIT.format(1),
+            *missing,
+        ],
+    )
+    store = RunStore(tmp_path / "runs")
+    runs = _record_runs(target, store)
+    _issue_receipts(store, freeze)
+    run_record = tmp_path / "runs" / "run-record.json"
+    _cli(
+        "evaluate",
+        "run-record",
+        "--freeze-record",
+        freeze,
+        "--runs",
+        _write(tmp_path / "runs.json", runs),
+        "--output",
+        run_record,
+    )
+
+    arguments = (
+        *_gate_arguments(tmp_path, target, root),
+        "--freeze-record",
+        freeze,
+        "--run-record",
+        run_record,
+    )
+    for extra in ((), ("--fit-id", FIT.format(0))):
+        with pytest.raises(SystemExit, match="test read refused") as refusal:
+            _cli(*arguments, *extra)
+        for fit_id in missing:
+            assert fit_id in str(refusal.value)
+
+    assert not (tmp_path / "out").exists()
+    read_log = root / "artifacts/evaluation/test-reads.jsonl"
+    rows = [] if not read_log.exists() else read_log.read_text().splitlines()
+    assert not any(json.loads(row)["operation"] == "evaluate_test" for row in rows)
 
 
 def test_run_record_binds_each_fit_by_digest_wherever_it_is_written(
