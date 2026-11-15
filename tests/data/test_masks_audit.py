@@ -13,6 +13,8 @@ from jute_disease.data.masks_audit import (
     CandidateImage,
     ProtectedTestImages,
     evaluate_masks_audit,
+    fit_thresholds_from_manifest,
+    read_development_observations,
     run_masks_audit,
 )
 
@@ -24,8 +26,8 @@ PROTECTED = ProtectedTestImages(
 )
 
 
-def _thresholds() -> SceneThresholds:
-    ids = tuple(f"dev-{index}" for index in range(100))
+def _thresholds(count: int = 100) -> SceneThresholds:
+    ids = tuple(f"dev-{index}" for index in range(count))
     sources = tuple(
         (image_id, hashlib.sha256(f"source-{index}".encode()).hexdigest())
         for index, image_id in enumerate(ids)
@@ -561,3 +563,86 @@ def test_mask_commands_accept_several_target_dirs(tmp_path: Path) -> None:
             ]
         )
     assert not (work / "refused.json").exists()
+
+
+def _development(work: Path, count: int) -> Path:
+    work.mkdir(parents=True, exist_ok=True)
+    records = []
+    for index in range(count):
+        scene = SCENE_TAGS[index % 3]
+        _image(work / f"dev-{index}.png", scene, index + 2000)
+        records.append(
+            {"image_id": f"dev-{index}", "path": f"dev-{index}.png", "scene_tag": scene}
+        )
+    development = work / "development.json"
+    development.write_text(json.dumps(records), encoding="utf-8")
+    return development
+
+
+def test_90_image_development_manifest_fits_and_the_audit_accepts_it(
+    tmp_path: Path,
+) -> None:
+    development = _development(tmp_path / "dev", 90)
+
+    thresholds = fit_thresholds_from_manifest(
+        development, ColorThresholdBackend(), PROTECTED
+    )
+    manifest = run_masks_audit(
+        _candidates(tmp_path),
+        SceneThresholds.from_dict(thresholds.to_dict()),
+        ColorThresholdBackend(),
+        tmp_path / "audit",
+        PROTECTED,
+        sample_count=12,
+        owner_count=6,
+    )
+
+    assert thresholds.to_dict()["development_count"] == 90
+    assert len(thresholds.development_sources) == 90
+    assert manifest["records"]
+
+
+def test_audit_accepts_thresholds_recording_90_development_images(
+    tmp_path: Path,
+) -> None:
+    manifest = run_masks_audit(
+        _candidates(tmp_path),
+        _thresholds(90),
+        ColorThresholdBackend(),
+        tmp_path / "audit",
+        PROTECTED,
+        sample_count=12,
+        owner_count=6,
+    )
+
+    assert manifest["records"]
+
+
+@pytest.mark.parametrize("count", [0, 101])
+def test_development_manifest_outside_1_to_100_images_is_refused(
+    tmp_path: Path, count: int
+) -> None:
+    development = _development(tmp_path / "dev", count)
+
+    with pytest.raises(ValueError, match="between 1 and 100 images"):
+        read_development_observations(development, ColorThresholdBackend(), PROTECTED)
+
+
+def test_development_manifest_with_a_repeated_id_is_refused(tmp_path: Path) -> None:
+    development = _development(tmp_path / "dev", 90)
+    records = json.loads(development.read_text(encoding="utf-8"))
+    records[1]["image_id"] = records[0]["image_id"]
+    development.write_text(json.dumps(records), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="IDs must be unique"):
+        fit_thresholds_from_manifest(development, ColorThresholdBackend(), PROTECTED)
+
+
+def test_development_manifest_with_a_repeated_image_is_refused(tmp_path: Path) -> None:
+    development = _development(tmp_path / "dev", 90)
+    records = json.loads(development.read_text(encoding="utf-8"))
+    records[3]["path"] = records[0]["path"]
+    development.write_text(json.dumps(records), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unique source content"):
+        fit_thresholds_from_manifest(development, ColorThresholdBackend(), PROTECTED)

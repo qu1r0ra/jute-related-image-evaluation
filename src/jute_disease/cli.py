@@ -1325,7 +1325,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     masks_calibrate = data_actions.add_parser(
         "masks-calibrate",
-        help="Fit scene cutoffs on exactly 100 held-apart labeled dev images.",
+        help="Fit scene cutoffs on at most 100 held-apart labeled dev images.",
     )
     masks_calibrate.add_argument("development", type=Path)
     masks_calibrate.add_argument("--output", type=Path, required=True)
