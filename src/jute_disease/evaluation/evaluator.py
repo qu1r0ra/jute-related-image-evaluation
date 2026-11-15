@@ -68,6 +68,7 @@ from jute_disease.evaluation.freeze_record import (
     log_test_read,
 )
 from jute_disease.evaluation.probes import (
+    BACKGROUND_WITHHELD,
     PERMUTATIONS,
     background_probe,
     border_probe,
@@ -194,9 +195,15 @@ def evaluate_test(
             )
 
     options = {"resamples": resamples, "permutations": permutations, "seed": seed}
+    audit_passed = bool(authorization.body["mask_audit"]["passed"])
     for system in sorted(s for s, v in runs if v == "background_only"):
-        result = background_probe(build(system, "background_only"), **options)
-        report["systems"].setdefault(system, {})["background_probe"] = _plain(result)
+        # ADR 0002 gates the probe on the mask audit, as the border headline is.
+        if audit_passed:
+            result = background_probe(build(system, "background_only"), **options)
+            entry = {"reported": True, **_plain(result)}
+        else:
+            entry = {"reported": False, "withheld": BACKGROUND_WITHHELD}
+        report["systems"].setdefault(system, {})["background_probe"] = entry
 
     pad_systems = sorted(s for s, v in runs if v == "pad_cue")
     pad = build(pad_systems[0], "pad_cue") if pad_systems else None
@@ -208,7 +215,7 @@ def evaluate_test(
             build(system, "border"),
             frame_leaf_share,
             scenes,
-            mask_audit_passed=bool(body["mask_audit"]["passed"]),
+            mask_audit_passed=audit_passed,
             leaf_cutoff=float(body["border_probe"]["final"]["leaf_cutoff"]),
             width_px=int(body["border_probe"]["final"]["width_px"]),
             pad_cue=pad,
