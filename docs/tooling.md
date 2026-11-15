@@ -228,7 +228,7 @@ The owner then resolves the disagreements. The final sheet tags every held-out i
 
 `test` checks that the held-out set, the first-pass sheet and the thresholds are the files `compare` read, so thresholds changed after the compare step are refused. It checks each image's content against its ID, classifies every image with the colour-threshold backend and the frozen thresholds, and scores the result against the final tags.
 
-The held-out test is run once. Its record is always `test.json` inside the compare directory; the command takes no output path. Once the inputs are checked, `test` creates that file exclusively, before it classifies any image, and fills it when the scores are known. Any later run is refused while the file exists, whatever its arguments. A run that stops after the claim leaves `test.json` empty: report that crashed claim with the compare directory as it stands, and do not delete the file to run the test again.
+The held-out test is run once. Its record is always `test.json` inside the compare directory; the command takes no output path. Once the inputs are checked, `test` creates that file exclusively, before it classifies any image, and fills it when the scores are known. Any later run is refused while the file exists, whatever its arguments. A run that stops after the claim leaves `test.json` empty: report that crashed claim with the compare directory as it stands, and do not delete the file to run the test again. The refusal covers one compare directory, so a second `compare` into a new directory would open a second test: run `compare` once per held-out set, and record the thresholds digest in the study record before the held-out images are tagged.
 
 The record scores the thresholds as follows:
 
