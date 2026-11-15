@@ -127,6 +127,7 @@ def build_audit_kit(
             "kind": "pair",
             "image_a": row["image_a"],
             "image_b": row["image_b"],
+            "pool": row["pool"],
             "overlay_path": "",
         }
         for row in cohort["pairs"]

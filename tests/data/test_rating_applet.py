@@ -360,7 +360,9 @@ def test_two_processes_cannot_both_write_same_revision(tmp_path: Path) -> None:
     assert create_app(sheet).test_client().get("/api/sitting").json["completed"] == 1
 
 
-def test_synthetic_app_ratings_are_collected(tmp_path: Path) -> None:
+def test_synthetic_pair_mask_scene_roundtrip_through_collector(
+    tmp_path: Path,
+) -> None:
     from jute_disease.data import collect_audit_kit, next_audit_sitting
 
     kit = {
@@ -375,6 +377,13 @@ def test_synthetic_app_ratings_are_collected(tmp_path: Path) -> None:
                 "source_overlay_path": "original/m.png",
             },
             {"item_id": "scene:s", "kind": "scene", "image_a": "scenes/s.png"},
+            {
+                "item_id": "pair:p",
+                "kind": "pair",
+                "pool": "A",
+                "image_a": "a.png",
+                "image_b": "b.png",
+            },
         ],
     }
     (tmp_path / "kit.json").write_text(json.dumps(kit), encoding="utf-8")
@@ -385,6 +394,7 @@ def test_synthetic_app_ratings_are_collected(tmp_path: Path) -> None:
         (1, "mask_quality", "pass"),
         (1, "scene_tag", "unknown"),
         (2, "scene_tag", "field"),
+        (3, "rating", "near-duplicate"),
     ]:
         response = client.post(
             f"/api/items/{position}",
@@ -394,10 +404,19 @@ def test_synthetic_app_ratings_are_collected(tmp_path: Path) -> None:
         revision = response.json["revision"]
     result = collect_audit_kit(tmp_path)
     assert result["mask_ratings"] == result["scene_ratings"] == 1
+    assert result["pair_ratings"] == 1
     with (tmp_path / "owner-masks.csv").open(newline="", encoding="utf-8") as handle:
         assert list(csv.DictReader(handle))[0]["mask_quality"] == "pass"
     with (tmp_path / "owner-scenes.csv").open(newline="", encoding="utf-8") as handle:
         assert list(csv.DictReader(handle))[0]["scene_tag"] == "field"
+    with (tmp_path / "owner.csv").open(newline="", encoding="utf-8") as handle:
+        pair = list(csv.DictReader(handle))[0]
+    assert pair == {
+        "pair_id": "p",
+        "image_a": "a.png",
+        "image_b": "b.png",
+        "rating": "near-duplicate",
+    }
     assert (
         client.post(
             "/api/items/2",
@@ -849,12 +868,14 @@ def test_cross_site_top_level_navigation_opens_only_the_static_app_shell(
     page = client.get("/", headers=navigation)
 
     assert page.status_code == 200
+    assert page.headers["Cache-Control"] == "no-store"
     assert b"secret" not in page.data
+    assert client.get("/static/app.js").headers["Cache-Control"] == "no-store"
     assert client.get("/api/sitting", headers=navigation).status_code == 403
     assert client.post("/api/items/1", headers=navigation).status_code == 403
 
 
-def test_pair_editing_and_finishing_are_refused(tmp_path: Path) -> None:
+def test_pair_sitting_can_be_finished_with_existing_rating(tmp_path: Path) -> None:
     sheet = tmp_path / "sitting-001.csv"
     sheet.write_text(
         "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\nprivate,pair,a.png,b.png,,exact,,\n",
@@ -862,5 +883,314 @@ def test_pair_editing_and_finishing_are_refused(tmp_path: Path) -> None:
     )
     client = create_app(sheet).test_client()
     revision = client.get("/api/sitting").json["revision"]
-    assert client.get("/api/items/1").status_code == 400
-    assert client.post("/api/finish", json={"revision": revision}).status_code == 409
+    assert client.get("/api/items/1").json["kind"] == "pair"
+    response = client.post("/api/finish", json={"revision": revision})
+    assert response.status_code == 200
+    assert response.json["read_only"] is True
+
+
+def test_pair_http_api_exposes_blind_choices_and_opaque_allowlisted_images(
+    tmp_path: Path,
+) -> None:
+    from PIL import Image
+
+    kit = tmp_path / "kit"
+    pool = tmp_path / "pool"
+    kit.mkdir()
+    pool.mkdir()
+    (pool / "a.png").parent.mkdir(exist_ok=True)
+    Image.new("RGB", (2400, 1200), "red").save(pool / "a.png")
+    Image.new("RGB", (800, 1600), "blue").save(pool / "b.png")
+    Image.new("RGB", (20, 20), "green").save(tmp_path / "outside.png")
+    (kit / "kit.json").write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"item_id": "private-pair", "kind": "pair", "pool": "A"},
+                    {"item_id": "escape-pair", "kind": "pair", "pool": "A"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    sheet = kit / "sitting-001.csv"
+    sheet.write_text(
+        "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\n"
+        "private-pair,pair,A/a.png,A/b.png,,,,\n"
+        "escape-pair,pair,A/../outside.png,A/b.png,,,,\n",
+        encoding="utf-8",
+    )
+
+    client = create_app(sheet, pool_roots={"A": pool}).test_client()
+
+    sitting = client.get("/api/sitting").json
+    item = client.get("/api/items/1")
+    assert item.status_code == 200
+    assert item.json["kind"] == "pair"
+    assert item.json["rating"] == ""
+    assert item.json["ratings"] == [
+        "exact",
+        "near-duplicate",
+        "very similar",
+        "different",
+    ]
+    assert item.json["pair_boundary"]["near_duplicate"] == (
+        "the same physical leaf or scene captured again, such as a burst frame, "
+        "a small shift or zoom, a crop or a re-save"
+    )
+    assert "private-pair" not in item.get_data(as_text=True)
+    assert "pool" not in item.get_data(as_text=True)
+
+    for side in ("a", "b"):
+        response = client.get(f"/images/1/{side}/preview")
+        assert response.status_code == 200
+        assert response.content_type == "image/png"
+        assert response.headers["Cache-Control"] == "no-store"
+    assert client.get("/images/1/c/original").status_code == 404
+    assert client.get("/images/2/a/preview").status_code == 404
+
+    invalid = client.post(
+        "/api/items/1",
+        json={"revision": sitting["revision"], "field": "scene_tag", "value": "field"},
+    )
+    assert invalid.status_code == 400
+    invalid_value = client.post(
+        "/api/items/1",
+        json={
+            "revision": sitting["revision"],
+            "field": "rating",
+            "value": "not a rubric value",
+        },
+    )
+    assert invalid_value.status_code == 400
+    revision = sitting["revision"]
+    for rating in ("exact", "near-duplicate", "very similar", "different"):
+        saved = client.post(
+            "/api/items/1",
+            json={"revision": revision, "field": "rating", "value": rating},
+        )
+        assert saved.status_code == 200
+        revision = saved.json["revision"]
+    with sheet.open(newline="", encoding="utf-8") as handle:
+        assert next(csv.DictReader(handle))["rating"] == "different"
+
+
+@pytest.mark.serial
+def test_browser_rates_pair_with_keyboard_zoom_swap_and_finish(tmp_path: Path) -> None:
+    from threading import Thread
+
+    from flask import jsonify, request
+    from PIL import Image
+    from playwright.sync_api import sync_playwright
+    from werkzeug.serving import make_server
+
+    pool = tmp_path / "pool"
+    pool.mkdir()
+    Image.new("RGB", (160, 80), "red").save(pool / "a.png")
+    Image.new("RGB", (80, 160), "blue").save(pool / "b.png")
+    Image.new("RGB", (80, 120), "gray").save(tmp_path / "scene.png")
+    Image.new("RGB", (100, 60), "green").save(tmp_path / "mask.png")
+    (tmp_path / "kit.json").write_text(
+        json.dumps(
+            {
+                "scene_rubric": {"anchors": {"field": "Outdoor structure"}},
+                "items": [
+                    {"item_id": "private-pair-a", "kind": "pair", "pool": "A"},
+                    {"item_id": "private-pair-b", "kind": "pair", "pool": "A"},
+                    {
+                        "item_id": "private-scene",
+                        "kind": "scene",
+                        "image_a": "scene.png",
+                    },
+                    {"item_id": "private-mask", "kind": "mask"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    sheet = tmp_path / "sitting-001.csv"
+    sheet.write_text(
+        "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\n"
+        "private-pair-a,pair,A/a.png,A/b.png,,,,\n"
+        "private-pair-b,pair,A/b.png,A/a.png,,,,\n"
+        "private-scene,scene,scene.png,,,,,\n"
+        "private-mask,mask,,,mask.png,,,\n",
+        encoding="utf-8",
+    )
+    app = create_app(sheet, pool_roots={"A": pool})
+    fail_next_save = True
+
+    @app.before_request
+    def fail_first_pair_save() -> object:
+        nonlocal fail_next_save
+        if (
+            request.method == "POST"
+            and request.path == "/api/items/1"
+            and fail_next_save
+        ):
+            fail_next_save = False
+            return jsonify(error="Synthetic pair save failure."), 409
+        return None
+
+    server = make_server("127.0.0.1", 0, app, threaded=True)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 1000})
+            requests: list[str] = []
+            page.on("request", lambda request: requests.append(request.url))
+            page.goto(f"http://127.0.0.1:{server.server_port}/")
+            page.get_by_role("button", name="Near-duplicate").wait_for()
+            page.wait_for_function(
+                "[...document.querySelectorAll('#pair-frames img')].length === 2 "
+                "&& [...document.querySelectorAll('#pair-frames img')].every(i => i.complete && i.naturalWidth > 0)"
+            )
+            assert (
+                page.locator("#image-frame").evaluate(
+                    "frame => getComputedStyle(frame).display"
+                )
+                == "none"
+            )
+            panel_sizes = page.locator(".pair-image-frame").evaluate_all(
+                "frames => frames.map(frame => [Math.round(frame.getBoundingClientRect().width), "
+                "Math.round(frame.getBoundingClientRect().height)])"
+            )
+            assert panel_sizes[0] == panel_sizes[1]
+            assert page.locator("#pair-frames").evaluate(
+                "container => [...container.querySelectorAll('.pair-image-frame')].every(frame => "
+                "frame.getBoundingClientRect().right <= container.getBoundingClientRect().right + 1)"
+            )
+            assert any("/images/1/a/preview" in request for request in requests)
+            assert any("/images/1/b/preview" in request for request in requests)
+
+            page.get_by_role("button", name="Swap image order").click()
+            assert (
+                page.locator(".pair-panel[data-side='a']").evaluate(
+                    "panel => panel.style.order"
+                )
+                == "2"
+            )
+            assert (
+                page.locator(".pair-panel[data-side='b']").evaluate(
+                    "panel => panel.style.order"
+                )
+                == "1"
+            )
+            assert (
+                page.get_by_role("button", name="Near-duplicate").get_attribute(
+                    "aria-pressed"
+                )
+                == "false"
+            )
+
+            page.get_by_role("button", name="Inspect full resolution").click()
+            page.get_by_role("button", name="Fit preview").wait_for()
+            page.wait_for_function(
+                "[...document.querySelectorAll('#pair-frames img')].every(i => i.complete && i.naturalWidth > 0)"
+            )
+            assert any("/images/1/a/original" in request for request in requests)
+            assert any("/images/1/b/original" in request for request in requests)
+            page.get_by_role("button", name="Actual pixels").click()
+            actual_widths = page.locator("#pair-frames img").evaluate_all(
+                "images => images.map(image => Number.parseFloat(image.style.width))"
+            )
+            assert actual_widths == [160, 80]
+            page.locator("#scale").evaluate(
+                "input => { input.value = '2'; input.dispatchEvent(new Event('input', {bubbles: true})); }"
+            )
+            zoom_widths = page.locator("#pair-frames img").evaluate_all(
+                "images => images.map(image => Number.parseFloat(image.style.width))"
+            )
+            assert zoom_widths == [320, 160]
+
+            page.evaluate("document.activeElement.blur()")
+            page.keyboard.press("2")
+            page.get_by_text(
+                "Synthetic pair save failure. Reload to verify the saved state.",
+                exact=True,
+            ).wait_for()
+            assert page.get_by_role("button", name="Next").is_disabled()
+            page.reload()
+            page.get_by_role("button", name="Near-duplicate").wait_for()
+            page.wait_for_function(
+                "[...document.querySelectorAll('#pair-frames img')].every(i => i.complete && i.naturalWidth > 0)"
+            )
+            page.keyboard.press("2")
+            page.get_by_text("Saved", exact=True).wait_for()
+            assert (
+                page.get_by_role("button", name="Near-duplicate").get_attribute(
+                    "aria-pressed"
+                )
+                == "true"
+            )
+            page.get_by_role("button", name="Undo last choice").click()
+            page.get_by_text("Saved", exact=True).wait_for()
+            assert (
+                page.get_by_role("button", name="Near-duplicate").get_attribute(
+                    "aria-pressed"
+                )
+                == "false"
+            )
+            page.evaluate("document.activeElement.blur()")
+            page.keyboard.press("2")
+            page.get_by_text("Saved", exact=True).wait_for()
+            page.get_by_role("button", name="Next").click()
+            page.get_by_text("Item 2 of 4", exact=True).wait_for()
+            page.wait_for_function(
+                "[...document.querySelectorAll('#pair-frames img')].every(i => i.complete && i.naturalWidth > 0)"
+            )
+            assert (
+                page.get_by_role("button", name="Swap image order").get_attribute(
+                    "aria-pressed"
+                )
+                == "false"
+            )
+            assert page.get_by_role(
+                "button", name="Inspect full resolution"
+            ).is_visible()
+            assert page.locator("#scale").input_value() == "1"
+            page.get_by_role("button", name="Exact").click()
+            page.get_by_text("Saved", exact=True).wait_for()
+            page.get_by_role("button", name="Next").click()
+            page.get_by_text("Item 3 of 4", exact=True).wait_for()
+            page.get_by_role("button", name="Field").wait_for(state="visible")
+            assert (
+                page.locator("#pair-frames").evaluate(
+                    "frames => getComputedStyle(frames).display"
+                )
+                == "none"
+            )
+            assert page.locator("#pair-frames").is_hidden()
+            assert page.get_by_role("button", name="Swap image order").is_hidden()
+            page.get_by_role("button", name="Field").click()
+            page.get_by_text("Saved", exact=True).wait_for()
+            page.get_by_role("button", name="Next").click()
+            page.get_by_text("Item 4 of 4", exact=True).wait_for()
+            page.get_by_role("group", name="Mask quality").wait_for()
+            assert (
+                page.locator("#pair-frames").evaluate(
+                    "frames => getComputedStyle(frames).display"
+                )
+                == "none"
+            )
+            page.wait_for_function(
+                "document.querySelector('#image-frame img')?.complete "
+                "&& document.querySelector('#image-frame img')?.naturalWidth > 0"
+            )
+            page.get_by_role("button", name="Pass").click()
+            page.get_by_text("Saved", exact=True).wait_for()
+            assert page.get_by_role("button", name="Next").is_disabled()
+            page.get_by_role("button", name="Clean background").click()
+            page.get_by_text("Saved", exact=True).wait_for()
+            page.get_by_role("button", name="Finish sitting").click()
+            page.get_by_text("Sitting finished", exact=False).wait_for()
+            page.reload()
+            page.get_by_text("Read-only", exact=False).wait_for()
+            assert page.get_by_role("button", name="Near-duplicate").is_disabled()
+            assert "private-pair" not in page.content()
+            browser.close()
+    finally:
+        server.shutdown()
+        thread.join()
