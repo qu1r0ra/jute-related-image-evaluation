@@ -477,7 +477,7 @@ def test_evaluation_records_the_backend_and_a_digest_for_the_freeze_to_bind(
     assert len(first["digest"]) == 64
     assert first["digest"] == second["digest"]
     audit_manifest = json.loads(manifest.read_text(encoding="utf-8"))
-    assert audit_manifest["partition_check"]["target_manifest_digest"]
+    assert audit_manifest["partition_check"]["target_manifest_digests"]
     assert first["audit_manifest_digest"] != first["digest"]
 
     changed = json.loads(manifest.read_text(encoding="utf-8"))

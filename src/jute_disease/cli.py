@@ -356,7 +356,7 @@ def _masks_calibrate(args: argparse.Namespace) -> None:
         thresholds = fit_thresholds_from_manifest(
             args.development,
             ColorThresholdBackend(),
-            load_protected_test_images(args.target_dir),
+            load_protected_test_images(*args.target_dir),
         )
         write_thresholds(args.output, thresholds)
     except (ValueError, OSError, KeyError, FreezeBlockedError) as error:
@@ -374,7 +374,7 @@ def _masks_audit(args: argparse.Namespace) -> None:
             thresholds,
             ColorThresholdBackend(),
             args.output,
-            load_protected_test_images(args.target_dir),
+            load_protected_test_images(*args.target_dir),
             seed=args.seed,
             sample_count=args.sample_count,
             owner_count=args.owner_count,
@@ -1261,9 +1261,10 @@ def build_parser() -> argparse.ArgumentParser:
     masks_calibrate.add_argument(
         "--target-dir",
         type=Path,
+        action="append",
         required=True,
         help="Frozen target directory whose protected test partition must not "
-        "overlap the development set.",
+        "overlap the development set. Repeat it to check the union of several.",
     )
     masks_calibrate.set_defaults(run=_masks_calibrate)
 
@@ -1280,9 +1281,11 @@ def build_parser() -> argparse.ArgumentParser:
     masks_audit.add_argument(
         "--target-dir",
         type=Path,
+        action="append",
         required=True,
         help="Frozen target directory whose protected test partition the "
-        "development set and audit inventory must not overlap.",
+        "development set and audit inventory must not overlap. Repeat it to "
+        "check the union of several.",
     )
     masks_audit.set_defaults(run=_masks_audit)
 
