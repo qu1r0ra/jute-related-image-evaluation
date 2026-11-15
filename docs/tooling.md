@@ -138,7 +138,7 @@ uv run --locked python scripts/verify_transfer.py verify artifacts/runs artifact
 
 Repeat the copy and verification after every queue invocation. Keep the lab copy until verification succeeds; the manifest snapshots the full run store so earlier receipts needed for resume remain included.
 
-These helpers do not run real lab sessions or experiments as part of tooling CI. Lab validation and A100 readiness are tracked separately in [issue 114](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/114).
+These helpers do not run real lab sessions or experiments as part of tooling CI. The stand-in pilots are recorded in [issue 114](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/114); the pilots on the real reserve are tracked in [issue 193](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/193).
 
 ### Grouped target freezes
 
