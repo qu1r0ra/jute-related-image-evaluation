@@ -20,6 +20,7 @@ def _sources(tmp_path: Path, scenes: int = 5) -> tuple[Path, Path, Path, list[st
             "pair_id": f"p{index}",
             "image_a": f"a{index}.png",
             "image_b": f"b{index}.png",
+            "pool": "A",
             "stratum": "near",
             "algorithm_merge": True,
             "inclusion_probability": 1.0,
@@ -106,6 +107,7 @@ def test_kit_without_a_held_out_set_is_unchanged(tmp_path: Path) -> None:
     kit = json.loads((tmp_path / "kit" / "kit.json").read_text("utf-8"))
     assert kit["schema"] == "jute-audit-kit-v1"
     assert [item["kind"] for item in kit["items"]] == ["mask"] * 3 + ["pair"] * 3
+    assert {item["pool"] for item in kit["items"] if item["kind"] == "pair"} == {"A"}
     assert summary["scene_items"] == 0
     assert not (tmp_path / "kit" / "scenes").exists()
     sitting = next_audit_sitting(tmp_path / "kit")

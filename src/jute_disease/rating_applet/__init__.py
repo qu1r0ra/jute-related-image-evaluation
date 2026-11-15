@@ -14,13 +14,24 @@ from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 
-from flask import Flask, jsonify, request, send_file, send_from_directory
+from flask import Flask, Response, jsonify, request, send_file, send_from_directory
 from PIL import Image, ImageOps
 
 from jute_disease.data import MASK_RUBRIC, audit_row_complete, validate_audit_row
 
-_VERSION = "1.0.0"
+_VERSION = "1.1.0"
 _PREVIEW_SIZE = (1400, 1400)
+_PAIR_RATINGS = ("exact", "near-duplicate", "very similar", "different")
+_PAIR_BOUNDARY = {
+    "near_duplicate": (
+        "the same physical leaf or scene captured again, such as a burst frame, "
+        "a small shift or zoom, a crop or a re-save"
+    ),
+    "very_similar": "a different leaf or scene that merely looks alike",
+    "merge": (
+        "Exact and near-duplicate mean merge; very similar and different mean no merge."
+    ),
+}
 _LOCKS: dict[str, Lock] = {}
 _LOCKS_GUARD = Lock()
 
@@ -184,12 +195,20 @@ def reopen_sitting(sheet: Path, reason: str) -> None:
         )
 
 
-def create_app(sheet: Path) -> Flask:
+def create_app(sheet: Path, pool_roots: dict[str, Path] | None = None) -> Flask:
     """Open a sitting without changing its ratings."""
     sheet = Path(sheet).resolve()
     runtime = _runtime(sheet)
     session = uuid.uuid4().hex
+    resolved_pool_roots = {
+        name: Path(path).resolve() for name, path in (pool_roots or {}).items()
+    }
     app = Flask(__name__)
+
+    @app.after_request
+    def prevent_caching(response: Response) -> Response:
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.before_request
     def local_request() -> object:
@@ -250,8 +269,15 @@ def create_app(sheet: Path) -> Flask:
                 if not 1 <= position <= len(rows):
                     return jsonify(error="Unknown position."), 404
                 row = rows[position - 1]
+                if row["kind"] == "pair":
+                    return jsonify(
+                        kind="pair",
+                        rating=row["rating"],
+                        ratings=list(_PAIR_RATINGS),
+                        pair_boundary=_PAIR_BOUNDARY,
+                    )
                 if row["kind"] not in {"mask", "scene"}:
-                    return jsonify(error="Pair editing is not supported."), 400
+                    return jsonify(error="Unsupported item."), 400
                 rubric = json.loads(
                     (sheet.parent / "kit.json").read_text(encoding="utf-8")
                 )
@@ -269,8 +295,9 @@ def create_app(sheet: Path) -> Flask:
         except OSError, ValueError, KeyError, csv.Error, TypeError:
             return jsonify(error="Unable to load this item."), 409
 
-    @app.get("/images/<int:position>/<variant>")
-    def image(position: int, variant: str) -> object:
+    @app.get("/images/<int:position>/<variant>", defaults={"side": None})
+    @app.get("/images/<int:position>/<side>/<variant>")
+    def image(position: int, variant: str, side: str | None) -> object:
         if variant not in {"preview", "original"}:
             return "Image unavailable.", 404
         try:
@@ -280,11 +307,34 @@ def create_app(sheet: Path) -> Flask:
                 if not 1 <= position <= len(rows):
                     raise ValueError("Unknown position")
                 row = rows[position - 1]
-                field = {"mask": "overlay_path", "scene": "image_a"}.get(row["kind"])
-                if field is None:
-                    raise ValueError("Unsupported kind")
-                root = sheet.parent.resolve()
-                path = (root / row[field]).resolve(strict=True)
+                if row["kind"] == "pair":
+                    if side not in {"a", "b"}:
+                        raise ValueError("Unknown side")
+                    field = "image_a" if side == "a" else "image_b"
+                    kit = json.loads(
+                        (sheet.parent / "kit.json").read_text(encoding="utf-8")
+                    )
+                    item = next(
+                        item
+                        for item in kit["items"]
+                        if item["item_id"] == row["item_id"]
+                    )
+                    pool = item.get("pool")
+                    root = resolved_pool_roots[pool]
+                    image_path = Path(row[field])
+                    if image_path.parts and image_path.parts[0] == pool:
+                        image_path = Path(*image_path.parts[1:])
+                else:
+                    if side is not None:
+                        raise ValueError("Pair side is only available for pair items")
+                    field = {"mask": "overlay_path", "scene": "image_a"}.get(
+                        row["kind"]
+                    )
+                    if field is None:
+                        raise ValueError("Unsupported kind")
+                    root = sheet.parent.resolve()
+                    image_path = Path(row[field])
+                path = (root / image_path).resolve(strict=True)
                 if not path.is_relative_to(root) or not path.is_file():
                     raise ValueError("Image outside kit")
                 source_bytes = path.read_bytes()
@@ -372,6 +422,7 @@ def create_app(sheet: Path) -> Flask:
                 allowed = {
                     "mask": {"mask_quality", "scene_tag"},
                     "scene": {"scene_tag"},
+                    "pair": {"rating"},
                 }
                 field = data.get("field")
                 if (
@@ -455,7 +506,7 @@ def create_app(sheet: Path) -> Flask:
                 if (
                     data.get("revision") != _revision(runtime, content)
                     or not rows
-                    or any(row["kind"] not in {"mask", "scene"} for row in rows)
+                    or any(row["kind"] not in {"mask", "scene", "pair"} for row in rows)
                     or not all(map(audit_row_complete, rows))
                 ):
                     return jsonify(
