@@ -570,7 +570,7 @@ def _development(work: Path, count: int) -> Path:
     records = []
     for index in range(count):
         scene = SCENE_TAGS[index % 3]
-        _image(work / f"dev-{index}.png", scene, index)
+        _image(work / f"dev-{index}.png", scene, index + 2000)
         records.append(
             {"image_id": f"dev-{index}", "path": f"dev-{index}.png", "scene_tag": scene}
         )

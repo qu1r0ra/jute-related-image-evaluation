@@ -20,6 +20,7 @@ from jute_disease.data.manifest import load_protected_test_manifest
 from jute_disease.data.masks import (
     MASK_QUALITY_RATINGS,
     MASK_RUBRIC,
+    MAX_DEVELOPMENT_IMAGES,
     SCENE_RUBRIC,
     SCENE_TAGS,
     ColorThresholdBackend,
@@ -130,11 +131,16 @@ def read_candidates(source: Path) -> list[CandidateImage]:
 def read_development_observations(
     source: Path, backend: MaskBackend, protected: ProtectedTestImages
 ) -> list[SceneObservation]:
-    """Create 100 labeled scene observations from the held-apart dev manifest."""
+    """Create labeled scene observations from the held-apart dev manifest."""
     require_colour_threshold(backend.model, backend.version)
     records = json.loads(Path(source).read_text(encoding="utf-8"))
-    if not isinstance(records, list) or len(records) != 100:
-        raise ValueError("scene development manifest must contain exactly 100 images")
+    if not isinstance(records, list) or not (
+        1 <= len(records) <= MAX_DEVELOPMENT_IMAGES
+    ):
+        raise ValueError(
+            "scene development manifest must contain between 1 and "
+            f"{MAX_DEVELOPMENT_IMAGES} images"
+        )
     candidates: list[tuple[CandidateImage, str]] = []
     for record in records:
         if not isinstance(record, dict) or set(record) != {
@@ -176,7 +182,7 @@ def read_development_observations(
 def fit_thresholds_from_manifest(
     source: Path, backend: MaskBackend, protected: ProtectedTestImages
 ) -> SceneThresholds:
-    """Fit cutoffs from exactly 100 labeled development images."""
+    """Fit cutoffs from 1 to 100 labeled development images."""
     return fit_scene_thresholds(
         read_development_observations(source, backend, protected),
         mask_model=backend.model,

@@ -14,8 +14,10 @@ from PIL import Image
 
 SCENE_TAGS = ("clean-background", "field", "unknown")
 REQUIRED_DEVELOPMENT_TAGS = ("clean-background", "field")
+MAX_DEVELOPMENT_IMAGES = 100
+THREE_TAG_METHOD = "grid search maximizing scene macro-F1"
 TWO_TAG_METHOD = (
-    "100-image grid search maximizing two-tag scene macro-F1; "
+    "grid search maximizing two-tag scene macro-F1; "
     "no unknown development image, background cutoff fixed at 0"
 )
 MASK_RUBRIC_VERSION = "leaf-mask-v1"
@@ -125,7 +127,7 @@ class SceneThresholds:
     development_sources: tuple[tuple[str, str], ...]
     development_digest: str
     score: float
-    method: str = "100-image grid search maximizing scene macro-F1"
+    method: str = f"{MAX_DEVELOPMENT_IMAGES}-image {THREE_TAG_METHOD}"
     mask_model: str = "excess-green-otsu-largest-component"
     mask_version: str = "1"
     # Scene tags the development set held; None for thresholds stored before
@@ -153,10 +155,18 @@ class SceneThresholds:
             raise ValueError("background cutoff must be in [0, 1]")
         if not 0 <= self.color_uniformity_min <= 1:
             raise ValueError("uniformity cutoff must be in [0, 1]")
-        if len(self.development_ids) != 100 or len(set(self.development_ids)) != 100:
-            raise ValueError("scene thresholds must record 100 unique development IDs")
-        if len(self.development_sources) != 100:
-            raise ValueError("scene thresholds must record 100 development sources")
+        count = len(self.development_ids)
+        if not 1 <= count <= MAX_DEVELOPMENT_IMAGES:
+            raise ValueError(
+                "scene thresholds must record between 1 and "
+                f"{MAX_DEVELOPMENT_IMAGES} development IDs"
+            )
+        if len(set(self.development_ids)) != count:
+            raise ValueError("scene thresholds must record unique development IDs")
+        if len(self.development_sources) != count:
+            raise ValueError(
+                "scene thresholds must record one source per development ID"
+            )
         if {image_id for image_id, _ in self.development_sources} != set(
             self.development_ids
         ):
@@ -164,7 +174,7 @@ class SceneThresholds:
         source_hashes = [digest for _, digest in self.development_sources]
         if any(len(digest) != 64 for digest in source_hashes):
             raise ValueError("development sources must use SHA-256 digests")
-        if len(set(source_hashes)) != 100:
+        if len(set(source_hashes)) != count:
             raise ValueError("development images must have unique source content")
         if len(self.development_digest) != 64:
             raise ValueError("development digest must be a SHA-256 hex digest")
@@ -317,19 +327,23 @@ def fit_scene_thresholds(
     mask_model: str = ColorThresholdBackend.model,
     mask_version: str = ColorThresholdBackend.version,
 ) -> SceneThresholds:
-    """Fit the scene cutoffs on exactly 100 labeled development images.
+    """Fit the scene cutoffs on 1 to 100 labeled development images.
 
     A set with no ``unknown`` image fixes the background cutoff at 0, so no
     image is classed ``unknown``, and fits only the uniformity cutoff.
     """
-    if len(observations) != 100:
-        raise ValueError("scene calibration requires exactly 100 development images")
+    count = len(observations)
+    if not 1 <= count <= MAX_DEVELOPMENT_IMAGES:
+        raise ValueError(
+            "scene calibration requires between 1 and "
+            f"{MAX_DEVELOPMENT_IMAGES} development images"
+        )
     ids = [item.image_id for item in observations]
     labels = [item.scene_tag for item in observations]
-    if len(set(ids)) != 100:
+    if len(set(ids)) != count:
         raise ValueError("development image IDs must be unique")
     source_hashes = [item.source_sha256 for item in observations]
-    if len(set(source_hashes)) != 100:
+    if len(set(source_hashes)) != count:
         raise ValueError("development images must have unique source content")
     if not set(labels) >= set(REQUIRED_DEVELOPMENT_TAGS):
         raise ValueError(
@@ -385,7 +399,7 @@ def fit_scene_thresholds(
         ),
         development_digest=digest,
         score=best_score,
-        method=SceneThresholds.method if has_unknown else TWO_TAG_METHOD,
+        method=f"{count}-image {THREE_TAG_METHOD if has_unknown else TWO_TAG_METHOD}",
         mask_model=mask_model,
         mask_version=mask_version,
         development_tags=development_tags,
