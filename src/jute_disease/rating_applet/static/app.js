@@ -10,6 +10,8 @@ let full = false;
 let actualPixels = false;
 let swapped = false;
 let imageGeneration = 0;
+let finishArmed = false;
+let syncingPan = false;
 
 const groups = {
   rating: {
@@ -54,7 +56,7 @@ function complete() {
 
 function controls() {
   document.querySelectorAll('.choice button').forEach(button => {
-    button.disabled = busy || failed || state.read_only;
+    button.disabled = busy || failed || state.read_only || !readable;
     button.setAttribute('aria-pressed', String(item[button.dataset.field] === button.dataset.value));
   });
   document.querySelectorAll('.zoom button, .zoom input').forEach(control => {
@@ -63,6 +65,7 @@ function controls() {
   $('previous').disabled = busy || failed || position <= 1;
   $('next').disabled = busy || failed || !readable || !complete() || position >= state.total;
   $('finish').disabled = busy || failed || !readable || state.read_only || state.completed !== state.total;
+  $('cancel-finish').disabled = busy;
   $('undo').disabled = busy || failed || state.read_only || !history.length;
 }
 
@@ -145,14 +148,32 @@ function applyScale() {
   });
 }
 
-function setImageSources() {
+function syncPairPan(source) {
+  if (syncingPan) return;
+  const frames = [...document.querySelectorAll('.pair-image-frame')];
+  const target = frames.find(frame => frame !== source);
+  if (!target) return;
+  syncingPan = true;
+  const horizontalRange = source.scrollWidth - source.clientWidth;
+  const verticalRange = source.scrollHeight - source.clientHeight;
+  target.scrollLeft = horizontalRange > 0
+    ? source.scrollLeft / horizontalRange * (target.scrollWidth - target.clientWidth)
+    : 0;
+  target.scrollTop = verticalRange > 0
+    ? source.scrollTop / verticalRange * (target.scrollHeight - target.clientHeight)
+    : 0;
+  syncingPan = false;
+}
+
+function loadImages() {
   const generation = ++imageGeneration;
   const sides = item.kind === 'pair' ? ['a', 'b'] : [null];
+  const pictures = [...document.querySelectorAll('#image-frame img, #pair-frames img')];
   let loaded = 0;
   readable = false;
   $('image-status').textContent = 'Loading image…';
-  const pictures = sides.map(side => {
-    const picture = makeImage(side);
+  for (const picture of pictures) {
+    const side = picture.dataset.side || null;
     picture.classList.toggle('full', full);
     picture.onload = () => {
       if (generation !== imageGeneration) return;
@@ -170,9 +191,14 @@ function setImageSources() {
       $('image-status').textContent = 'Image unavailable. Resolve the issue before advancing.';
       controls();
     };
-    return picture;
-  });
+    picture.src = imageUrl(side, full ? 'original' : 'preview');
+  }
+  controls();
+}
 
+function setImageSources() {
+  const sides = item.kind === 'pair' ? ['a', 'b'] : [null];
+  const pictures = sides.map(side => makeImage(side));
   $('image-frame').hidden = item.kind === 'pair';
   $('image-frame').replaceChildren();
   $('pair-frames').hidden = item.kind !== 'pair';
@@ -187,20 +213,20 @@ function setImageSources() {
       caption.textContent = `Image ${side.toUpperCase()}`;
       frame.className = 'image-frame pair-image-frame';
       frame.append(pictures[index]);
+      frame.addEventListener('scroll', () => syncPairPan(frame), { passive: true });
       figure.append(caption, frame);
       $('pair-frames').append(figure);
     }
     $('swap').hidden = false;
     $('actual-pixels').hidden = false;
+    $('actual-pixels-note').hidden = false;
   } else {
     $('image-frame').append(pictures[0]);
     $('swap').hidden = true;
     $('actual-pixels').hidden = true;
+    $('actual-pixels-note').hidden = true;
   }
-  for (const [index, side] of sides.entries()) {
-    pictures[index].src = imageUrl(side, full ? 'original' : 'preview');
-  }
-  controls();
+  loadImages();
 }
 
 async function show(nextPosition) {
@@ -215,6 +241,7 @@ async function show(nextPosition) {
     full = false;
     actualPixels = false;
     swapped = false;
+    finishArmed = false;
     readable = false;
     failed = false;
     $('save').textContent = '';
@@ -222,9 +249,12 @@ async function show(nextPosition) {
     $('position').textContent = `Item ${position} of ${state.total}`;
     $('scale').value = 1;
     $('zoom').textContent = 'Inspect full resolution';
-    $('actual-pixels').textContent = 'Actual pixels';
+    $('actual-pixels').textContent = '1:1 image pixels';
+    $('actual-pixels').title = 'One image pixel per CSS pixel; monitor scaling may change physical size.';
     $('actual-pixels').setAttribute('aria-pressed', 'false');
     $('swap').setAttribute('aria-pressed', 'false');
+    $('finish').textContent = 'Finish sitting';
+    $('cancel-finish').hidden = true;
     $('notice').textContent = '';
     choices();
     setImageSources();
@@ -236,7 +266,7 @@ async function show(nextPosition) {
 }
 
 async function save(field, value, undo = false) {
-  if (busy || failed || state.read_only || value === item[field]) return;
+  if (busy || failed || !readable || state.read_only || value === item[field]) return;
   const oldValue = item[field];
   busy = true;
   $('save').textContent = 'Saving…';
@@ -251,9 +281,12 @@ async function save(field, value, undo = false) {
     item[field] = value;
     if (!undo) history.push({ field, value: oldValue });
     await refresh(result.revision);
+    sessionStorage.removeItem('rating-applet-recovery-position');
     $('save').textContent = 'Saved';
+    $('notice').textContent = '';
   } catch (error) {
     failed = true;
+    sessionStorage.setItem('rating-applet-recovery-position', String(position));
     $('save').textContent = `${error.message} Reload to verify the saved state.`;
   }
   busy = false;
@@ -267,6 +300,13 @@ $('undo').onclick = async () => {
   if (change) await save(change.field, change.value, true);
 };
 $('finish').onclick = async () => {
+  if (!finishArmed) {
+    finishArmed = true;
+    $('finish').textContent = 'Confirm finish';
+    $('cancel-finish').hidden = false;
+    $('notice').textContent = 'Finishing makes this sitting read-only. Confirm to finish.';
+    return;
+  }
   busy = true;
   controls();
   try {
@@ -276,6 +316,9 @@ $('finish').onclick = async () => {
       body: JSON.stringify({ revision: state.revision })
     });
     await refresh();
+    finishArmed = false;
+    $('finish').textContent = 'Finish sitting';
+    $('cancel-finish').hidden = true;
     $('notice').textContent = 'Sitting finished. Take a break before the next sitting.';
   } catch (error) {
     failed = true;
@@ -284,6 +327,12 @@ $('finish').onclick = async () => {
   busy = false;
   controls();
 };
+$('cancel-finish').onclick = () => {
+  finishArmed = false;
+  $('finish').textContent = 'Finish sitting';
+  $('cancel-finish').hidden = true;
+  $('notice').textContent = '';
+};
 $('zoom').onclick = () => {
   full = !full;
   actualPixels = false;
@@ -291,37 +340,22 @@ $('zoom').onclick = () => {
   $('actual-pixels').setAttribute('aria-pressed', 'false');
   $('zoom').textContent = full ? 'Fit preview' : 'Inspect full resolution';
   $('image-status').textContent = 'Loading image…';
-  readable = false;
-  const generation = ++imageGeneration;
-  const pictures = [...document.querySelectorAll('#image-frame img, #pair-frames img')];
-  let loaded = 0;
-  for (const picture of pictures) {
-    picture.classList.toggle('full', full);
-    picture.onload = () => {
-      if (generation !== imageGeneration) return;
-      loaded += 1;
-      if (loaded === pictures.length) {
-        readable = true;
-        $('image-status').textContent = '';
-        applyScale();
-        controls();
-      }
-    };
-    picture.onerror = () => {
-      if (generation !== imageGeneration) return;
-      readable = false;
-      $('image-status').textContent = 'Image unavailable. Resolve the issue before advancing.';
-      controls();
-    };
-    picture.src = imageUrl(picture.dataset.side || null, full ? 'original' : 'preview');
-  }
-  controls();
+  loadImages();
 };
 $('actual-pixels').onclick = () => {
-  if (!full) return;
+  if (!full) {
+    full = true;
+    $('zoom').textContent = 'Fit preview';
+    $('scale').value = 1;
+    actualPixels = true;
+    $('actual-pixels').setAttribute('aria-pressed', 'true');
+    $('actual-pixels').textContent = 'Use zoom scale';
+    loadImages();
+    return;
+  }
   actualPixels = !actualPixels;
   $('actual-pixels').setAttribute('aria-pressed', String(actualPixels));
-  $('actual-pixels').textContent = actualPixels ? 'Use zoom scale' : 'Actual pixels';
+  $('actual-pixels').textContent = actualPixels ? 'Use zoom scale' : '1:1 image pixels';
   if (actualPixels) $('scale').value = 1;
   applyScale();
 };
@@ -335,16 +369,30 @@ $('swap').onclick = () => {
 $('scale').oninput = () => {
   actualPixels = false;
   $('actual-pixels').setAttribute('aria-pressed', 'false');
-  $('actual-pixels').textContent = 'Actual pixels';
+  $('actual-pixels').textContent = '1:1 image pixels';
   applyScale();
 };
 document.addEventListener('keydown', event => {
   const target = event.target;
   if (
     busy || failed || event.ctrlKey || event.altKey || event.metaKey ||
-    /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) ||
-    target.isContentEditable || target.closest('.zoom') || !item
+    !item
   ) return;
+  if (event.key === '[') {
+    event.preventDefault();
+    if (position > 1) show(position - 1);
+    return;
+  }
+  if (event.key === ']') {
+    event.preventDefault();
+    if (readable && complete() && position < state.total) show(position + 1);
+    return;
+  }
+  if (
+    /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) ||
+    target.isContentEditable
+  ) return;
+  if (!readable) return;
   const fields = item.kind === 'pair'
     ? ['rating']
     : item.kind === 'mask' ? ['mask_quality', 'scene_tag'] : ['scene_tag'];
@@ -361,7 +409,17 @@ document.addEventListener('keydown', event => {
 (async () => {
   try {
     await refresh();
-    await show(state.position);
+    const recoveryPosition = Number(
+      sessionStorage.getItem('rating-applet-recovery-position')
+    );
+    const startPosition = Number.isInteger(recoveryPosition) &&
+      recoveryPosition >= 1 && recoveryPosition <= state.total
+      ? recoveryPosition
+      : state.position;
+    await show(startPosition);
+    if (startPosition === recoveryPosition) {
+      $('notice').textContent = 'A previous save did not confirm. Review this item before continuing.';
+    }
   } catch (error) {
     $('notice').textContent = error.message;
   }
