@@ -1,7 +1,7 @@
 # Research context
 
 - Repository-native maps, specs, and live child issues own scope, settings, review, and authorization. Missing plans use the tracker gate in `docs/agents/issue-tracker.md`.
-- The live direction is the related-image study map, issue #98; confirmed data, split, model and repetition decisions are linked from it. The optional ignored consolidated working copy is `docs/research/*study-plan*.md`. `configs/historical/` reproduces the original study only.
+- The protocol is settled in `docs/adr/` (0001 to 0004), which governs where a closed issue differs. Remaining work is execution, indexed by the open `wayfinder:map` issue, #222. The closed planning map #98 and its decision issues hold the rationale. The optional ignored consolidated working copy is `docs/research/*study-plan*.md`. `configs/historical/` reproduces the original study only.
 
 - This is a side study without a fixed deadline; thesis and term work take priority. Reuse the established stack and eligible pool when evidence supports it; require concrete benefit for extra data or revisions. Audits are not a final protocol or launch permission.
 

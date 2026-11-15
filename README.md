@@ -19,10 +19,10 @@
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23414231.svg)](https://doi.org/10.5281/zenodo.23414231) ![Year, Term, Course](https://img.shields.io/badge/AY2526--T2-CSC713M-blue)
 
-This repository now prepares tooling for a revised jute related-image evaluation. It also preserves the earlier six-class disease-classification study and its submitted paper, which was withdrawn before publication ([PDF](docs/hnicem2026-paper.pdf), [full paper](https://drive.google.com/file/d/1DbaQ4TWEHChkLTLvpzntbUxhkBkSmQ5o/view?usp=drive_link)).
+This repository now holds the pipeline for a revised jute related-image evaluation, which is in progress. It also preserves the earlier six-class disease-classification study and its submitted paper, which was withdrawn before publication ([PDF](docs/hnicem2026-paper.pdf), [full paper](https://drive.google.com/file/d/1DbaQ4TWEHChkLTLvpzntbUxhkBkSmQ5o/view?usp=drive_link)).
 
 > [!NOTE]
-> This README documents the original course study. A revised study of how related-image controls affect measured performance is being planned in [issue 98](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/98); its results are not reported here.
+> This README documents the original course study. A revised study of how related-image controls affect measured performance is designed and its pipeline is built. Its protocol is recorded in the [decision records](docs/adr/) and its remaining work is tracked in [issue 222](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/222); its results are not reported here.
 
 > [!IMPORTANT]
 > The active tooling follows the revised direction tracked by [issue 116](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/116). It does not report results for the revised experiment. Use Python 3.14 and the committed uv lock. Historical reproduction uses the `submitted-study` tag and its lockfile.
@@ -162,7 +162,7 @@ uv run --locked python scripts/audit_dependencies.py
 
 Training runs through a serial, resumable queue declared in `configs/benchmark.json`: `just queue-plan` shows the fits, `just queue-run` runs them, and running it again skips completed fits and resumes an interrupted CNN fit from its last saved epoch. [Architecture](docs/architecture.md#training-queue) defines the identity, retry and resume rules.
 
-This tooling work does not authorize experiment fits or establish readiness of the lab A100. The synthetic freeze and Linux CI checks validate the development environment. The validation-only lab pilots and experiment readiness gates remain in [issue 114](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/114). See [Tooling](docs/tooling.md) for update cadence, local evidence, audit limits, preprocessing identity, and helper commands.
+This tooling work does not authorize experiment fits or establish readiness of the lab A100. The synthetic freeze and Linux CI checks validate the development environment. The remaining lab pilots and the matrix freeze that authorizes fits are tracked under [issue 222](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/222). See [Tooling](docs/tooling.md) for update cadence, local evidence, audit limits, preprocessing identity, and helper commands.
 
 ## 6. Historical Benchmarked Performance
 
