@@ -25,6 +25,7 @@ artifacts/
 lightning_logs/
 .playwright-cli/
 .playwright-mcp/
+.rating-applet/
 
 # Private working context and research
 .context/

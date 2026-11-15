@@ -3,8 +3,11 @@
 import csv
 import hashlib
 import io
+import json
 import os
 import tempfile
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 
@@ -27,6 +30,24 @@ def create_app(sheet: Path) -> Flask:
             validate_audit_row(row)
         return content, list(reader.fieldnames or []), rows
 
+    content, _, rows = read()
+    runtime = sheet.parent / ".rating-applet" / sheet.name
+    runtime.mkdir(parents=True, exist_ok=True)
+    session = uuid.uuid4().hex
+    (runtime / f"{session}.backup").write_bytes(content)
+    event = {
+        "type": "adopt",
+        "session": session,
+        "timestamp": datetime.now(UTC).isoformat(),
+        "instrument_version": "1.0.0-foundation",
+        "digest": hashlib.sha256(content).hexdigest(),
+        "completed_items": [row["item_id"] for row in rows if audit_row_complete(row)],
+    }
+    with (runtime / f"{session}.jsonl").open("x", encoding="utf-8") as handle:
+        handle.write(json.dumps(event) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
     @app.get("/api/sitting")
     def sitting() -> object:
         content, _, rows = read()
@@ -44,6 +65,13 @@ def create_app(sheet: Path) -> Flask:
         data = request.get_json()
         with lock:
             content, columns, rows = read()
+            if any(
+                (sheet.parent / name).exists()
+                for name in ("owner.csv", "owner-masks.csv", "owner-scenes.csv")
+            ):
+                return jsonify(
+                    error="This sitting has been collected and is read-only."
+                ), 403
             if data.get("revision") != hashlib.sha256(content).hexdigest():
                 return jsonify(error="The sitting changed. Reload it."), 409
             if not 1 <= position <= len(rows):
@@ -53,6 +81,8 @@ def create_app(sheet: Path) -> Flask:
             field = data.get("field")
             if field not in allowed.get(row["kind"], set()):
                 return jsonify(error="This choice is unavailable."), 400
+            if not isinstance(data.get("value"), str):
+                return jsonify(error="Invalid choice."), 400
             if data.get("value") == row[field]:
                 return jsonify(revision=hashlib.sha256(content).hexdigest())
             row[field] = data.get("value")

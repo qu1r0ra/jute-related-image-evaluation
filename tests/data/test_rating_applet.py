@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import json
 from pathlib import Path
 
@@ -104,4 +105,59 @@ def test_unchanged_choice_preserves_sheet_bytes(tmp_path: Path) -> None:
         json={"revision": revision, "field": "scene_tag", "value": "field"},
     )
     assert response.status_code == 200
+    assert sheet.read_bytes() == original
+
+
+def test_collected_sitting_refuses_changes(tmp_path: Path) -> None:
+    sheet = tmp_path / "sitting-001.csv"
+    original = b"item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\nprivate,scene,scenes/a.png,,,,,field\n"
+    sheet.write_bytes(original)
+    (tmp_path / "owner-scenes.csv").write_text("collected\n", encoding="utf-8")
+    client = create_app(sheet).test_client()
+    revision = client.get("/api/sitting").json["revision"]
+
+    response = client.post(
+        "/api/items/1",
+        json={"revision": revision, "field": "scene_tag", "value": "unknown"},
+    )
+
+    assert response.status_code == 403
+    assert sheet.read_bytes() == original
+
+
+def test_opening_partial_sitting_records_private_adoption(tmp_path: Path) -> None:
+    sheet = tmp_path / "sitting-001.csv"
+    original = b"item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\nprivate,scene,scenes/a.png,,,,,field\n"
+    sheet.write_bytes(original)
+
+    client = create_app(sheet).test_client()
+    assert client.get("/api/sitting").status_code == 200
+
+    runtime = tmp_path / ".rating-applet"
+    backups = list(runtime.rglob("*.backup"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == original
+    records = list(runtime.rglob("*.jsonl"))
+    assert len(records) == 1
+    event = json.loads(records[0].read_text(encoding="utf-8").splitlines()[0])
+    assert event["type"] == "adopt"
+    assert event["completed_items"] == ["private"]
+    assert event["digest"] == hashlib.sha256(original).hexdigest()
+    assert event["instrument_version"]
+    assert sheet.read_bytes() == original
+
+
+def test_null_choice_is_refused_without_changing_sheet(tmp_path: Path) -> None:
+    sheet = tmp_path / "sitting-001.csv"
+    original = b"item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\nprivate,scene,scenes/a.png,,,,,field\n"
+    sheet.write_bytes(original)
+    client = create_app(sheet).test_client()
+    revision = client.get("/api/sitting").json["revision"]
+
+    response = client.post(
+        "/api/items/1",
+        json={"revision": revision, "field": "scene_tag", "value": None},
+    )
+
+    assert response.status_code == 400
     assert sheet.read_bytes() == original
