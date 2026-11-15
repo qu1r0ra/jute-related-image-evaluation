@@ -195,9 +195,18 @@ def create_app(sheet: Path) -> Flask:
     def local_request() -> object:
         host = request.host.partition(":")[0].lower()
         origin = request.headers.get("Origin")
+        top_level_navigation = (
+            request.method == "GET"
+            and request.path == "/"
+            and request.headers.get("Sec-Fetch-Mode") == "navigate"
+            and request.headers.get("Sec-Fetch-Dest") == "document"
+        )
         if (
             host not in {"127.0.0.1", "localhost"}
-            or request.headers.get("Sec-Fetch-Site") == "cross-site"
+            or (
+                request.headers.get("Sec-Fetch-Site") == "cross-site"
+                and not top_level_navigation
+            )
             or (origin is not None and origin != request.host_url.rstrip("/"))
         ):
             return "Forbidden.", 403
@@ -281,8 +290,7 @@ def create_app(sheet: Path) -> Flask:
                 source_bytes = path.read_bytes()
                 if variant == "preview":
                     cache_key = _digest(
-                        f"{_VERSION}:preview:{_PREVIEW_SIZE}:".encode()
-                        + source_bytes
+                        f"{_VERSION}:preview:{_PREVIEW_SIZE}:".encode() + source_bytes
                     )
                     cache = runtime / "previews" / f"{cache_key}.png"
                     if not cache.is_file():

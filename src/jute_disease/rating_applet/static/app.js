@@ -34,12 +34,14 @@ function choices() {
 }
 async function show(pos) {
   position = pos; history = []; full = false; readable = false; $('save').textContent = ''; $('image-status').textContent = 'Loading image…';
+  $('image-frame').replaceChildren();
   $('position').textContent = `Item ${position} of ${state.total}`;
   try { item = await json(`/api/items/${position}`); choices(); } catch (e) { item = null; $('choices').replaceChildren(); $('notice').textContent = e.message; return; }
-  const picture = $('picture'); picture.className = ''; picture.style.width = ''; $('scale').value = 1; $('zoom').textContent = 'Inspect full resolution';
+  const picture = document.createElement('img'); picture.id = 'picture'; picture.alt = 'Image for this item';
+  $('scale').value = 1; $('zoom').textContent = 'Inspect full resolution';
   picture.onload = () => { readable = true; $('image-status').textContent = ''; controls(); };
   picture.onerror = () => { readable = false; $('image-status').textContent = 'Image unavailable. Resolve the issue before advancing.'; controls(); };
-  picture.src = `/images/${position}/preview`; controls();
+  $('image-frame').append(picture); picture.src = `/images/${position}/preview`; controls();
 }
 async function save(field, value, undo = false) {
   if (busy || failed || state.read_only || value === item[field]) return;
@@ -54,8 +56,8 @@ async function save(field, value, undo = false) {
 $('previous').onclick = () => show(position - 1); $('next').onclick = () => show(position + 1);
 $('undo').onclick = async () => { const change = history.pop(); if (change) await save(change.field, change.value, true); };
 $('finish').onclick = async () => { busy = true; controls(); try { await json('/api/finish', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({revision: state.revision})}); await refresh(); $('notice').textContent = 'Sitting finished. Take a break before the next sitting.'; } catch (e) { failed = true; $('notice').textContent = e.message; } busy = false; controls(); };
-$('zoom').onclick = () => { full = !full; readable = false; $('image-status').textContent = 'Loading image…'; $('picture').classList.toggle('full', full); $('picture').style.width = ''; $('scale').value = 1; $('zoom').textContent = full ? 'Fit preview' : 'Inspect full resolution'; $('picture').src = `/images/${position}/${full ? 'original' : 'preview'}`; controls(); };
-$('scale').oninput = () => { if (full) $('picture').style.width = `${$('picture').naturalWidth * Number($('scale').value)}px`; };
+$('zoom').onclick = () => { const picture = $('picture'); if (!picture) return; full = !full; readable = false; $('image-status').textContent = 'Loading image…'; picture.classList.toggle('full', full); picture.style.width = ''; $('scale').value = 1; $('zoom').textContent = full ? 'Fit preview' : 'Inspect full resolution'; picture.src = `/images/${position}/${full ? 'original' : 'preview'}`; controls(); };
+$('scale').oninput = () => { const picture = $('picture'); if (full && picture) picture.style.width = `${picture.naturalWidth * Number($('scale').value)}px`; };
 document.addEventListener('keydown', e => { if (e.ctrlKey || e.altKey || e.metaKey || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) || e.target.isContentEditable || e.target.id === "zoom" || !item) return; for (const [field, group] of Object.entries(groups)) { if (field === 'mask_quality' && item.kind !== 'mask') continue; const choice = group.options.find(option => option[2].toLowerCase() === e.key.toLowerCase()); if (choice) { e.preventDefault(); save(field, choice[0]); return; } } });
 (async () => { try { await refresh(); await show(state.position); } catch (e) { $('notice').textContent = e.message; } })();
 
