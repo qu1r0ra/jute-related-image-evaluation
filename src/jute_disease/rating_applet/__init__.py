@@ -14,9 +14,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_file
+from PIL import Image, ImageOps
 
-from jute_disease.data import audit_row_complete, validate_audit_row
+from jute_disease.data import MASK_RUBRIC, audit_row_complete, validate_audit_row
 
 _VERSION = "1.0.0"
 _LOCKS: dict[str, Lock] = {}
@@ -212,6 +213,65 @@ def create_app(sheet: Path) -> Flask:
                     ],
                 },
             )
+
+    @app.get("/api/items/<int:position>")
+    def item(position: int) -> object:
+        try:
+            with _locked(runtime):
+                content, _, rows = _read(sheet)
+                _state(runtime, content)
+                if not 1 <= position <= len(rows):
+                    return jsonify(error="Unknown position."), 404
+                row = rows[position - 1]
+                if row["kind"] not in {"mask", "scene"}:
+                    return jsonify(error="Pair editing is not supported."), 400
+                rubric = json.loads(
+                    (sheet.parent / "kit.json").read_text(encoding="utf-8")
+                )
+                anchors = rubric.get("scene_rubric", {}).get("anchors", {})
+                return jsonify(
+                    kind=row["kind"],
+                    mask_quality=row["mask_quality"],
+                    scene_tag=row["scene_tag"],
+                    mask_anchors=MASK_RUBRIC["anchors"],
+                    scene_anchors={
+                        key: anchors.get(key, "")
+                        for key in ("clean-background", "field", "unknown")
+                    },
+                )
+        except OSError, ValueError, KeyError, csv.Error, TypeError:
+            return jsonify(error="Unable to load this item."), 409
+
+    @app.get("/images/<int:position>/<variant>")
+    def image(position: int, variant: str) -> object:
+        if variant not in {"preview", "original"}:
+            return "Image unavailable.", 404
+        try:
+            with _locked(runtime):
+                content, _, rows = _read(sheet)
+                _state(runtime, content)
+                if not 1 <= position <= len(rows):
+                    raise ValueError("Unknown position")
+                row = rows[position - 1]
+                field = {"mask": "overlay_path", "scene": "image_a"}.get(row["kind"])
+                if field is None:
+                    raise ValueError("Unsupported kind")
+                root = sheet.parent.resolve()
+                path = (root / row[field]).resolve(strict=True)
+                if not path.is_relative_to(root) or not path.is_file():
+                    raise ValueError("Image outside kit")
+                with Image.open(path) as source:
+                    picture = ImageOps.exif_transpose(source).convert("RGB")
+                    if variant == "preview":
+                        picture.thumbnail((1400, 1400), Image.Resampling.LANCZOS)
+                    output = io.BytesIO()
+                    picture.save(output, format="PNG")
+                output.seek(0)
+                response = send_file(output, mimetype="image/png", max_age=0)
+                response.headers["Cache-Control"] = "no-store"
+                return response
+        except OSError, ValueError, KeyError, csv.Error, Image.DecompressionBombError:
+            return "Image unavailable.", 404
 
     @app.get("/api/sitting")
     def sitting() -> object:

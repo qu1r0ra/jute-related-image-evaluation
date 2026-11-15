@@ -473,3 +473,32 @@ def test_invalid_external_edit_opens_in_recovery_state(tmp_path: Path) -> None:
     response = create_app(sheet).test_client().get("/api/sitting")
     assert response.status_code == 409
     assert b"secret-item" not in response.data
+
+
+def test_image_routes_only_serve_contained_sitting_images(tmp_path: Path) -> None:
+    from PIL import Image
+
+    kit = tmp_path / "kit"
+    kit.mkdir()
+    (kit / "scenes").mkdir()
+    (kit / "kit.json").write_text('{"scene_rubric": {"anchors": {}}}', encoding="utf-8")
+    Image.new("RGB", (1800, 900), "gray").save(kit / "scenes" / "private.png")
+    sheet = kit / "sitting-001.csv"
+    sheet.write_text(
+        "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\n"
+        "private,scene,scenes/private.png,,,,,\n"
+        "escape,scene,../outside.png,,,,,\n",
+        encoding="utf-8",
+    )
+    client = create_app(sheet).test_client()
+    item = client.get("/api/items/1")
+    assert item.status_code == 200
+    assert b"private" not in item.data
+    preview = client.get("/images/1/preview")
+    assert preview.status_code == 200
+    from io import BytesIO
+
+    assert Image.open(BytesIO(preview.data)).size == (1400, 700)
+    assert client.get("/images/1/original").status_code == 200
+    assert client.get("/images/2/original").status_code == 404
+    assert client.get("/images/3/original").status_code == 404
