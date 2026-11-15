@@ -504,6 +504,46 @@ def test_image_routes_only_serve_contained_sitting_images(tmp_path: Path) -> Non
     assert client.get("/images/3/original").status_code == 404
 
 
+def test_preview_cache_is_private_and_refreshes_when_source_changes(
+    tmp_path: Path,
+) -> None:
+    from io import BytesIO
+
+    from PIL import Image
+
+    kit = tmp_path / "kit"
+    kit.mkdir()
+    (kit / "kit.json").write_text('{"scene_rubric": {"anchors": {}}}', encoding="utf-8")
+    source = kit / "image.png"
+    Image.new("RGB", (1800, 900), "red").save(source)
+    sheet = kit / "sitting-001.csv"
+    sheet.write_text(
+        "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\n"
+        "private,scene,image.png,,,,,\n",
+        encoding="utf-8",
+    )
+    original = source.read_bytes()
+    client = create_app(sheet).test_client()
+
+    first = client.get("/images/1/preview")
+
+    assert first.status_code == 200
+    cache = kit / ".rating-applet" / sheet.name / "previews"
+    cached_files = list(cache.glob("*.png"))
+    assert len(cached_files) == 1
+    assert source.read_bytes() == original
+    first_color = Image.open(BytesIO(first.data)).getpixel((20, 20))
+    assert first_color == (255, 0, 0)
+    Image.new("RGB", (1800, 900), "blue").save(source)
+
+    second = client.get("/images/1/preview")
+
+    assert second.status_code == 200
+    assert len(list(cache.glob("*.png"))) == 2
+    assert Image.open(BytesIO(second.data)).getpixel((20, 20)) == (0, 0, 255)
+    assert b"private" not in second.data
+
+
 @pytest.mark.serial
 def test_browser_rates_and_finishes_synthetic_scene(tmp_path: Path) -> None:
     from threading import Thread
@@ -543,6 +583,186 @@ def test_browser_rates_and_finishes_synthetic_scene(tmp_path: Path) -> None:
 
 
 @pytest.mark.serial
+def test_browser_delayed_save_blocks_more_input_until_confirmed(tmp_path: Path) -> None:
+    from threading import Event, Thread
+
+    from flask import request
+    from PIL import Image
+    from playwright.sync_api import sync_playwright
+    from werkzeug.serving import make_server
+
+    (tmp_path / "kit.json").write_text(
+        json.dumps({"scene_rubric": {"anchors": {}}}), encoding="utf-8"
+    )
+    Image.new("RGB", (80, 40), "gray").save(tmp_path / "image.png")
+    sheet = tmp_path / "sitting-001.csv"
+    sheet.write_text(
+        "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\n"
+        "private,scene,image.png,,,,,\n",
+        encoding="utf-8",
+    )
+    app = create_app(sheet)
+    save_started, release_save = Event(), Event()
+
+    @app.before_request
+    def delay_rating_save() -> None:
+        if request.method == "POST" and request.path == "/api/items/1":
+            save_started.set()
+            release_save.wait(10)
+        return None
+
+    server = make_server("127.0.0.1", 0, app, threaded=True)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page()
+            page.goto(f"http://127.0.0.1:{server.server_port}/")
+            page.get_by_role("button", name="Field").click()
+            assert save_started.wait(10)
+            page.get_by_text("Saving…", exact=True).wait_for()
+            assert page.get_by_role("button", name="Field").is_disabled()
+            assert page.get_by_role("button", name="Next").is_disabled()
+            assert page.get_by_text("Item 1 of 1", exact=True).is_visible()
+            release_save.set()
+            page.get_by_text("Saved", exact=True).wait_for()
+            assert page.get_by_text("Item 1 of 1", exact=True).is_visible()
+            browser.close()
+    finally:
+        release_save.set()
+        server.shutdown()
+        thread.join()
+
+
+@pytest.mark.serial
+def test_browser_failed_save_is_not_claimed_saved_and_can_resume(
+    tmp_path: Path,
+) -> None:
+    from threading import Thread
+
+    from flask import jsonify, request
+    from PIL import Image
+    from playwright.sync_api import sync_playwright
+    from werkzeug.serving import make_server
+
+    (tmp_path / "kit.json").write_text(
+        json.dumps({"scene_rubric": {"anchors": {}}}), encoding="utf-8"
+    )
+    Image.new("RGB", (80, 40), "gray").save(tmp_path / "image.png")
+    sheet = tmp_path / "sitting-001.csv"
+    sheet.write_text(
+        "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\n"
+        "private,scene,image.png,,,,,\n",
+        encoding="utf-8",
+    )
+    app = create_app(sheet)
+    fail_next_save = True
+
+    @app.before_request
+    def fail_first_rating_save() -> object:
+        nonlocal fail_next_save
+        if (
+            request.method == "POST"
+            and request.path == "/api/items/1"
+            and fail_next_save
+        ):
+            fail_next_save = False
+            return jsonify(error="Synthetic save failure."), 409
+        return None
+
+    server = make_server("127.0.0.1", 0, app, threaded=True)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page()
+            page.goto(f"http://127.0.0.1:{server.server_port}/")
+            page.get_by_role("button", name="Field").click()
+            page.get_by_text(
+                "Synthetic save failure. Reload to verify the saved state.", exact=True
+            ).wait_for()
+            assert page.get_by_role("button", name="Field").is_disabled()
+            assert page.get_by_role("button", name="Next").is_disabled()
+            assert page.get_by_text(
+                "0 completed · 1 remaining", exact=True
+            ).is_visible()
+
+            page.reload()
+            page.get_by_role("button", name="Field").wait_for(state="visible")
+            assert page.get_by_role("button", name="Field").is_enabled()
+            page.get_by_role("button", name="Field").click()
+            page.get_by_text("Saved", exact=True).wait_for()
+            assert page.get_by_text(
+                "1 completed · 0 remaining", exact=True
+            ).is_visible()
+            browser.close()
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+@pytest.mark.serial
+def test_browser_opens_app_from_a_cross_site_top_level_link(tmp_path: Path) -> None:
+    from threading import Thread
+
+    from flask import request
+    from PIL import Image
+    from playwright.sync_api import sync_playwright
+    from werkzeug.serving import make_server
+
+    (tmp_path / "kit.json").write_text(
+        json.dumps({"scene_rubric": {"anchors": {}}}), encoding="utf-8"
+    )
+    Image.new("RGB", (80, 40), "gray").save(tmp_path / "image.png")
+    sheet = tmp_path / "sitting-001.csv"
+    sheet.write_text(
+        "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\n"
+        "private,scene,image.png,,,,,\n",
+        encoding="utf-8",
+    )
+    app = create_app(sheet)
+    navigation_sites = []
+
+    @app.before_request
+    def observe_navigation_site() -> None:
+        if request.path == "/":
+            navigation_sites.append(request.headers.get("Sec-Fetch-Site"))
+        return None
+
+    server = make_server("127.0.0.1", 0, app, threaded=True)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page()
+            source_port = server.server_port + 1
+            source_url = f"http://localhost:{source_port}/"
+            target_url = f"http://127.0.0.1:{server.server_port}/"
+            page.route(
+                source_url,
+                lambda route: route.fulfill(
+                    content_type="text/html",
+                    body=f'<a href="{target_url}">Open rating app</a>',
+                ),
+            )
+            page.goto(source_url)
+            page.get_by_role("link", name="Open rating app").click()
+            page.get_by_role("heading", name="Rating sitting").wait_for()
+            page.get_by_role("img", name="Image for this item").wait_for()
+            assert navigation_sites == ["cross-site"]
+            assert page.get_by_text(
+                "0 completed · 1 remaining", exact=True
+            ).is_visible()
+            browser.close()
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+@pytest.mark.serial
 def test_browser_mask_keyboard_undo_and_unreadable_image(tmp_path: Path) -> None:
     from threading import Thread
 
@@ -568,6 +788,7 @@ def test_browser_mask_keyboard_undo_and_unreadable_image(tmp_path: Path) -> None
             page = browser.new_page(viewport={"width": 1200, "height": 900})
             page.goto(f"http://127.0.0.1:{server.server_port}/")
             page.get_by_role("button", name="Pass").wait_for()
+            page.get_by_role("img", name="Image for this item").wait_for()
             page.keyboard.press("1")
             page.get_by_text("Saved", exact=True).wait_for()
             page.keyboard.press("w")
@@ -606,6 +827,31 @@ def test_cross_site_requests_cannot_read_local_sitting(tmp_path: Path) -> None:
         client.get("/api/sitting", headers={"Sec-Fetch-Site": "cross-site"}).status_code
         == 403
     )
+
+
+def test_cross_site_top_level_navigation_opens_only_the_static_app_shell(
+    tmp_path: Path,
+) -> None:
+    sheet = tmp_path / "sitting-001.csv"
+    sheet.write_text(
+        "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\n"
+        "secret,scene,image.png,,,,,\n",
+        encoding="utf-8",
+    )
+    client = create_app(sheet).test_client()
+    navigation = {
+        "Host": "127.0.0.1:8765",
+        "Sec-Fetch-Site": "cross-site",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Dest": "document",
+    }
+
+    page = client.get("/", headers=navigation)
+
+    assert page.status_code == 200
+    assert b"secret" not in page.data
+    assert client.get("/api/sitting", headers=navigation).status_code == 403
+    assert client.post("/api/items/1", headers=navigation).status_code == 403
 
 
 def test_pair_editing_and_finishing_are_refused(tmp_path: Path) -> None:
