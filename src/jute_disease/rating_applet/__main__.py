@@ -40,7 +40,10 @@ def main() -> None:
     )
     args = parser.parse_args()
     if args.reopen_reason is not None:
-        reopen_sitting(args.sheet, args.reopen_reason)
+        try:
+            reopen_sitting(args.sheet, args.reopen_reason)
+        except (OSError, ValueError, csv.Error) as error:
+            parser.error(f"Unable to reopen sitting: {error}")
         return
     if not args.sheet.is_file():
         parser.error("The sitting sheet does not exist.")

@@ -57,6 +57,9 @@ function controls() {
     button.disabled = busy || failed || state.read_only;
     button.setAttribute('aria-pressed', String(item[button.dataset.field] === button.dataset.value));
   });
+  document.querySelectorAll('.zoom button, .zoom input').forEach(control => {
+    control.disabled = busy;
+  });
   $('previous').disabled = busy || failed || position <= 1;
   $('next').disabled = busy || failed || !readable || !complete() || position >= state.total;
   $('finish').disabled = busy || failed || !readable || state.read_only || state.completed !== state.total;
@@ -201,35 +204,35 @@ function setImageSources() {
 }
 
 async function show(nextPosition) {
-  position = nextPosition;
-  history = [];
-  full = false;
-  actualPixels = false;
-  swapped = false;
-  readable = false;
-  failed = false;
-  $('save').textContent = '';
-  $('image-status').textContent = 'Loading image…';
-  $('image-frame').replaceChildren();
-  $('pair-frames').replaceChildren();
-  $('pair-frames').hidden = true;
-  $('image-frame').hidden = false;
-  $('position').textContent = `Item ${position} of ${state.total}`;
-  $('scale').value = 1;
-  $('zoom').textContent = 'Inspect full resolution';
-  $('actual-pixels').textContent = 'Actual pixels';
-  $('actual-pixels').setAttribute('aria-pressed', 'false');
-  $('swap').setAttribute('aria-pressed', 'false');
-  $('notice').textContent = '';
+  if (busy || failed || !state) return;
+  busy = true;
+  controls();
   try {
-    item = await json(`/api/items/${position}`);
+    const nextItem = await json(`/api/items/${nextPosition}`);
+    position = nextPosition;
+    item = nextItem;
+    history = [];
+    full = false;
+    actualPixels = false;
+    swapped = false;
+    readable = false;
+    failed = false;
+    $('save').textContent = '';
+    $('image-status').textContent = 'Loading image…';
+    $('position').textContent = `Item ${position} of ${state.total}`;
+    $('scale').value = 1;
+    $('zoom').textContent = 'Inspect full resolution';
+    $('actual-pixels').textContent = 'Actual pixels';
+    $('actual-pixels').setAttribute('aria-pressed', 'false');
+    $('swap').setAttribute('aria-pressed', 'false');
+    $('notice').textContent = '';
     choices();
     setImageSources();
   } catch (error) {
-    item = null;
-    $('choices').replaceChildren();
     $('notice').textContent = error.message;
   }
+  busy = false;
+  controls();
 }
 
 async function save(field, value, undo = false) {
@@ -247,7 +250,7 @@ async function save(field, value, undo = false) {
     state.revision = result.revision;
     item[field] = value;
     if (!undo) history.push({ field, value: oldValue });
-    await refresh();
+    await refresh(result.revision);
     $('save').textContent = 'Saved';
   } catch (error) {
     failed = true;
@@ -338,11 +341,13 @@ $('scale').oninput = () => {
 document.addEventListener('keydown', event => {
   const target = event.target;
   if (
-    event.ctrlKey || event.altKey || event.metaKey ||
+    busy || failed || event.ctrlKey || event.altKey || event.metaKey ||
     /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) ||
     target.isContentEditable || target.closest('.zoom') || !item
   ) return;
-  const fields = item.kind === 'pair' ? ['rating'] : ['mask_quality', 'scene_tag'];
+  const fields = item.kind === 'pair'
+    ? ['rating']
+    : item.kind === 'mask' ? ['mask_quality', 'scene_tag'] : ['scene_tag'];
   for (const field of fields) {
     const choice = groups[field].options.find(option => option[2].toLowerCase() === event.key.toLowerCase());
     if (choice) {

@@ -482,6 +482,259 @@ def test_old_revision_is_stale_even_after_values_return_to_original(
     )
 
 
+@pytest.mark.serial
+def test_browser_navigation_disables_old_choices_until_new_item_is_loaded(
+    tmp_path: Path,
+) -> None:
+    from threading import Event, Thread
+
+    from flask import request
+    from PIL import Image
+    from playwright.sync_api import sync_playwright
+    from werkzeug.serving import make_server
+
+    (tmp_path / "kit.json").write_text(
+        json.dumps({"scene_rubric": {"anchors": {}}}), encoding="utf-8"
+    )
+    Image.new("RGB", (80, 60), "gray").save(tmp_path / "scene-a.png")
+    Image.new("RGB", (80, 60), "blue").save(tmp_path / "scene-b.png")
+    sheet = tmp_path / "sitting-001.csv"
+    sheet.write_text(
+        "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\n"
+        "private-a,scene,scene-a.png,,,,,field\n"
+        "private-b,scene,scene-b.png,,,,,\n",
+        encoding="utf-8",
+    )
+    app = create_app(sheet)
+    delay_second_item_request = Event()
+    item_request_seen = Event()
+    release_item_request = Event()
+
+    @app.before_request
+    def hold_second_item_request() -> object:
+        if (
+            delay_second_item_request.is_set()
+            and request.method == "GET"
+            and request.path == "/api/items/2"
+        ):
+            item_request_seen.set()
+            assert release_item_request.wait(10)
+        return None
+
+    server = make_server("127.0.0.1", 0, app, threaded=True)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page()
+            requests: list[tuple[str, str]] = []
+            page.on(
+                "request",
+                lambda browser_request: requests.append(
+                    (browser_request.method, browser_request.url)
+                ),
+            )
+            page.goto(f"http://127.0.0.1:{server.server_port}/")
+            page.get_by_role("button", name="Unknown").wait_for()
+            page.wait_for_function(
+                "document.querySelector('#image-frame img')?.complete "
+                "&& document.querySelector('#image-frame img')?.naturalWidth > 0"
+            )
+
+            page.get_by_role("button", name="Previous").click()
+            page.get_by_text("Item 1 of 2", exact=True).wait_for()
+            page.wait_for_function(
+                "document.querySelector('#image-frame img')?.complete "
+                "&& document.querySelector('#image-frame img')?.naturalWidth > 0"
+            )
+            delay_second_item_request.set()
+            page.get_by_role("button", name="Next").click()
+            assert item_request_seen.wait(5)
+            assert page.get_by_role("button", name="Unknown").is_disabled()
+            page.keyboard.press("E")
+            assert not any(
+                method == "POST" and url.endswith("/api/items/2")
+                for method, url in requests
+            )
+            release_item_request.set()
+            page.get_by_text("Item 2 of 2", exact=True).wait_for()
+            page.get_by_role("button", name="Unknown").wait_for(state="visible")
+            assert not any(
+                method == "POST" and url.endswith("/api/items/2")
+                for method, url in requests
+            )
+            with sheet.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            assert rows[1]["scene_tag"] == ""
+            browser.close()
+    finally:
+        release_item_request.set()
+        server.shutdown()
+        thread.join()
+
+
+@pytest.mark.serial
+def test_browser_save_refuses_a_revision_changed_before_refresh(
+    tmp_path: Path,
+) -> None:
+    from threading import Thread
+
+    from flask import request
+    from PIL import Image
+    from playwright.sync_api import sync_playwright
+    from werkzeug.serving import make_server
+
+    (tmp_path / "kit.json").write_text(
+        json.dumps({"scene_rubric": {"anchors": {}}}), encoding="utf-8"
+    )
+    Image.new("RGB", (80, 60), "gray").save(tmp_path / "scene.png")
+    sheet = tmp_path / "sitting-001.csv"
+    sheet.write_text(
+        "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\n"
+        "private,scene,scene.png,,,,,\n",
+        encoding="utf-8",
+    )
+    app = create_app(sheet)
+    inject_external_change = True
+
+    @app.after_request
+    def simulate_another_tab(response) -> object:
+        nonlocal inject_external_change
+        if (
+            inject_external_change
+            and request.method == "POST"
+            and request.path == "/api/items/1"
+            and response.status_code == 200
+        ):
+            inject_external_change = False
+            external = app.test_client()
+            revision = external.get("/api/sitting").json["revision"]
+            changed = external.post(
+                "/api/items/1",
+                json={
+                    "revision": revision,
+                    "field": "scene_tag",
+                    "value": "unknown",
+                },
+            )
+            assert changed.status_code == 200
+        return response
+
+    server = make_server("127.0.0.1", 0, app, threaded=True)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page()
+            page.goto(f"http://127.0.0.1:{server.server_port}/")
+            page.get_by_role("button", name="Field").wait_for()
+            page.wait_for_function(
+                "document.querySelector('#image-frame img')?.complete "
+                "&& document.querySelector('#image-frame img')?.naturalWidth > 0"
+            )
+
+            page.keyboard.press("W")
+            page.get_by_text(
+                "The sitting changed. Reload it. Reload to verify the saved state.",
+                exact=True,
+            ).wait_for()
+            assert page.get_by_role("button", name="Field").is_disabled()
+            with sheet.open(newline="", encoding="utf-8") as handle:
+                assert next(csv.DictReader(handle))["scene_tag"] == "unknown"
+            browser.close()
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+@pytest.mark.serial
+def test_browser_scene_shortcuts_do_not_submit_mask_fields(tmp_path: Path) -> None:
+    from threading import Thread
+
+    from PIL import Image
+    from playwright.sync_api import sync_playwright
+    from werkzeug.serving import make_server
+
+    (tmp_path / "kit.json").write_text(
+        json.dumps({"scene_rubric": {"anchors": {}}}), encoding="utf-8"
+    )
+    Image.new("RGB", (80, 60), "gray").save(tmp_path / "scene.png")
+    sheet = tmp_path / "sitting-001.csv"
+    sheet.write_text(
+        "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\n"
+        "private,scene,scene.png,,,,,\n",
+        encoding="utf-8",
+    )
+    server = make_server("127.0.0.1", 0, create_app(sheet), threaded=True)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page()
+            requests: list[tuple[str, str]] = []
+            page.on(
+                "request",
+                lambda browser_request: requests.append(
+                    (browser_request.method, browser_request.url)
+                ),
+            )
+            page.goto(f"http://127.0.0.1:{server.server_port}/")
+            page.get_by_role("button", name="Field").wait_for()
+            page.wait_for_function(
+                "document.querySelector('#image-frame img')?.complete "
+                "&& document.querySelector('#image-frame img')?.naturalWidth > 0"
+            )
+
+            page.keyboard.press("1")
+            assert not any(
+                method == "POST" and url.endswith("/api/items/1")
+                for method, url in requests
+            )
+            page.keyboard.press("W")
+            page.get_by_text("Saved", exact=True).wait_for()
+            with sheet.open(newline="", encoding="utf-8") as handle:
+                saved = next(csv.DictReader(handle))
+            assert saved["mask_quality"] == ""
+            assert saved["scene_tag"] == "field"
+            browser.close()
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_reopen_cli_translates_invalid_state_to_argument_error(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    import sys
+
+    from jute_disease.rating_applet.__main__ import main
+
+    sheet = tmp_path / "sitting-001.csv"
+    sheet.write_text(
+        "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\n"
+        "private,scene,scene.png,,,,,field\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["rating-applet", str(sheet), "--reopen-reason", "Correct an entry error"],
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        main()
+
+    assert exit_info.value.code == 2
+    output = capsys.readouterr()
+    assert "error: Unable to reopen sitting: This sitting cannot be reopened." in (
+        output.err
+    )
+    assert "Traceback" not in output.err
+
+
 def test_invalid_external_edit_opens_in_recovery_state(tmp_path: Path) -> None:
     sheet = tmp_path / "sitting-001.csv"
     sheet.write_bytes(
