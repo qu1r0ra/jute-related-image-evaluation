@@ -61,28 +61,38 @@ class CandidateImage:
 
 @dataclass(frozen=True)
 class ProtectedTestImages:
-    """Content digests of the protected test partition a mask audit must avoid."""
+    """Content digests of the protected test partitions a mask audit must avoid.
 
-    manifest_digest: str
+    The binding names the manifest digest of every partition in the union.
+    """
+
+    manifest_digests: tuple[str, ...]
     image_ids: frozenset[str]
 
     def __post_init__(self) -> None:
-        if not self.manifest_digest:
+        if isinstance(self.manifest_digests, str):
+            raise ValueError("manifest digests must be a sequence, one per target")
+        if not self.manifest_digests or not all(self.manifest_digests):
             raise ValueError("the protected-test binding needs a manifest digest")
         if not self.image_ids:
             raise ValueError("the protected test partition is empty")
 
 
-def load_protected_test_images(target_dir: Path) -> ProtectedTestImages:
-    """Read only the identities of the protected test partition of a frozen target.
+def load_protected_test_images(*target_dirs: Path) -> ProtectedTestImages:
+    """Read only the identities of the protected test partitions of frozen targets.
 
-    Image identities are file SHA-256 digests, so the partition can be compared
-    with candidate content without opening any test image.
+    Image identities are file SHA-256 digests, so the union of the partitions
+    can be compared with candidate content without opening any test image.
     """
-    manifest = load_protected_test_manifest(Path(target_dir))
-    return ProtectedTestImages(
-        manifest.digest(), frozenset(entry.image_id for entry in manifest.entries)
-    )
+    if not target_dirs:
+        raise ValueError("name at least one frozen target directory")
+    digests: list[str] = []
+    image_ids: set[str] = set()
+    for target_dir in target_dirs:
+        manifest = load_protected_test_manifest(Path(target_dir))
+        digests.append(manifest.digest())
+        image_ids.update(entry.image_id for entry in manifest.entries)
+    return ProtectedTestImages(tuple(digests), frozenset(image_ids))
 
 
 def _refuse_test_overlap(
@@ -326,7 +336,7 @@ def run_masks_audit(
         },
         "mask_backend": {"model": backend.model, "version": backend.version},
         "partition_check": {
-            "target_manifest_digest": protected.manifest_digest,
+            "target_manifest_digests": list(protected.manifest_digests),
             "test_image_count": len(protected.image_ids),
             "development_images_checked": len(thresholds.development_sources),
             "inventory_images_checked": len(candidates),
@@ -870,7 +880,7 @@ def _fixture_protected(input_dir: Path) -> ProtectedTestImages:
         path = input_dir / f"test-{index}.png"
         _write_fixture_image(path, "field", 10_000 + index)
         ids.append(file_sha256(path))
-    return ProtectedTestImages("synthetic-fixture-test-partition", frozenset(ids))
+    return ProtectedTestImages(("synthetic-fixture-test-partition",), frozenset(ids))
 
 
 def _fixture_tag(index: int) -> str:

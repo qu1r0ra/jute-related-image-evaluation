@@ -148,6 +148,12 @@ from jute_disease.data.policies import (
     policy_matrix_binding,
     write_policy_manifests,
 )
+from jute_disease.data.scene_sets import (
+    SCENE_SET_ALLOCATION,
+    draw_scene_sets,
+    read_excluded_ids,
+    read_scene_set,
+)
 from jute_disease.data.sources import (
     PLANTDOC,
     PLANTVILLAGE,
@@ -328,6 +334,7 @@ __all__ += [
     "MaskBackend",
     "MaskPrediction",
     "ProtectedTestImages",
+    "SCENE_SET_ALLOCATION",
     "SceneFeatures",
     "SceneObservation",
     "SceneThresholds",
@@ -338,7 +345,10 @@ __all__ += [
     "extract_scene_features",
     "fit_scene_thresholds",
     "fit_thresholds_from_manifest",
+    "draw_scene_sets",
     "load_protected_test_images",
+    "read_excluded_ids",
+    "read_scene_set",
     "read_candidates",
     "read_development_observations",
     "require_colour_threshold",

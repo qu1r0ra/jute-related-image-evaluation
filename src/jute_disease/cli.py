@@ -46,6 +46,7 @@ from jute_disease.data import (
     collect_audit_kit,
     download_plant_doc,
     download_plant_village,
+    draw_scene_sets,
     evaluate_masks_audit,
     evaluate_ratings,
     export_blind,
@@ -60,6 +61,7 @@ from jute_disease.data import (
     prepare_cohort,
     probe_cache,
     read_candidates,
+    read_excluded_ids,
     residual_sample,
     run_masks_audit,
     run_masks_fixture,
@@ -285,10 +287,39 @@ def _audit_cohort(args: argparse.Namespace) -> None:
 def _audit_kit(args: argparse.Namespace) -> None:
     try:
         _print_json(
-            build_audit_kit(args.cohort, args.mask_audit, args.output, seed=args.seed)
+            build_audit_kit(
+                args.cohort,
+                args.mask_audit,
+                args.output,
+                seed=args.seed,
+                held_out=args.held_out,
+            )
         )
     except (ValueError, OSError, KeyError) as error:
         raise SystemExit(f"audit blocked: {error}") from error
+
+
+def _pool_paths(items: list[str], option: str) -> dict[str, Path]:
+    paths = dict(item.split("=", 1) for item in items if "=" in item)
+    if len(paths) != len(items) or not all(paths.values()):
+        raise ValueError(f"{option} takes unique POOL=PATH values")
+    return {pool: Path(path) for pool, path in paths.items()}
+
+
+def _scene_sets(args: argparse.Namespace) -> None:
+    try:
+        _print_json(
+            draw_scene_sets(
+                _pool_paths(args.target_dir, "--target-dir"),
+                _pool_paths(args.image_root, "--image-root"),
+                args.development,
+                args.output,
+                seed=args.seed,
+                excluded_ids=read_excluded_ids(args.exclude) if args.exclude else (),
+            )
+        )
+    except (ValueError, OSError, KeyError) as error:
+        raise SystemExit(f"scene sets blocked: {error}") from error
 
 
 def _audit_sitting(args: argparse.Namespace) -> None:
@@ -356,7 +387,7 @@ def _masks_calibrate(args: argparse.Namespace) -> None:
         thresholds = fit_thresholds_from_manifest(
             args.development,
             ColorThresholdBackend(),
-            load_protected_test_images(args.target_dir),
+            load_protected_test_images(*args.target_dir),
         )
         write_thresholds(args.output, thresholds)
     except (ValueError, OSError, KeyError, FreezeBlockedError) as error:
@@ -374,7 +405,7 @@ def _masks_audit(args: argparse.Namespace) -> None:
             thresholds,
             ColorThresholdBackend(),
             args.output,
-            load_protected_test_images(args.target_dir),
+            load_protected_test_images(*args.target_dir),
             seed=args.seed,
             sample_count=args.sample_count,
             owner_count=args.owner_count,
@@ -1221,6 +1252,12 @@ def build_parser() -> argparse.ArgumentParser:
         "mask_audit", type=Path, help="Audit directory from data masks-audit"
     )
     kit.add_argument("output", type=Path, help="New directory for the kit")
+    kit.add_argument(
+        "--held-out",
+        type=Path,
+        help="held-out.json from data scene-sets; adds one scene item per image, "
+        "shown without an overlay or any automatic tag.",
+    )
     kit.add_argument("--seed", type=int, default=DEFAULT_SEED)
     kit.set_defaults(run=_audit_kit)
     sitting = data_actions.add_parser(
@@ -1252,6 +1289,40 @@ def build_parser() -> argparse.ArgumentParser:
     )
     evaluate_audit.set_defaults(run=_audit_evaluate)
 
+    scene_sets = data_actions.add_parser(
+        "scene-sets",
+        help="Draw the held-out scene-tag set, its reserve and the audit inventory.",
+    )
+    scene_sets.add_argument(
+        "--target-dir",
+        action="append",
+        required=True,
+        metavar="POOL=PATH",
+        help="Frozen target directory of one pool. Repeat it for pools A, B and C.",
+    )
+    scene_sets.add_argument(
+        "--image-root",
+        action="append",
+        required=True,
+        metavar="POOL=PATH",
+        help="Directory the pool's manifest paths are relative to. No image is "
+        "opened; the root only makes the written paths resolvable.",
+    )
+    scene_sets.add_argument(
+        "--development",
+        type=Path,
+        required=True,
+        help="Development manifest whose images' families are excluded.",
+    )
+    scene_sets.add_argument(
+        "--exclude",
+        type=Path,
+        help="JSON array of further image IDs whose families are excluded.",
+    )
+    scene_sets.add_argument("--output", type=Path, required=True)
+    scene_sets.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    scene_sets.set_defaults(run=_scene_sets)
+
     masks_calibrate = data_actions.add_parser(
         "masks-calibrate",
         help="Fit scene cutoffs on exactly 100 held-apart labeled dev images.",
@@ -1261,9 +1332,10 @@ def build_parser() -> argparse.ArgumentParser:
     masks_calibrate.add_argument(
         "--target-dir",
         type=Path,
+        action="append",
         required=True,
         help="Frozen target directory whose protected test partition must not "
-        "overlap the development set.",
+        "overlap the development set. Repeat it to check the union of several.",
     )
     masks_calibrate.set_defaults(run=_masks_calibrate)
 
@@ -1280,9 +1352,11 @@ def build_parser() -> argparse.ArgumentParser:
     masks_audit.add_argument(
         "--target-dir",
         type=Path,
+        action="append",
         required=True,
         help="Frozen target directory whose protected test partition the "
-        "development set and audit inventory must not overlap.",
+        "development set and audit inventory must not overlap. Repeat it to "
+        "check the union of several.",
     )
     masks_audit.set_defaults(run=_masks_audit)
 

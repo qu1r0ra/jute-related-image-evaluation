@@ -3,11 +3,14 @@
 The kit holds only what the owner needs to rate: pair images and mask overlays,
 with no agent ratings, algorithm decisions, strata or predicted scenes. Mask
 items come first, as the mask audit asks for them before the grouping pairs.
+A held-out scene set adds one scene item per image between the two: the image
+alone, under a neutral name, to be given a scene tag from the rubric.
 Each sitting writes a sheet of items not yet rated, so the owner can stop and
 resume without seeing a rated item again.
 """
 
 import csv
+import hashlib
 import json
 import random
 import shutil
@@ -16,10 +19,19 @@ from typing import Any
 
 from jute_disease.data.audit import cohort_digest
 from jute_disease.data.audit_sampling import grouping_threshold
-from jute_disease.data.masks import MASK_QUALITY_RATINGS, SCENE_TAGS
+from jute_disease.data.masks import (
+    MASK_QUALITY_RATINGS,
+    SCENE_RUBRIC,
+    SCENE_RUBRIC_VERSION,
+    SCENE_TAGS,
+)
 from jute_disease.data.masks_audit import AUDIT_SCHEMA as MASK_AUDIT_SCHEMA
+from jute_disease.data.scene_sets import read_scene_set
 
 KIT_SCHEMA = "jute-audit-kit-v1"
+# Written only when the kit carries scene items; older kits stay readable.
+SCENE_KIT_SCHEMA = "jute-audit-kit-v2"
+KIT_SCHEMAS = (KIT_SCHEMA, SCENE_KIT_SCHEMA)
 KIT_FILE = "kit.json"
 RATING_VALUES = ("exact", "near-duplicate", "very similar", "different")
 SHEET_COLUMNS = (
@@ -35,7 +47,9 @@ SHEET_COLUMNS = (
 PAIR_COLUMNS = ("pair_id", "image_a", "image_b", "rating")
 MASK_COLUMNS = ("audit_id", "overlay_path", "mask_quality", "scene_tag")
 OWNER_PAIR_SHEET = "owner.csv"
+SCENE_COLUMNS = ("image_id", "scene_tag", "rubric_version")
 OWNER_MASK_SHEET = "owner-masks.csv"
+OWNER_SCENE_SHEET = "owner-scenes.csv"
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -49,14 +63,33 @@ def _write_sheet(path: Path, rows: list[dict[str, str]]) -> None:
         writer.writerows(rows)
 
 
+def _scene_sources(held_out: Path) -> dict[str, Path]:
+    """Map each held-out image ID to its file, checking content against the ID."""
+    sources: dict[str, Path] = {}
+    for record in read_scene_set(held_out):
+        path = Path(record["path"])
+        if not path.is_file():
+            raise ValueError(f"held-out image is missing: {path}")
+        if hashlib.sha256(path.read_bytes()).hexdigest() != record["image_id"]:
+            raise ValueError(f"held-out image does not match its image ID: {path}")
+        sources[record["image_id"]] = path
+    return sources
+
+
 def build_audit_kit(
-    cohort_dir: Path, mask_audit_dir: Path, output: Path, seed: int = 42
+    cohort_dir: Path,
+    mask_audit_dir: Path,
+    output: Path,
+    seed: int = 42,
+    held_out: Path | None = None,
 ) -> dict[str, Any]:
     """Write the blind kit and return a summary.
 
     The grouping cohort must name its grouping version and agent rater. The mask
     items are the owner subset of the mask audit, and their overlays are copied
-    into the kit under neutral names.
+    into the kit under neutral names. With ``held_out``, each image of that
+    scene set becomes one scene item: a copy named by its image ID, with no
+    overlay, pool, label, source path or automatic tag.
     """
     cohort_dir, mask_audit_dir, output = (
         Path(cohort_dir),
@@ -98,9 +131,22 @@ def build_audit_kit(
         }
         for row in cohort["pairs"]
     ]
+    scene_sources = _scene_sources(Path(held_out)) if held_out is not None else {}
+    scene_items = [
+        {
+            "item_id": f"scene:{image_id}",
+            "kind": "scene",
+            "image_a": f"scenes/{image_id}{scene_sources[image_id].suffix.lower()}",
+            "image_b": "",
+            "overlay_path": "",
+        }
+        for image_id in sorted(scene_sources)
+    ]
     rng.shuffle(mask_items)
     rng.shuffle(pair_items)
-    items = mask_items + pair_items
+    # Shuffled last so a kit without scene items keeps the order it always had.
+    rng.shuffle(scene_items)
+    items = mask_items + scene_items + pair_items
     if len({item["item_id"] for item in items}) != len(items):
         raise ValueError("kit items must be unique")
     output.mkdir(parents=True, exist_ok=False)
@@ -110,8 +156,13 @@ def build_audit_kit(
         if not source.is_file():
             raise ValueError(f"mask overlay is missing: {source}")
         shutil.copyfile(source, output / item["overlay_path"])
-    kit = {
-        "schema": KIT_SCHEMA,
+    if scene_items:
+        (output / "scenes").mkdir()
+    for item in scene_items:
+        image_id = item["item_id"].removeprefix("scene:")
+        shutil.copyfile(scene_sources[image_id], output / item["image_a"])
+    kit: dict[str, Any] = {
+        "schema": SCENE_KIT_SCHEMA if scene_items else KIT_SCHEMA,
         "grouping_version": version,
         "hamming_threshold": threshold,
         "agent": {"name": agent["name"], "version": agent["version"]},
@@ -119,10 +170,13 @@ def build_audit_kit(
         "seed": seed,
         "items": items,
     }
+    if scene_items:
+        kit["scene_rubric"] = SCENE_RUBRIC
     (output / KIT_FILE).write_text(json.dumps(kit, indent=2) + "\n", encoding="utf-8")
     return {
         "output": str(output),
         "mask_items": len(mask_items),
+        "scene_items": len(scene_items),
         "pair_items": len(pair_items),
         "grouping_version": version,
         "agent": kit["agent"],
@@ -133,6 +187,8 @@ def build_audit_kit(
 def _is_rated(row: dict[str, str]) -> bool:
     if row["kind"] == "pair":
         return row["rating"] in RATING_VALUES
+    if row["kind"] == "scene":
+        return row["scene_tag"] in SCENE_TAGS
     return (
         row["mask_quality"] in MASK_QUALITY_RATINGS and row["scene_tag"] in SCENE_TAGS
     )
@@ -142,6 +198,10 @@ def _check_row(row: dict[str, str]) -> None:
     """Refuse a value outside the rubric; blank cells mean not yet rated."""
     if row["kind"] == "pair":
         values = {"rating": RATING_VALUES}
+    elif row["kind"] == "scene":
+        if row["rating"] or row["mask_quality"]:
+            raise ValueError(f"{row['item_id']}: a scene item takes only a scene tag")
+        values = {"scene_tag": SCENE_TAGS}
     else:
         values = {"mask_quality": MASK_QUALITY_RATINGS, "scene_tag": SCENE_TAGS}
     for column, allowed in values.items():
@@ -151,8 +211,8 @@ def _check_row(row: dict[str, str]) -> None:
 
 def _load_kit(kit_dir: Path) -> dict[str, Any]:
     kit = _read_json(Path(kit_dir) / KIT_FILE)
-    if kit.get("schema") != KIT_SCHEMA:
-        raise ValueError(f"kit schema must be {KIT_SCHEMA}")
+    if kit.get("schema") not in KIT_SCHEMAS:
+        raise ValueError(f"kit schema must be one of {list(KIT_SCHEMAS)}")
     return kit
 
 
@@ -198,6 +258,8 @@ def next_audit_sitting(kit_dir: Path, limit: int | None = None) -> dict[str, Any
         "sheet": None,
         "items": len(chosen),
     }
+    if any(item["kind"] == "scene" for item in chosen):
+        summary["scene_rubric"] = kit.get("scene_rubric", SCENE_RUBRIC)
     if not chosen:
         summary["next_action"] = "Every item is rated; run data audit-collect."
         return summary
@@ -229,7 +291,10 @@ def collect_audit_kit(kit_dir: Path) -> dict[str, Any]:
         raise ValueError(
             f"{len(missing)} kit items are still unrated; resume a sitting"
         )
-    pairs, masks = [], []
+    pairs, masks, scenes = [], [], []
+    rubric_version = (kit.get("scene_rubric") or {}).get(
+        "version", SCENE_RUBRIC_VERSION
+    )
     for item in kit["items"]:
         rating = rated[item["item_id"]]
         if item["kind"] == "pair":
@@ -241,6 +306,14 @@ def collect_audit_kit(kit_dir: Path) -> dict[str, Any]:
                     "rating": rating["rating"],
                 }
             )
+        elif item["kind"] == "scene":
+            scenes.append(
+                {
+                    "image_id": item["item_id"].removeprefix("scene:"),
+                    "scene_tag": rating["scene_tag"],
+                    "rubric_version": rubric_version,
+                }
+            )
         else:
             masks.append(
                 {
@@ -250,19 +323,27 @@ def collect_audit_kit(kit_dir: Path) -> dict[str, Any]:
                     "scene_tag": rating["scene_tag"],
                 }
             )
-    for name, columns, rows in (
+    sheets = [
         (OWNER_PAIR_SHEET, PAIR_COLUMNS, pairs),
         (OWNER_MASK_SHEET, MASK_COLUMNS, masks),
-    ):
+    ]
+    if scenes:
+        sheets.append((OWNER_SCENE_SHEET, SCENE_COLUMNS, scenes))
+    for name, columns, rows in sheets:
         with (kit_dir / name).open("w", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(handle, fieldnames=columns)
             writer.writeheader()
             writer.writerows(rows)
-    return {
+    summary: dict[str, Any] = {
         "grouping_version": kit["grouping_version"],
         "agent": kit["agent"],
         "pair_ratings": len(pairs),
         "mask_ratings": len(masks),
+        "scene_ratings": len(scenes),
         "pair_sheet": str(kit_dir / OWNER_PAIR_SHEET),
         "mask_sheet": str(kit_dir / OWNER_MASK_SHEET),
     }
+    if scenes:
+        summary["scene_sheet"] = str(kit_dir / OWNER_SCENE_SHEET)
+        summary["scene_rubric_version"] = rubric_version
+    return summary

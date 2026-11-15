@@ -14,7 +14,7 @@ from PIL import Image
 
 SCENE_TAGS = ("clean-background", "field", "unknown")
 MASK_RUBRIC_VERSION = "leaf-mask-v1"
-SCENE_RUBRIC_VERSION = "scene-tag-v1"
+SCENE_RUBRIC_VERSION = "scene-tag-v2"
 MASK_QUALITY_RATINGS = ("pass", "minor", "fail")
 MASK_RUBRIC: dict[str, Any] = {
     "version": MASK_RUBRIC_VERSION,
@@ -35,9 +35,10 @@ SCENE_RUBRIC: dict[str, Any] = {
     "anchors": {
         "clean-background": "Most visible background is a uniform, uncluttered "
         "surface.",
-        "field": "The background contains substantial outdoor or field structure.",
-        "unknown": "Too little background is visible or the scene cannot be "
-        "assigned reliably.",
+        "field": "The background contains substantial outdoor or field structure. "
+        "A leaf photographed against other leaves or plants is field.",
+        "unknown": "Only for a tight crop, a blurred image, or an image with no "
+        "readable background.",
     },
 }
 

@@ -17,7 +17,7 @@ from jute_disease.data.masks_audit import (
 )
 
 PROTECTED = ProtectedTestImages(
-    "b" * 64,
+    ("b" * 64,),
     frozenset(
         hashlib.sha256(f"test-{index}".encode()).hexdigest() for index in range(3)
     ),
@@ -118,7 +118,7 @@ def test_stratified_audit_oversamples_rare_scenes_and_blinds_sheets(
     )
 
     assert manifest["partition_check"]["overlaps"] == 0
-    assert manifest["partition_check"]["target_manifest_digest"] == "b" * 64
+    assert manifest["partition_check"]["target_manifest_digests"] == ["b" * 64]
     assert manifest["mask_backend"] == {
         "model": ColorThresholdBackend.model,
         "version": ColorThresholdBackend.version,
@@ -264,7 +264,7 @@ def test_audit_refuses_inventory_overlapping_the_test_partition(
 ) -> None:
     candidates = _candidates(tmp_path)
     leaked = hashlib.sha256(candidates[0].path.read_bytes()).hexdigest()
-    protected = ProtectedTestImages("b" * 64, frozenset({leaked}))
+    protected = ProtectedTestImages(("b" * 64,), frozenset({leaked}))
 
     with pytest.raises(ValueError, match="test partition"):
         run_masks_audit(
@@ -283,7 +283,7 @@ def test_audit_refuses_development_set_overlapping_the_test_partition(
 ) -> None:
     thresholds = _thresholds()
     protected = ProtectedTestImages(
-        "b" * 64, frozenset({thresholds.development_sources[7][1]})
+        ("b" * 64,), frozenset({thresholds.development_sources[7][1]})
     )
 
     with pytest.raises(ValueError, match="calibration development set.*test partition"):
@@ -380,3 +380,184 @@ def test_fixture_command_reports_digest_and_backend(
     assert report["mask_backend"]["model"] == ColorThresholdBackend.model
     assert len(report["digest"]) == 64
     assert report["rating_counts"]["owner_scene"]
+
+
+def _two_targets(tmp_path: Path) -> tuple[Path, Path]:
+    from .frozen_targets import singles, write_target
+
+    targets = []
+    for pool in ("A", "B"):
+        members = [
+            *singles(pool, "train", 2),
+            *singles(pool, "val", 1),
+            *singles(pool, "test", 2),
+        ]
+        targets.append(write_target(tmp_path / pool, pool, members))
+    return targets[0], targets[1]
+
+
+def test_protected_test_images_union_several_targets_and_name_each_digest(
+    tmp_path: Path,
+) -> None:
+    from jute_disease.data import load_protected_test_images
+
+    from .frozen_targets import content_id
+
+    first, second = _two_targets(tmp_path)
+
+    one = load_protected_test_images(first)
+    both = load_protected_test_images(first, second)
+
+    assert len(one.manifest_digests) == 1 and len(one.image_ids) == 2
+    assert len(set(both.manifest_digests)) == 2
+    assert both.manifest_digests[0] == one.manifest_digests[0]
+    assert both.image_ids == {
+        content_id(f"{pool}-test-{index}") for pool in "AB" for index in range(2)
+    }
+    with pytest.raises(ValueError, match="at least one"):
+        load_protected_test_images()
+
+
+def test_audit_refuses_an_overlap_with_any_named_target_and_records_every_digest(
+    tmp_path: Path,
+) -> None:
+    candidates = _candidates(tmp_path)
+    leaked = hashlib.sha256(candidates[0].path.read_bytes()).hexdigest()
+    clean = ProtectedTestImages(("b" * 64, "c" * 64), PROTECTED.image_ids)
+    second_pool_leak = ProtectedTestImages(
+        ("b" * 64, "c" * 64), PROTECTED.image_ids | {leaked}
+    )
+
+    with pytest.raises(ValueError, match="test partition"):
+        run_masks_audit(
+            candidates,
+            _thresholds(),
+            ColorThresholdBackend(),
+            tmp_path / "refused",
+            second_pool_leak,
+            sample_count=12,
+            owner_count=6,
+        )
+    manifest = run_masks_audit(
+        candidates,
+        _thresholds(),
+        ColorThresholdBackend(),
+        tmp_path / "audit",
+        clean,
+        sample_count=12,
+        owner_count=6,
+    )
+
+    assert manifest["partition_check"]["target_manifest_digests"] == [
+        "b" * 64,
+        "c" * 64,
+    ]
+    assert manifest["scene_rubric"]["version"] == "scene-tag-v2"
+
+
+def test_mask_commands_accept_several_target_dirs(tmp_path: Path) -> None:
+    from .frozen_targets import content_id
+
+    first, second = _two_targets(tmp_path)
+    work = tmp_path / "work"
+    work.mkdir()
+    records = []
+    for index in range(100):
+        scene = SCENE_TAGS[index % 3]
+        _image(work / f"dev-{index}.png", scene, index)
+        records.append(
+            {"image_id": f"dev-{index}", "path": f"dev-{index}.png", "scene_tag": scene}
+        )
+    development = work / "development.json"
+    development.write_text(json.dumps(records), encoding="utf-8")
+    targets = ["--target-dir", str(first), "--target-dir", str(second)]
+
+    main(
+        [
+            "data",
+            "masks-calibrate",
+            str(development),
+            "--output",
+            str(work / "thresholds.json"),
+            *targets,
+        ]
+    )
+    inventory = work / "inventory.json"
+    scenes = ["clean-background"] * 10 + ["field"] * 6 + ["unknown"] * 4
+    rows = []
+    for index, scene in enumerate(scenes, start=1000):
+        _image(work / f"inv-{index}.png", scene, index)
+        rows.append({"image_id": f"inv-{index}", "path": f"inv-{index}.png"})
+    inventory.write_text(json.dumps(rows), encoding="utf-8")
+    audit = [
+        "data",
+        "masks-audit",
+        str(inventory),
+        str(work / "thresholds.json"),
+        "--sample-count",
+        "12",
+        "--owner-count",
+        "6",
+    ]
+    main([*audit, "--output", str(work / "audit"), *targets])
+    main([*audit, "--output", str(work / "single"), "--target-dir", str(first)])
+
+    check = json.loads((work / "audit" / "audit.json").read_text(encoding="utf-8"))
+    assert len(check["partition_check"]["target_manifest_digests"]) == 2
+    assert check["partition_check"]["test_image_count"] == 4
+
+    # An inventory image whose content is a test image of the second target only.
+    leak = work / "leak.png"
+    _image(leak, "field", 4242)
+    leaked_id = hashlib.sha256(leak.read_bytes()).hexdigest()
+    manifest_path = second / "protected-test" / "manifest.json"
+    assert content_id("B-test-0") in manifest_path.read_text(encoding="utf-8")
+    from .frozen_targets import singles, write_target
+
+    leaking = write_target(
+        tmp_path / "leaking",
+        "B",
+        [*singles("B", "train", 2), *singles("B", "val", 1), *singles("B", "test", 2)],
+    )
+    path = leaking / "protected-test"
+    data = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
+    # The leaking target is rewritten by hand below.
+    data["entries"][0]["image_id"] = leaked_id
+    data["entries"].sort(key=lambda entry: entry["image_id"])
+    from jute_disease.data.manifest import Manifest, write_manifest
+
+    write_manifest(Manifest.from_json(data), path)
+    rows[0] = {"image_id": "inv-leak", "path": "leak.png"}
+    inventory.write_text(json.dumps(rows), encoding="utf-8")
+    with pytest.raises(SystemExit, match="test partition"):
+        main(
+            [
+                *audit,
+                "--output",
+                str(work / "refused"),
+                "--target-dir",
+                str(first),
+                "--target-dir",
+                str(leaking),
+            ]
+        )
+    assert not (work / "refused").exists()
+
+    # A development image whose content is a test image of the second target only.
+    records[0] = {"image_id": "dev-leak", "path": "leak.png", "scene_tag": "field"}
+    development.write_text(json.dumps(records), encoding="utf-8")
+    with pytest.raises(SystemExit, match="test partition"):
+        main(
+            [
+                "data",
+                "masks-calibrate",
+                str(development),
+                "--output",
+                str(work / "refused.json"),
+                "--target-dir",
+                str(first),
+                "--target-dir",
+                str(leaking),
+            ]
+        )
+    assert not (work / "refused.json").exists()
