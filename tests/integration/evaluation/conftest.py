@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from jute_disease.cli import main
-from jute_disease.config import CURATION_RULES_PATH
+from jute_disease.config import BENCHMARK_CONFIG, CURATION_RULES_PATH
 from jute_disease.data import (
     evaluate_masks_audit,
     freeze_target,
@@ -18,6 +18,33 @@ from jute_disease.data import (
 )
 
 from ..test_policy_manifests import frozen_pool
+
+# The one fit a benchmark with no estimator or CNN system still scores.
+MINIMAL_PAD_CUE_FIT = "probe/pad-cue/pool-A/view-1/image-random/seed-42"
+
+
+def minimal_benchmark(tmp_path: Path) -> Path:
+    """A benchmark of one pool, view, policy and split with a single scored fit.
+
+    The freeze record requires every scored fit to have a run before a test read, so
+    a test that reads through ``evaluate test`` freezes this matrix, whose only
+    scored fit is the pad-cue baseline, instead of the full benchmark.
+    """
+    raw = json.loads(BENCHMARK_CONFIG.read_text(encoding="utf-8"))
+    raw["recipe"].update(seeds=[42], source_seeds=[42])
+    raw["cnn_systems"] = {}
+    raw["classical"] = {"estimators": [], "features": ["crafted"], "seed": 42}
+    raw["matrix"] = {
+        "pools": ["A"],
+        "policies": ["image-random"],
+        "views": [1],
+        "splits": [0],
+        "primary_split": 0,
+    }
+    raw["assignments"] = [{"split": 0, "seed": 0, "checkpoint": 0}]
+    path = tmp_path / "minimal-benchmark.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    return path
 
 
 @pytest.fixture(scope="module")

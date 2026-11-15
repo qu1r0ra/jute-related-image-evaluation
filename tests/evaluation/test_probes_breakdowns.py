@@ -10,7 +10,9 @@ from jute_disease.evaluation.breakdowns import (
 )
 from jute_disease.evaluation.probes import (
     EXCHANGEABLE_MIN_SHARE,
+    NO_BACKGROUND,
     NOT_INFORMATIVE,
+    background_probe,
     border_probe,
     family_permutation,
     frame_leaf_share,
@@ -222,6 +224,22 @@ def test_probe_decision_uses_the_permutation_p_value() -> None:
     assert noise.macro_f1.lower <= noise.macro_f1.estimate <= noise.macro_f1.upper
 
 
+def test_a_background_detection_names_the_leaf_shape_it_cannot_exclude() -> None:
+    """The blanked leaf still leaves its silhouette and aspect ratio in the input."""
+    options = {"resamples": 50, "permutations": 199}
+    signal = background_probe(
+        _mixed_system(np.random.default_rng(3), 4, predicted="truth"), **options
+    )
+    assert signal.detected
+    assert signal.statement == (
+        "background-only input (leaf blanked) carries label information, "
+        "which can include leaf shape or aspect ratio"
+    )
+    noise = background_probe(_mixed_system(np.random.default_rng(4), 4), **options)
+    if not noise.detected:
+        assert noise.statement in (NO_BACKGROUND, NOT_INFORMATIVE)
+
+
 def test_probe_reports_the_share_of_images_in_exchangeable_strata() -> None:
     # Families of size 1 and 3 hold two distinct label multisets each, so they
     # can swap labels; the two size-2 families are identical and cannot.
@@ -267,6 +285,60 @@ def test_probe_with_no_exchangeable_families_is_not_informative() -> None:
     assert not result.detected
     assert result.statement == NOT_INFORMATIVE
     assert "not informative at this exchangeable share" in result.statement
+
+
+def _fixed_families_system(extra: tuple[tuple[str, ...], ...] = ()) -> PredictionSet:
+    # The only mixed-label family has a unique size (4), so no other family can
+    # trade multisets with it. Predictions equal the labels. Any further families
+    # in ``extra`` are appended, one per tuple of labels.
+    families = (("a",), ("a", "a", "a"), ("a", "b", "b", "a"), *extra)
+    ids, truth, groups = [], [], []
+    for f, labels in enumerate(families):
+        for j, label in enumerate(labels):
+            ids.append(f"f{f}i{j}")
+            truth.append(label)
+            groups.append(f"fam{f}")
+    return PredictionSet(
+        CLASSES,
+        tuple(ids),
+        tuple(truth),
+        tuple(groups),
+        tuple("src" for _ in ids),
+        {0: tuple(truth)},
+    )
+
+
+def test_a_unique_size_mixed_family_keeps_its_labels_in_the_null() -> None:
+    # Nothing is exchangeable, so the null is the observed score in every draw
+    # and the one-sided p-value is 1; shuffling inside the mixed family would
+    # lower the null and report a detection that nothing licenses.
+    system = _fixed_families_system()
+    test = permutation_test(system, 199, seed=1)
+    assert test.exchangeable.images == 0
+    assert test.observed == 1.0
+    assert np.all(test.null == test.observed)
+    assert test.p_value == 1.0
+
+
+def test_non_exchangeable_families_stay_fixed_while_exchangeable_ones_move() -> None:
+    # Size-2 families hold two distinct multisets, so they trade labels; the size-4
+    # mixed family has no partner and must read its observed labels every time.
+    system = _fixed_families_system(extra=(("a", "a"), ("b", "b"), ("a", "a")))
+    truth = system.truth_index()
+    groups = np.array(system.groups)
+    fixed = np.isin(groups, ["fam0", "fam1", "fam2"])
+    moving = ~fixed
+    rng = np.random.default_rng(2)
+    seen = set()
+    for _ in range(40):
+        labels = family_permutation(system, rng)
+        assert np.array_equal(labels[fixed], truth[fixed])
+        assert sorted(labels[moving]) == sorted(truth[moving])
+        seen.add(tuple(labels[moving]))
+    assert len(seen) > 1
+    test = permutation_test(system, 99, seed=1)
+    assert test.exchangeable.images == 6
+    assert test.exchangeable.families == 3
 
 
 def test_not_informative_wording_is_kept_for_a_low_share_without_detection() -> None:

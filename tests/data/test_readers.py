@@ -13,8 +13,8 @@ from jute_disease.data import (
     SyntheticPlan,
     build_image_cache,
     cache_root,
+    content_verifier,
     open_partition,
-    readers,
 )
 from jute_disease.data.manifest import write_manifest
 
@@ -60,12 +60,12 @@ def test_the_verifier_reuses_a_signature_match_off_windows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     hashed: list[Path] = []
-    real = readers.file_sha256
-    monkeypatch.setattr(readers.sys, "platform", "linux")
+    real = content_verifier.file_sha256
+    monkeypatch.setattr(content_verifier.sys, "platform", "linux")
     monkeypatch.setattr(
-        readers, "file_sha256", lambda path: hashed.append(path) or real(path)
+        content_verifier, "file_sha256", lambda path: hashed.append(path) or real(path)
     )
-    verifier = readers.ManifestContentVerifier()
+    verifier = content_verifier.ManifestContentVerifier()
 
     verifier.verify(frozen, synthetic.root, ("train",))
     verifier.verify(frozen, synthetic.root, ("train",))
@@ -79,12 +79,12 @@ def test_the_verifier_never_trusts_a_stat_key_on_windows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     hashed: list[Path] = []
-    real = readers.file_sha256
-    monkeypatch.setattr(readers.sys, "platform", "win32")
+    real = content_verifier.file_sha256
+    monkeypatch.setattr(content_verifier.sys, "platform", "win32")
     monkeypatch.setattr(
-        readers, "file_sha256", lambda path: hashed.append(path) or real(path)
+        content_verifier, "file_sha256", lambda path: hashed.append(path) or real(path)
     )
-    verifier = readers.ManifestContentVerifier()
+    verifier = content_verifier.ManifestContentVerifier()
 
     verifier.verify(frozen, synthetic.root, ("train",))
     verifier.verify(frozen, synthetic.root, ("train",))
@@ -97,8 +97,8 @@ def test_the_verifier_catches_same_size_bytes_with_a_restored_mtime(
     synthetic: SyntheticPlan,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(readers.sys, "platform", "win32")
-    verifier = readers.ManifestContentVerifier()
+    monkeypatch.setattr(content_verifier.sys, "platform", "win32")
+    verifier = content_verifier.ManifestContentVerifier()
     verifier.verify(frozen, synthetic.root, ("train",))
     entry = frozen.partition("train")[0]
     path = synthetic.root / entry.path

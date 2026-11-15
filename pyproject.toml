@@ -51,6 +51,7 @@ packages = ["src/jute_disease"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-m 'not slow'"
+tmp_path_retention_policy = "failed"
 markers = [
     "slow: marks tests as slow (deselected by default; run with -m slow)",
     "serial: timing- or process-sensitive tests (concurrent builders, lock and signal drivers); run without xdist, after the parallel pass",

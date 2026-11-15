@@ -24,6 +24,8 @@ Preprocessing identity revision 2 covers the shared 256-pixel letterbox, bilinea
 
 `jute-disease queue plan` and `queue status` list every declared fit and need no policy directory. `queue run` over the full matrix requires `--policy-dir`, the directory of receipted policy manifests (with `assignments.json`), and reads each pool's images from `--pool-a-root`, `--pool-b-root` and `--pool-c-root` (falling back to `--image-root`). The same options reach `just queue-run` and `just queue-unattended` (an optional leading timeout in seconds, then the options). Tuning fits (`classical/tune/...`, `cnn/tune/...`, `source/tune/...`) run before the finals that reuse their selection and write a `tuning.json` that records `test_accessed: false`.
 
+`queue run --probes` replaces the plan with the probe stage only (the tuning fits the probes reuse, then the pad-cue, border and background-only fits), so it does not repeat the main plan. Run the plain `queue run` and then `queue run --probes` before a confirmatory `evaluate test`: the test read refuses when any scored fit of the freeze record has no lineage-bound run, and it names the missing fit IDs.
+
 ### Manuscript export fixture
 
 Run `just manuscript-fixture artifacts/manuscript-fixture` to exercise a
@@ -87,15 +89,25 @@ under the same freeze record:
   retraining), on the validation-median primary-cell checkpoint. The pass rule is
   fixed in code and its thresholds (60 sampled images, median absolute Spearman
   correlation below 0.5, at least half defined) are prespecified heuristics, not a
-  significance test; they apply to the sampled images only. The label variant is
-  descriptive, reported beside a true-label control refit, and does not gate the
+  significance test; they apply to the sampled images only. The pass is a
+  checkpoint-level heuristic precondition for the leaf score, which is computed on
+  a separate, larger set of images: it does not certify those images
+  individually. The record carries, per stage, the count of constant randomized
+  maps and of non-finite randomized maps (both leave a correlation undefined or
+  scored as changed, as stated above) and the final-stage per-image
+  correlations, so a reader can see the thresholds were applied to defined values
+  only. The label variant is descriptive, reported beside a true-label control
+  refit and the share of labels its permutation changed, and does not gate the
   leaf score.
 - `jute-disease evaluate scene-tags` computes a scene tag and frame leaf share
   for every test image with the thresholds and backend of the frozen mask audit.
 
 Pass their files as `--sanity-checks` and `--scene-tags`. Both are refused unless
 the ledger holds the completion row of the command that wrote those exact bytes,
-so a hand-written file is rejected. The policy predictions come from the run
+so a hand-written file is rejected. The image-reading entry point repeats this
+check itself rather than trusting the caller, and appends its own
+`image_diagnostics` intent row before it opens any test image. The policy
+predictions come from the run
 record, which must hold the runs of all three policies for the frozen cell; pass
 every fit with `--fit-id`. The freeze record, run record, lockfile and project
 configuration are hashed into the export. The command writes `diagnostics.json`,

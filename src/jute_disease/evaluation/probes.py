@@ -7,12 +7,14 @@ beat its permutation null reports "no detectable ... at this setting".
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Any
 
 import numpy as np
 
 from jute_disease.data.probe_pixels import (
     FRAME_WIDTH_PX,
+    background_only_image,
     frame_mask,
     frame_only_image,
 )
@@ -20,7 +22,13 @@ from jute_disease.evaluation.resampling import Interval, resample_metrics
 from jute_disease.evaluation.scores import PredictionSet, metric_values
 from jute_disease.training.benchmark import PROBE_SYSTEM, Benchmark, is_probe_base
 
-__all__ = ["FRAME_WIDTH_PX", "PROBE_SYSTEM", "frame_mask", "frame_only_image"]
+__all__ = [
+    "FRAME_WIDTH_PX",
+    "PROBE_SYSTEM",
+    "background_only_image",
+    "frame_mask",
+    "frame_only_image",
+]
 
 LEAF_CUTOFF = 0.05
 PERMUTATIONS = 9_999
@@ -33,6 +41,18 @@ NOT_INFORMATIVE = "not informative at this exchangeable share"
 MIN_RETAINED_PER_CLASS = 50
 NO_BORDER = "no detectable border information at this frame width"
 NO_BACKGROUND = "no detectable background information at this setting"
+BACKGROUND_WITHHELD = (
+    "not reported because the ADR 0002 mask audit did not pass; the background "
+    "inputs are built from masks the audit did not clear"
+)
+LEAF_ONLY_WITHHELD = (
+    "not reported because the ADR 0002 mask audit did not pass; the leaf-only "
+    "inputs are built from masks the audit did not clear"
+)
+DETECTED_BACKGROUND = (
+    "background-only input (leaf blanked) carries label information, which can "
+    "include leaf shape or aspect ratio"
+)
 HEADLINE_LIMIT = (
     "The mask audit rates whole-leaf mask quality; leaf share in a 32 px strip is "
     "more sensitive to mask edge errors."
@@ -84,16 +104,6 @@ def planned_probe_fit_ids(benchmark: Benchmark) -> list[str]:
     )
 
 
-def background_only_image(
-    pixels: np.ndarray, leaf_mask: np.ndarray, valid_mask: np.ndarray
-) -> np.ndarray:
-    """Mask the leaf and the letterbox padding, keeping only background pixels."""
-    out = np.zeros_like(pixels)
-    keep = np.asarray(valid_mask, dtype=bool) & ~np.asarray(leaf_mask, dtype=bool)
-    out[keep] = pixels[keep]
-    return out
-
-
 def frame_leaf_share(
     leaf_mask: np.ndarray, valid_mask: np.ndarray, width: int
 ) -> float:
@@ -118,8 +128,26 @@ def subset(system: PredictionSet, image_ids: Sequence[str]) -> PredictionSet:
     )
 
 
-def _family_strata(system: PredictionSet) -> list[tuple[np.ndarray, np.ndarray]]:
-    """Group families by size: member indices and sorted label multisets."""
+@dataclass(frozen=True)
+class Stratum:
+    """Same-size families: member indices, observed labels, sorted multisets.
+
+    The stratum is exchangeable when its families hold at least two distinct
+    label multisets. ``exchangeable`` is the single criterion: the share report
+    and the null draw both read it, so they cannot disagree about what moves.
+    """
+
+    index: np.ndarray
+    observed: np.ndarray
+    multisets: np.ndarray
+
+    @cached_property
+    def exchangeable(self) -> bool:
+        return len(np.unique(self.multisets, axis=0)) >= 2
+
+
+def _family_strata(system: PredictionSet) -> list[Stratum]:
+    """Group families by size, keeping each stratum's observed labels."""
     truth = system.truth_index()
     members: dict[str, list[int]] = {}
     for image, family in enumerate(system.groups):
@@ -130,7 +158,7 @@ def _family_strata(system: PredictionSet) -> list[tuple[np.ndarray, np.ndarray]]
     strata = []
     for size in sorted(by_size):
         index = np.array(by_size[size], dtype=np.int64).reshape(-1, size)
-        strata.append((index, np.sort(truth[index], axis=1)))
+        strata.append(Stratum(index, truth[index], np.sort(truth[index], axis=1)))
     return strata
 
 
@@ -138,10 +166,9 @@ def _family_strata(system: PredictionSet) -> list[tuple[np.ndarray, np.ndarray]]
 class Exchangeable:
     """Images and families in strata whose label multisets can differ.
 
-    A stratum of same-size families is exchangeable when it holds at least two
-    distinct label multisets. Families in any other stratum keep their labels in
-    every draw, so they add the same amount to the observed score and to the
-    null: the test stays valid but loses power in proportion to what they hold.
+    Families in any other stratum keep their observed labels in every draw, so
+    they add the same amount to the observed score and to the null: the test
+    stays valid but loses power in proportion to what they hold.
     """
 
     images: int
@@ -150,35 +177,40 @@ class Exchangeable:
     total_families: int
 
 
-def exchangeable_share(strata: list[tuple[np.ndarray, np.ndarray]]) -> Exchangeable:
+def exchangeable_share(strata: list[Stratum]) -> Exchangeable:
     images = families = total_images = total_families = 0
-    for index, labels in strata:
-        total_images += index.size
-        total_families += index.shape[0]
-        if len(np.unique(labels, axis=0)) >= 2:
-            images += index.size
-            families += index.shape[0]
+    for stratum in strata:
+        total_images += stratum.index.size
+        total_families += stratum.index.shape[0]
+        if stratum.exchangeable:
+            images += stratum.index.size
+            families += stratum.index.shape[0]
     return Exchangeable(images, families, total_images, total_families)
 
 
 def family_permutation(
     system: PredictionSet,
     rng: np.random.Generator,
-    strata: list[tuple[np.ndarray, np.ndarray]] | None = None,
+    strata: list[Stratum] | None = None,
 ) -> np.ndarray:
     """One null draw of true labels, permuted at family level.
 
-    Each family's label multiset travels as a unit: it is handed to another
-    family of the same size, so families with mixed labels keep their mix and
-    the class counts of the test set never change. Which member of the receiving
-    family carries which label is drawn at random, since the pixels of a family
-    are not ordered. Returns one class index per image.
+    In each exchangeable stratum a family's label multiset travels as a unit: it
+    is handed to another family of the same size, so families with mixed labels
+    keep their mix and the class counts of the test set never change. Which
+    member of the receiving family carries which label is drawn at random, since
+    the pixels of a family are not ordered. Families in a stratum that is not
+    exchangeable keep their observed labels, so a unique-size family is never
+    shuffled. Returns one class index per image.
     """
     permuted = np.zeros(len(system.image_ids), dtype=np.int64)
-    for index, labels in strata if strata is not None else _family_strata(system):
-        moved = labels[rng.permutation(len(labels))]
+    for stratum in strata if strata is not None else _family_strata(system):
+        if not stratum.exchangeable:
+            permuted[stratum.index] = stratum.observed
+            continue
+        moved = stratum.multisets[rng.permutation(len(stratum.multisets))]
         order = np.argsort(rng.random(moved.shape), axis=1)
-        permuted[index] = np.take_along_axis(moved, order, axis=1)
+        permuted[stratum.index] = np.take_along_axis(moved, order, axis=1)
     return permuted
 
 
@@ -306,7 +338,7 @@ def probe_result(
 def background_probe(system: PredictionSet, **kwargs: Any) -> ProbeResult:
     return probe_result(
         system,
-        "background-only pixels carry label information",
+        DETECTED_BACKGROUND,
         NO_BACKGROUND,
         **kwargs,
     )

@@ -25,6 +25,7 @@ from jute_disease.evaluation import (
     leaf_score_gate,
     letterbox_leaf_mask,
     parameter_randomization_correlations,
+    randomization_stage_summary,
     require_analysis,
     sanity_check_results,
     select_gradcam_sample,
@@ -98,6 +99,7 @@ def test_test_image_entry_point_refuses_before_manifest_or_image_access(
             tmp_path / "absent-runs",
             tmp_path / "absent-images",
             tmp_path / "output",
+            root=tmp_path / "absent-root",
             frozen_backbone_checkpoint=tmp_path / "absent-imagenet.ckpt",
             assignment_table_path=tmp_path / "absent-assignments.json",
             scene_tags=_absent_output("scene_tags", tmp_path),
@@ -493,3 +495,110 @@ def test_export_records_command_configuration_and_source_hash(tmp_path: Path) ->
         == hashlib.sha256(source.read_bytes()).hexdigest()
     )
     assert (output.parent / "synthetic-tsne_perplexity_30.csv").is_file()
+
+
+def test_entry_point_refuses_a_hand_built_output_without_touching_the_ledger(
+    tmp_path: Path,
+) -> None:
+    authorization = Authorization(
+        "record",
+        False,
+        (_run(0),),
+        {"analysis_ids": ["embeddings-test-pass", "gradcam-test-pass"]},
+    )
+    root = tmp_path / "repo"
+    with pytest.raises(FreezeRecordError, match="unreadable"):
+        evaluate_image_diagnostics(
+            tmp_path / "absent-target",
+            authorization,
+            tmp_path / "absent-runs",
+            tmp_path / "absent-images",
+            tmp_path / "output",
+            root=root,
+            frozen_backbone_checkpoint=tmp_path / "absent-imagenet.ckpt",
+            assignment_table_path=tmp_path / "absent-assignments.json",
+            scene_tags=_absent_output("scene_tags", tmp_path),
+            sanity_checks=_absent_output("sanity_checks", tmp_path),
+        )
+    assert not root.exists()
+    assert not (tmp_path / "absent-images").exists()
+
+
+def test_stage_summary_counts_constant_and_non_finite_randomized_maps() -> None:
+    reference = np.random.default_rng(0).random((3, 4, 4))
+    constant = reference.copy()
+    constant[0] = 0.5
+    broken = reference.copy()
+    broken[1, 2, 2] = np.nan
+    broken[2] = np.inf
+
+    summary = randomization_stage_summary(
+        reference, {"constant": constant, "broken": broken, "same": reference.copy()}
+    )
+
+    assert summary["constant"]["constant_maps"] == 1
+    assert summary["constant"]["non_finite_maps"] == 0
+    assert summary["constant"]["correlations"][0] == 0.0
+    assert summary["broken"]["non_finite_maps"] == 2
+    assert summary["broken"]["constant_maps"] == 0
+    assert summary["broken"]["correlations"][1:] == [None, None]
+    assert summary["broken"]["correlations"][0] == pytest.approx(1.0)
+    assert summary["same"]["constant_maps"] == 0
+    assert summary["same"]["non_finite_maps"] == 0
+
+
+def test_a_non_finite_randomized_map_is_undefined_not_an_abort() -> None:
+    reference = np.random.default_rng(0).random((2, 4, 4))
+    randomized = reference.copy()
+    randomized[1, 0, 0] = np.nan
+    correlations = parameter_randomization_correlations(
+        reference, {"stage": randomized}
+    )
+    assert correlations["stage"] == [pytest.approx(1.0), None]
+    with pytest.raises(ValueError, match="finite"):
+        parameter_randomization_correlations(randomized, {"stage": reference})
+
+
+def test_sanity_record_carries_constant_map_counts_and_final_correlations() -> None:
+    result = _run_sanity(_sanity_inputs())
+    evidence = result["parameter_randomization"]["evidence"]
+    stages = list(evidence["stage_median_correlation"])
+    assert list(evidence["constant_randomized_maps_by_stage"]) == stages
+    assert list(evidence["non_finite_randomized_maps_by_stage"]) == stages
+    assert all(
+        isinstance(count, int) and 0 <= count <= 6
+        for count in evidence["constant_randomized_maps_by_stage"].values()
+    )
+    final = evidence["final_stage_correlations"]
+    assert len(final) == 6
+    defined = sorted(value for value in final if value is not None)
+    assert defined
+    assert evidence["median_correlation"] == pytest.approx(float(np.median(defined)))
+    assert evidence["defined_share"] == pytest.approx(len(defined) / len(final))
+    assert evidence["stage_median_correlation"][evidence["final_stage"]] == (
+        pytest.approx(evidence["median_correlation"])
+    )
+
+
+def test_label_randomization_records_the_changed_share_of_permuted_labels() -> None:
+    evidence = _run_sanity(_sanity_inputs())["label_randomization"]["evidence"]
+    changed = evidence["permuted_label_changed_share"]
+    assert 0.0 < changed <= 1.0
+    assert (changed * 6) == pytest.approx(round(changed * 6))
+
+
+def test_label_randomization_reason_follows_the_measured_comparison() -> None:
+    evidence = _run_sanity(_sanity_inputs())["label_randomization"]["evidence"]
+    reason = evidence["reason"]
+    assert "synthetic" not in reason
+    assert f"{evidence['median_correlation']:.3f}" in reason
+    assert f"{evidence['control_median_correlation']:.3f}" in reason
+    assert "not gated" in reason
+    below = evidence["median_correlation"] < evidence["control_median_correlation"]
+    assert ("is below the true-label control" in reason) is below
+
+
+def test_sanity_pass_rule_states_it_is_a_checkpoint_level_precondition() -> None:
+    rule = _run_sanity(_sanity_inputs())["pass_rule"]
+    assert "checkpoint-level" in rule["role"]
+    assert "does not certify" in rule["role"]

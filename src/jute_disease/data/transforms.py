@@ -13,30 +13,30 @@ is a dependency of every cache.
 import hashlib
 import json
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
-import torch
 from PIL import Image as PILImage
 from PIL.Image import Image
-from torchvision.transforms import (
-    ColorJitter,
-    Compose,
-    InterpolationMode,
-    RandomHorizontalFlip,
-    RandomResizedCrop,
-    RandomVerticalFlip,
-)
-from torchvision.transforms import functional as F
 
 from jute_disease.config import DEFAULT_SEED, IMAGE_SIZE
 from jute_disease.data.probe_pixels import (
+    BACKGROUND_VARIANT,
     BORDER_VARIANT,
     FRAME_WIDTH_PX,
     PROBE_VARIANTS,
+    background_only_image,
     frame_mask,
     frame_only_image,
+    letterbox_leaf_mask,
 )
+
+if TYPE_CHECKING:
+    import torch
+    from torchvision.transforms import Compose
+
+# torch and torchvision load inside the calls that need them, so the preprocessing
+# identity and letterbox geometry import without the training stack.
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -121,12 +121,25 @@ class ImagePipeline:
         if variant:
             # The variant is part of what the pixels are, so every cache keys on it.
             self.description += f";variant={variant}"
+        if variant == BACKGROUND_VARIANT:
+            # The gated colour-threshold mask decides which pixels are leaf, so
+            # its identity is part of what the pixels are.
+            from jute_disease.data.masks import ColorThresholdBackend
+
+            self._backend = ColorThresholdBackend()
+            self.description += f";mask={self._backend.model}@{self._backend.version}"
         self._states: dict[int, torch.Tensor] = {}
 
     def __call__(
         self, img: Image | np.ndarray
     ) -> torch.Tensor | np.ndarray | ImageWithMask:
+        from torchvision.transforms import InterpolationMode
+        from torchvision.transforms import functional as F
+
         image = PILImage.fromarray(np.asarray(img)).convert("RGB")
+        leaf = None
+        if self.variant == BACKGROUND_VARIANT:
+            leaf = self._backend.predict(image).mask
         width, height = image.size
         width, height = letterbox_dimensions(width, height, self.size)
         image = F.resize(
@@ -153,7 +166,16 @@ class ImagePipeline:
                 frame_only_image(np.asarray(image), valid_mask, FRAME_WIDTH_PX)
             )
             valid_mask = frame
+        elif leaf is not None:
+            # Only the background survives; the leaf and the padding are blanked.
+            leaf = letterbox_leaf_mask(leaf, valid_mask)
+            image = PILImage.fromarray(
+                background_only_image(np.asarray(image), leaf, valid_mask)
+            )
+            valid_mask = valid_mask & ~leaf
         if self.is_train:
+            import torch
+
             worker = torch.utils.data.get_worker_info()
             worker_seed = worker.seed if worker else self.seed
             with torch.random.fork_rng(devices=[]):
@@ -170,6 +192,14 @@ class ImagePipeline:
 
     @property
     def augmentation(self) -> Compose:
+        from torchvision.transforms import (
+            ColorJitter,
+            Compose,
+            RandomHorizontalFlip,
+            RandomResizedCrop,
+            RandomVerticalFlip,
+        )
+
         return Compose(
             [
                 RandomResizedCrop(self.size, scale=(0.5, 1.0)),
@@ -191,7 +221,8 @@ def create_pipeline(
     """Build the fixed ADR 0002 preprocessing and optional training augmentation.
 
     ``variant`` names a probe's input ("border" keeps only the frame of the
-    resized image); the empty default is the ordinary pipeline.
+    resized image, "background_only" only the pixels the audited colour-threshold
+    mask leaves); the empty default is the ordinary pipeline.
     """
     if size < 1:
         raise ValueError("Image size must be positive")

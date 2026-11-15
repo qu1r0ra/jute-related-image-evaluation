@@ -9,7 +9,6 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any
 
-import torch
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
@@ -25,6 +24,8 @@ class StackError(RuntimeError):
 
 def configure_runtime() -> dict[str, bool]:
     """Apply the owner-approved backend settings without forcing determinism."""
+    import torch
+
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     torch.backends.cudnn.benchmark = False
@@ -121,6 +122,8 @@ def _compare_with_lock(lock: Path) -> dict[str, Any]:
 
 def _observed_compute_dtype(uses_cuda: bool) -> str:
     """Return the dtype a matrix product actually runs in on the selected device."""
+    import torch
+
     if not uses_cuda:
         left = torch.ones((2, 2))
         return str((left @ left).dtype)
@@ -147,6 +150,8 @@ def verify_stack(
             installed package differs from the lock, or the requested precision
             is not the one observed.
     """
+    import torch
+
     backend = configure_runtime()
     lock_report = _compare_with_lock(LOCK_PATH if lock is None else Path(lock))
     libraries: dict[str, str] = {}

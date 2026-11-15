@@ -78,12 +78,12 @@ aggregate exps:
 # Quality and tests
 
 test:
-    uv run --locked pytest
+    uv run --locked python -m pytest
 
 # Full suite: slow tests included, parallel pass then the serial-marked tests
 test-all:
-    uv run --locked pytest -m "not serial" -n auto
-    uv run --locked pytest -m serial
+    uv run --locked python -m pytest -m "not serial" -n auto
+    uv run --locked python -m pytest -m serial
 
 lint:
     uv run --locked ruff check .

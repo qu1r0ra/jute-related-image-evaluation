@@ -1,7 +1,6 @@
 from importlib import import_module
 from typing import Any
 
-from jute_disease.evaluation.metrics import EVAL_METRICS, TRAIN_METRICS, format_metrics
 from jute_disease.evaluation.resampling import (
     CONFIDENCE_LEVEL,
     EVAL_SEED,
@@ -44,6 +43,9 @@ from jute_disease.evaluation.statistics import (
 )
 
 _LAZY_EXPORTS = {
+    "EVAL_METRICS": (".metrics", "EVAL_METRICS"),
+    "TRAIN_METRICS": (".metrics", "TRAIN_METRICS"),
+    "format_metrics": (".metrics", "format_metrics"),
     "PRIMARY_CONTRAST": (".analysis_plan", "PRIMARY_CONTRAST"),
     "SECONDARY_TESTS": (".analysis_plan", "SECONDARY_TESTS"),
     "AnalysisReport": (".analysis_plan", "AnalysisReport"),
@@ -105,6 +107,7 @@ _LAZY_EXPORTS = {
         "parameter_randomization_correlations",
     ),
     "penultimate_features": (".diagnostics", "penultimate_features"),
+    "randomization_stage_summary": (".diagnostics", "randomization_stage_summary"),
     "sanity_check_results": (".diagnostics", "sanity_check_results"),
     "randomization_stages": (".diagnostics", "randomization_stages"),
     "BoundOutput": (".diagnostic_inputs", "BoundOutput"),
@@ -239,6 +242,7 @@ __all__ = [
     "select_median_validation_run",
     "scene_summaries",
     "sanity_check_results",
+    "randomization_stage_summary",
     "randomization_stages",
     "BoundOutput",
     "compute_sanity_checks",

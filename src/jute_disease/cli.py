@@ -73,24 +73,12 @@ from jute_disease.data.grouping import GROUPING_THRESHOLDS
 from jute_disease.data.policies import HEALTHY_CAP
 from jute_disease.evaluation import (
     RESIDUAL_AUDIT_OPERATION,
-    SANITY_CHECKS_KIND,
-    SCENE_TAGS_KIND,
     FreezeRecordError,
     TestReadRefusedError,
     authorize_test_read,
-    compute_sanity_checks,
-    compute_scene_tags,
     default_reads_log_path,
-    evaluate_image_diagnostics,
-    evaluate_test,
-    leaf_sample_ids,
     log_test_read,
     planned_probe_fit_ids,
-    predict_leaf_only,
-    predict_test,
-    primary_policy_runs,
-    read_bound_output,
-    require_scene_tags_bound,
     verify_freeze_record,
     write_freeze_record,
     write_run_record,
@@ -801,6 +789,8 @@ def _pool_roots(args: argparse.Namespace) -> dict[str, Path]:
 
 
 def _evaluate_predict_test(args: argparse.Namespace) -> None:
+    from jute_disease.evaluation import predict_test
+
     try:
         result = predict_test(
             args.freeze_record,
@@ -819,6 +809,8 @@ def _evaluate_predict_test(args: argparse.Namespace) -> None:
 
 
 def _evaluate_predict_leaf_only(args: argparse.Namespace) -> None:
+    from jute_disease.evaluation import predict_leaf_only
+
     try:
         result = predict_leaf_only(
             args.freeze_record,
@@ -853,6 +845,8 @@ def _evaluate_run_record(args: argparse.Namespace) -> None:
 
 
 def _evaluate_leaf_sample(args: argparse.Namespace) -> None:
+    from jute_disease.evaluation import leaf_sample_ids
+
     try:
         record = verify_freeze_record(args.freeze_record, args.root, args.target_dir)
         log_test_read(
@@ -867,6 +861,8 @@ def _evaluate_leaf_sample(args: argparse.Namespace) -> None:
 
 
 def _evaluate_sanity_checks(args: argparse.Namespace) -> None:
+    from jute_disease.evaluation import compute_sanity_checks
+
     try:
         auth = authorize_test_read(
             args.freeze_record,
@@ -899,6 +895,8 @@ def _evaluate_sanity_checks(args: argparse.Namespace) -> None:
 
 
 def _evaluate_scene_tags(args: argparse.Namespace) -> None:
+    from jute_disease.evaluation import compute_scene_tags
+
     try:
         record = verify_freeze_record(args.freeze_record, args.root, args.target_dir)
         result = compute_scene_tags(
@@ -921,6 +919,13 @@ def _evaluate_scene_tags(args: argparse.Namespace) -> None:
 
 
 def _evaluate_test(args: argparse.Namespace) -> None:
+    from jute_disease.evaluation import (
+        SCENE_TAGS_KIND,
+        evaluate_test,
+        read_bound_output,
+        require_scene_tags_bound,
+    )
+
     try:
         auth = authorize_test_read(
             args.freeze_record,
@@ -928,6 +933,7 @@ def _evaluate_test(args: argparse.Namespace) -> None:
             args.root,
             args.fit_id or None,
             args.target_dir,
+            require_full_matrix=True,
         )
         default_log = default_reads_log_path(args.root)
         fit_ids = [r.fit_id for r in auth.runs]
@@ -964,6 +970,13 @@ def _evaluate_test(args: argparse.Namespace) -> None:
 
 
 def _evaluate_diagnostics(args: argparse.Namespace) -> None:
+    from jute_disease.evaluation import (
+        SANITY_CHECKS_KIND,
+        SCENE_TAGS_KIND,
+        evaluate_image_diagnostics,
+        read_bound_output,
+    )
+
     try:
         auth = authorize_test_read(
             args.freeze_record,
@@ -972,14 +985,11 @@ def _evaluate_diagnostics(args: argparse.Namespace) -> None:
             args.fit_id,
             args.target_dir,
         )
-        fit_ids = [run.fit_id for run in auth.runs]
         default_log = default_reads_log_path(args.root)
         additional_logs = [args.reads_log] if args.reads_log else []
-        # The run set must cover the frozen cell under all three policies; that
-        # needs no test image, so a refusal here leaves no image_diagnostics entry.
-        primary_policy_runs(auth, args.assignment_table)
-        # Both inputs must be outputs of the logged commands; checking them before
-        # the intent row means a refusal leaves no image_diagnostics entry.
+        # These reads only name the inputs; the entry point re-verifies both against
+        # the ledger and logs the image_diagnostics intent itself, so a refusal
+        # leaves no image_diagnostics entry and no caller can skip either step.
         scene_tags = read_bound_output(
             args.scene_tags,
             SCENE_TAGS_KIND,
@@ -992,24 +1002,19 @@ def _evaluate_diagnostics(args: argparse.Namespace) -> None:
             record_hash=auth.record_hash,
             reads_log=default_log,
         )
-        log_test_read(
-            default_log,
-            auth.record_hash,
-            fit_ids,
-            operation="image_diagnostics",
-            additional_logs=additional_logs,
-        )
         result = evaluate_image_diagnostics(
             args.target_dir,
             auth,
             args.run_store or args.run_record.parent,
             args.image_root,
             args.output,
+            root=args.root,
             frozen_backbone_checkpoint=args.frozen_backbone_checkpoint,
             assignment_table_path=args.assignment_table,
             scene_tags=scene_tags,
             sanity_checks=sanity_checks,
             model_name=args.model_name,
+            additional_logs=additional_logs,
             generating_command=["jute-disease", *sys.argv[1:]],
             source_artifacts=[
                 args.freeze_record,

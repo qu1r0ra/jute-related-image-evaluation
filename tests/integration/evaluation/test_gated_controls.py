@@ -5,6 +5,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 from shutil import copytree
+from typing import Any
 
 import pytest
 
@@ -13,9 +14,11 @@ from jute_disease.data.manifest import (
     load_manifest,
     write_manifest,
 )
-from jute_disease.training import RunStore, load_benchmark
+from jute_disease.evaluation.freeze_record import scored_fit_ids
+from jute_disease.evaluation.probes import planned_probe_fit_ids
+from jute_disease.training import FitKind, RunStore, load_benchmark
 
-from .conftest import audit_manifest_of
+from .conftest import MINIMAL_PAD_CUE_FIT, audit_manifest_of, minimal_benchmark
 from .test_gated_evaluator import (
     FIT,
     LEAF_FIT,
@@ -26,6 +29,7 @@ from .test_gated_evaluator import (
     _issue_receipts,
     _leaf_run,
     _outcomes,
+    _pad_cue_run,
     _probe_ids,
     _spec,
     _write,
@@ -147,12 +151,17 @@ def _setup_runs(
         mask_audit_report,
         capsys,
         [FIT.format(0), leaf],
+        config=minimal_benchmark(tmp_path),
     )
     store = RunStore(tmp_path / "runs")
     full = _complete_fit(store, target, FIT.format(0), 0, 3)
     _write(
         tmp_path / "runs" / "runs.json",
-        [full, _leaf_run(store, target, leaf, FIT.format(0), 0, 2)],
+        [
+            full,
+            _leaf_run(store, target, leaf, FIT.format(0), 0, 2),
+            _pad_cue_run(store, target),
+        ],
     )
     _issue_receipts(store, record)
     run_record = tmp_path / "runs" / "run-record.json"
@@ -478,29 +487,31 @@ def test_record_made_after_a_read_is_flagged_post_hoc(
     assert json.loads(record.read_text(encoding="utf-8"))["body"]["post_hoc"] is False
 
 
-def test_all_analyses_run_through_the_evaluator(
+def _analyses_report(
     tmp_path: Path,
     target: Path,
     root: Path,
     policy_dir: Path,
-    passing_mask_audit_report: Path,
+    audit_report: Path,
     capsys: pytest.CaptureFixture[str],
-) -> None:
+) -> tuple[dict[str, Any], list[str]]:
+    """Freeze, run every analysis through ``evaluate test`` and return its report."""
     fits = {
         "full": FIT.format(0),
         "leaf_only": "fixture/leaf/seed-0",
         "background_only": "fixture/background/seed-0",
         "border": "fixture/border/seed-0",
-        "pad_cue": "fixture/pad/seed-0",
+        "pad_cue": MINIMAL_PAD_CUE_FIT,
     }
     record = _freeze(
         tmp_path,
         target,
         root,
         policy_dir,
-        passing_mask_audit_report,
+        audit_report,
         capsys,
-        list(fits.values()),
+        [fit for variant, fit in fits.items() if variant != "pad_cue"],
+        config=minimal_benchmark(tmp_path),
     )
     sample_args = ["--freeze-record", record, "--target-dir", target, "--root", root]
     capsys.readouterr()
@@ -525,7 +536,7 @@ def test_all_analyses_run_through_the_evaluator(
             runs.append(_leaf_run(store, target, fit_id, fits["full"], 0, 5, sample))
             continue
         system = "pad" if variant == "pad_cue" else SYSTEM
-        trained = variant if variant in ("border", "pad_cue") else ""
+        trained = variant if variant in ("border", "pad_cue", "background_only") else ""
         run = _complete_fit(store, target, fit_id, 0, 5, system=system, variant=trained)
         runs.append({**run, "variant": variant, "of": None})
     _write(tmp_path / "runs" / "runs.json", runs)
@@ -564,9 +575,24 @@ def test_all_analyses_run_through_the_evaluator(
         12,
     )
     report = json.loads((tmp_path / "out.json").read_text(encoding="utf-8"))
+    return report, sample
+
+
+def test_all_analyses_run_through_the_evaluator(
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    passing_mask_audit_report: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    report, sample = _analyses_report(
+        tmp_path, target, root, policy_dir, passing_mask_audit_report, capsys
+    )
     system = report["systems"]["mobilenet_v2_direct"]
     assert system["class_scene_cells"] and system["scene_summaries"]
-    assert system["leaf_only"] and system["full_on_leaf_sample"]
+    assert system["leaf_only"] and "withheld" not in system["leaf_only"]
+    assert system["full_on_leaf_sample"]
     assert system["background_probe"]["statement"]
     border = system["border_probe"]
     for result in (system["background_probe"], border["unrestricted"]):
@@ -577,6 +603,81 @@ def test_all_analyses_run_through_the_evaluator(
     assert border["headline"] is None and "fewer than 50" in border["headline_withheld"]
     assert border["pad_cue"] is not None
     assert report["leaf_sample"]["image_ids"] == sample
+
+
+def test_a_filtered_read_of_a_complete_matrix_stays_confirmatory(
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Selecting fits with ``--fit-id`` does not turn recorded fits into missing ones."""
+    record, run_record, _ = _setup_runs(
+        tmp_path, target, root, policy_dir, mask_audit_report, capsys
+    )
+    selected = ("--fit-id", FIT.format(0), "--fit-id", LEAF_FIT.format(0))
+    _cli(*_test_args(tmp_path, target, root, record, run_record), *selected)
+    report = json.loads((tmp_path / "out.json").read_text(encoding="utf-8"))
+    assert report["missing_fit_ids"] == []
+    assert report["confirmatory"] is True
+    assert set(report["systems"]) == {"mobilenet_v2_direct"}
+
+
+def test_a_failed_mask_audit_withholds_the_background_statement(
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ADR 0002 gates the probe on the audit, so a failed audit reports no result."""
+    report, _ = _analyses_report(
+        tmp_path, target, root, policy_dir, mask_audit_report, capsys
+    )
+    probe = report["systems"]["mobilenet_v2_direct"]["background_probe"]
+    assert probe["reported"] is False
+    assert "audit did not pass" in probe["withheld"]
+    assert "statement" not in probe and "detected" not in probe
+    assert "p_value" not in probe
+
+
+def test_a_failed_mask_audit_withholds_the_leaf_only_scores(
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ADR 0002 gates leaf-only results on the audit as well as the probe."""
+    report, _ = _analyses_report(
+        tmp_path, target, root, policy_dir, mask_audit_report, capsys
+    )
+    system = report["systems"]["mobilenet_v2_direct"]
+    assert system["leaf_only"]["reported"] is False
+    assert "audit did not pass" in system["leaf_only"]["withheld"]
+    assert "full_on_leaf_sample" not in system
+    assert report["leaf_only_coverage"]["complete"] is True
+
+
+def test_a_passed_mask_audit_reports_the_background_statement(
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    passing_mask_audit_report: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    report, _ = _analyses_report(
+        tmp_path, target, root, policy_dir, passing_mask_audit_report, capsys
+    )
+    probe = report["systems"]["mobilenet_v2_direct"]["background_probe"]
+    assert probe["reported"] is True
+    assert probe["statement"]
+    assert 0 <= probe["p_value"] <= 1
 
 
 def test_two_runs_for_one_system_and_seed_are_refused(
@@ -595,11 +696,13 @@ def test_two_runs_for_one_system_and_seed_are_refused(
         mask_audit_report,
         capsys,
         [FIT.format(0), "fixture/dup"],
+        config=minimal_benchmark(tmp_path),
     )
     store = RunStore(tmp_path / "runs")
     runs = [
         _complete_fit(store, target, FIT.format(0), 0, 3),
         _complete_fit(store, target, "fixture/dup", 0, 3),
+        _pad_cue_run(store, target),
     ]
     _write(tmp_path / "runs" / "runs.json", runs)
     _issue_receipts(store, record)
@@ -616,3 +719,19 @@ def test_two_runs_for_one_system_and_seed_are_refused(
     )
     with pytest.raises(SystemExit, match="more than one run"):
         _cli(*_test_args(tmp_path, target, root, record, run_record))
+
+
+def test_the_fits_a_confirmatory_read_needs_are_those_that_leave_predictions() -> None:
+    """Prepare, tuning and source fits write no test-scorable model of their own."""
+    benchmark = load_benchmark(BENCHMARK_CONFIG)
+    declared = benchmark.fits()
+    expected = {
+        fit.fit_id
+        for fit in declared
+        if fit.phase != "tune" and fit.kind in (FitKind.CLASSICAL, FitKind.TARGET)
+    }
+    assert scored_fit_ids(fit.fit_id for fit in declared) == expected
+    assert expected
+    assert set(planned_probe_fit_ids(benchmark)) <= scored_fit_ids(
+        planned_probe_fit_ids(benchmark)
+    )

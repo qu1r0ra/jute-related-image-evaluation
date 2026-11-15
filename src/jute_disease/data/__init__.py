@@ -1,3 +1,6 @@
+from importlib import import_module
+from typing import Any
+
 from jute_disease.data.audit import (
     ImageNetExtractor,
     evaluate_ratings,
@@ -32,13 +35,16 @@ from jute_disease.data.cache import (
     verify_image_cache,
     write_decision,
 )
+from jute_disease.data.content_verifier import (
+    ManifestContentVerifier,
+    verify_manifest_content,
+)
 from jute_disease.data.curation import (
     Curation,
     CurationRules,
     curate,
     load_rules,
 )
-from jute_disease.data.datamodule import DataModule
 from jute_disease.data.download import (
     download_plant_doc,
     download_plant_village,
@@ -142,13 +148,6 @@ from jute_disease.data.policies import (
     policy_matrix_binding,
     write_policy_manifests,
 )
-from jute_disease.data.readers import (
-    ManifestContentVerifier,
-    ManifestDataset,
-    open_partition,
-    verify_manifest_content,
-)
-from jute_disease.data.sampling import balanced_sampler, loader_generator, seed_worker
 from jute_disease.data.sources import (
     PLANTDOC,
     PLANTVILLAGE,
@@ -179,6 +178,31 @@ from jute_disease.data.transforms import (
     letterbox_dimensions,
     letterbox_pad_fraction,
 )
+
+# These modules build on torch, Lightning or torchvision. They load on first use so
+# commands that never train or score a model start without the training stack.
+_LAZY_EXPORTS = {
+    "DataModule": "jute_disease.data.datamodule",
+    "ManifestDataset": "jute_disease.data.readers",
+    "open_partition": "jute_disease.data.readers",
+    "balanced_sampler": "jute_disease.data.sampling",
+    "loader_generator": "jute_disease.data.sampling",
+    "seed_worker": "jute_disease.data.sampling",
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Load the torch-bound data exports only when a caller requests them."""
+    try:
+        module_name = _LAZY_EXPORTS[name]
+    except KeyError as error:
+        raise AttributeError(
+            f"module {__name__!r} has no attribute {name!r}"
+        ) from error
+    value = getattr(import_module(module_name), name)
+    globals()[name] = value
+    return value
+
 
 __all__ = [
     "DECISION_FILE",
