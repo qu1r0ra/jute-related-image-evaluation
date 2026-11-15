@@ -161,3 +161,38 @@ def test_null_choice_is_refused_without_changing_sheet(tmp_path: Path) -> None:
 
     assert response.status_code == 400
     assert sheet.read_bytes() == original
+
+
+def test_finish_requires_completion_and_protects_sitting(tmp_path: Path) -> None:
+    sheet = tmp_path / "sitting-001.csv"
+    sheet.write_text(
+        "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\n"
+        "private,scene,scenes/a.png,,,,,\n",
+        encoding="utf-8",
+    )
+    client = create_app(sheet).test_client()
+    revision = client.get("/api/sitting").json["revision"]
+    assert client.post("/api/finish", json={"revision": revision}).status_code == 409
+    saved = client.post(
+        "/api/items/1",
+        json={"revision": revision, "field": "scene_tag", "value": "field"},
+    )
+    assert (
+        client.post(
+            "/api/finish", json={"revision": saved.json["revision"]}
+        ).status_code
+        == 200
+    )
+    reopened = create_app(sheet).test_client()
+    assert reopened.get("/api/sitting").json["read_only"] is True
+    assert (
+        reopened.post(
+            "/api/items/1",
+            json={
+                "revision": saved.json["revision"],
+                "field": "scene_tag",
+                "value": "unknown",
+            },
+        ).status_code
+        == 403
+    )
