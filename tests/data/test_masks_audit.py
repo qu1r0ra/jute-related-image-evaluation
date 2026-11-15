@@ -383,7 +383,7 @@ def test_fixture_command_reports_digest_and_backend(
 
 
 def _two_targets(tmp_path: Path) -> tuple[Path, Path]:
-    from tests.data.frozen_targets import singles, write_target
+    from .frozen_targets import singles, write_target
 
     targets = []
     for pool in ("A", "B"):
@@ -400,7 +400,8 @@ def test_protected_test_images_union_several_targets_and_name_each_digest(
     tmp_path: Path,
 ) -> None:
     from jute_disease.data import load_protected_test_images
-    from tests.data.frozen_targets import content_id
+
+    from .frozen_targets import content_id
 
     first, second = _two_targets(tmp_path)
 
@@ -455,7 +456,7 @@ def test_audit_refuses_an_overlap_with_any_named_target_and_records_every_digest
 
 
 def test_mask_commands_accept_several_target_dirs(tmp_path: Path) -> None:
-    from tests.data.frozen_targets import content_id
+    from .frozen_targets import content_id
 
     first, second = _two_targets(tmp_path)
     work = tmp_path / "work"
@@ -511,7 +512,7 @@ def test_mask_commands_accept_several_target_dirs(tmp_path: Path) -> None:
     leaked_id = hashlib.sha256(leak.read_bytes()).hexdigest()
     manifest_path = second / "protected-test" / "manifest.json"
     assert content_id("B-test-0") in manifest_path.read_text(encoding="utf-8")
-    from tests.data.frozen_targets import singles, write_target
+    from .frozen_targets import singles, write_target
 
     leaking = write_target(
         tmp_path / "leaking",

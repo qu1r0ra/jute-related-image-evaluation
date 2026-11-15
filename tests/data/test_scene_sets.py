@@ -11,7 +11,8 @@ from jute_disease.data import (
     read_candidates,
     read_scene_set,
 )
-from tests.data.frozen_targets import Member, content_id, singles, write_target
+
+from .frozen_targets import Member, content_id, singles, write_target
 
 POOLS = ("A", "B", "C")
 SMALL = {pool: {"held_out": 3, "reserve_fit": 2, "reserve_test": 2} for pool in POOLS}
