@@ -278,8 +278,34 @@ def test_development_and_explicitly_excluded_families_are_excluded(
     assert not _ids(output) & {content_id(name) for name in names}
     assert receipt["exclusions"]["A"]["development_family"] == 2
     assert receipt["exclusions"]["A"]["excluded_family"] == 2
-    assert receipt["development"]["matched"] == 1
-    assert receipt["excluded_ids"] == {"given": 1, "matched": 1}
+    assert receipt["development_images"] == 1
+    assert receipt["excluded_ids"] == 1
+
+
+def test_a_development_image_no_manifest_knows_is_refused(tmp_path: Path) -> None:
+    world = _world(tmp_path)
+    world["development"].write_text(
+        json.dumps(
+            [{"image_id": "dev-1", "path": "missing.png", "scene_tag": "field"}]
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "sets"
+
+    with pytest.raises(ValueError, match="1 development image.*dev-1"):
+        _draw(world, output)
+
+    assert not output.exists()
+
+
+def test_an_excluded_id_no_manifest_knows_is_refused(tmp_path: Path) -> None:
+    world = _world(tmp_path)
+    output = tmp_path / "sets"
+
+    with pytest.raises(ValueError, match="1 excluded image.*not-an-image"):
+        _draw(world, output, excluded_ids=["not-an-image"])
+
+    assert not output.exists()
 
 
 def test_a_development_image_is_matched_by_file_content(tmp_path: Path) -> None:
@@ -351,6 +377,26 @@ def test_existing_output_is_never_overwritten(tmp_path: Path) -> None:
         _draw(world, output)
 
     assert not list(output.iterdir())
+
+
+def test_a_failed_write_leaves_nothing_behind(tmp_path: Path, monkeypatch) -> None:
+    world = _world(tmp_path)
+    output = tmp_path / "out" / "sets"
+    original = Path.write_text
+
+    def failing(self: Path, *args: object, **kwargs: object) -> int:
+        if self.name == "reserve-fit.json":
+            raise OSError("disk full")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", failing)
+    with pytest.raises(OSError, match="disk full"):
+        _draw(world, output)
+    monkeypatch.undo()
+
+    assert not list(output.parent.iterdir())
+    _draw(world, output)
+    assert (output / "reserve-fit.json").is_file()
 
 
 def test_pools_must_match_the_allocation(tmp_path: Path) -> None:

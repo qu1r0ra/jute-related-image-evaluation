@@ -10,6 +10,8 @@ target image is opened.
 import hashlib
 import json
 import random
+import shutil
+import tempfile
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -52,23 +54,33 @@ def _file_sha256(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def _development_ids(development: Path) -> set[str]:
-    """Image IDs and, where the file is present, content digests of the set."""
+def _development_ids(development: Path) -> list[set[str]]:
+    """Each record's image ID and, where the file is present, content digest."""
     development = Path(development)
     records = json.loads(development.read_text(encoding="utf-8"))
     if not isinstance(records, list) or not all(
         isinstance(record, dict) and "image_id" in record for record in records
     ):
         raise ValueError("development manifest must be a JSON array of image records")
-    ids: set[str] = set()
+    identities: list[set[str]] = []
     for record in records:
-        ids.add(str(record["image_id"]))
+        ids = {str(record["image_id"])}
         path = Path(str(record.get("path", "")))
         if not path.is_absolute():
             path = development.parent / path
         if record.get("path") and path.is_file():
             ids.add(_file_sha256(path))
-    return ids
+        identities.append(ids)
+    return identities
+
+
+def _refuse_unknown(kind: str, unknown: list[str]) -> None:
+    """An identity no manifest knows cannot be excluded, so it could leak."""
+    if unknown:
+        raise ValueError(
+            f"{len(unknown)} {kind} image(s) match no frozen manifest entry, "
+            f"so their families cannot be excluded: {', '.join(unknown[:5])}"
+        )
 
 
 def read_excluded_ids(source: Path) -> list[str]:
@@ -106,7 +118,13 @@ def _draw_pool(
     sizes: Mapping[str, int],
     seed: int,
 ) -> dict[str, list[dict[str, str]]]:
-    """Simple random draw within a pool, keeping each family in one set."""
+    """Draw a pool's sets from one shuffle, keeping each family in one set.
+
+    The held-out set is the first images of the shuffle, so it is a simple
+    random sample of the eligible images. The reserve parts skip families an
+    earlier set holds, so an image of a large family is less likely to reach
+    them than a singleton.
+    """
     order = sorted(eligible, key=lambda record: record["image_id"])
     random.Random(f"scene-sets:{seed}:{pool}").shuffle(order)
     owner: dict[str, str] = {}
@@ -151,8 +169,9 @@ def draw_scene_sets(
     development set, or among ``excluded_ids``.
 
     Raises:
-        ValueError: the pools do not match the allocation, or a pool has too
-            few eligible families.
+        ValueError: the pools do not match the allocation, a development or
+            excluded image matches no manifest entry, or a pool has too few
+            eligible families.
         FileExistsError: ``output`` already exists.
     """
     output = Path(output)
@@ -170,7 +189,8 @@ def draw_scene_sets(
     if output.exists():
         raise FileExistsError(f"scene-set output already exists: {output}")
     excluded = [str(image_id) for image_id in excluded_ids]
-    development_ids = _development_ids(development)
+    development_identities = _development_ids(development)
+    development_ids = set().union(*development_identities)
 
     fits, tests, groupings = {}, {}, {}
     for pool in pools:
@@ -193,6 +213,11 @@ def draw_scene_sets(
             | quarantined[pool]
         )
     known = set(pool_count)
+    _refuse_unknown(
+        "development",
+        sorted(min(ids) for ids in development_identities if not ids & known),
+    )
+    _refuse_unknown("excluded", sorted(set(excluded) - known))
 
     results: dict[str, dict[str, list[dict[str, str]]]] = {}
     exclusions: dict[str, dict[str, int]] = {}
@@ -264,8 +289,10 @@ def draw_scene_sets(
     receipt: dict[str, Any] = {
         "schema": SCENE_SETS_SCHEMA,
         "seed": seed,
-        "method": "seeded simple random draw within each pool; a family is "
-        "kept in one set; held-out, then reserve test, then reserve fit",
+        "method": "one seeded shuffle of the eligible images per pool; the "
+        "held-out set is its first images, a simple random sample; reserve "
+        "test, then reserve fit, are the next images whose family no earlier "
+        "set holds, so they are conditional on the held-out draw",
         "allocation": {pool: dict(allocation[pool]) for pool in pools},
         "grouping": {
             pool: {
@@ -283,14 +310,8 @@ def draw_scene_sets(
             for pool in pools
         },
         "development_manifest_digest": _file_sha256(Path(development)),
-        "development": {
-            "identities": len(development_ids),
-            "matched": len(development_ids & known),
-        },
-        "excluded_ids": {
-            "given": len(set(excluded)),
-            "matched": len(set(excluded) & known),
-        },
+        "development_images": len(development_identities),
+        "excluded_ids": len(set(excluded)),
         "counts": counts,
         "exclusions": exclusions,
         "outputs": {
@@ -298,10 +319,16 @@ def draw_scene_sets(
             for name, text in texts.items()
         },
     }
-    output.mkdir(parents=True, exist_ok=False)
-    for name, text in texts.items():
-        (output / name).write_text(text, encoding="utf-8", newline="\n")
-    (output / SCENE_SETS_RECEIPT).write_text(
-        json.dumps(receipt, indent=2) + "\n", encoding="utf-8", newline="\n"
-    )
+    texts[SCENE_SETS_RECEIPT] = json.dumps(receipt, indent=2) + "\n"
+    # Written beside the output and renamed whole, so a failed write leaves
+    # no partial draw behind to block the retry.
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{output.name}-", dir=output.parent))
+    try:
+        for name, text in texts.items():
+            (staging / name).write_text(text, encoding="utf-8", newline="\n")
+        staging.rename(output)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
     return receipt

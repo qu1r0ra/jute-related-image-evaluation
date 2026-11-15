@@ -511,7 +511,7 @@ def test_mask_commands_accept_several_target_dirs(tmp_path: Path) -> None:
     leaked_id = hashlib.sha256(leak.read_bytes()).hexdigest()
     manifest_path = second / "protected-test" / "manifest.json"
     assert content_id("B-test-0") in manifest_path.read_text(encoding="utf-8")
-    from tests.data.frozen_targets import Member, singles, write_target
+    from tests.data.frozen_targets import singles, write_target
 
     leaking = write_target(
         tmp_path / "leaking",
@@ -520,7 +520,7 @@ def test_mask_commands_accept_several_target_dirs(tmp_path: Path) -> None:
     )
     path = leaking / "protected-test"
     data = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
-    assert Member  # the leaking target is rewritten by hand below
+    # The leaking target is rewritten by hand below.
     data["entries"][0]["image_id"] = leaked_id
     data["entries"].sort(key=lambda entry: entry["image_id"])
     from jute_disease.data.manifest import Manifest, write_manifest
@@ -541,3 +541,22 @@ def test_mask_commands_accept_several_target_dirs(tmp_path: Path) -> None:
             ]
         )
     assert not (work / "refused").exists()
+
+    # A development image whose content is a test image of the second target only.
+    records[0] = {"image_id": "dev-leak", "path": "leak.png", "scene_tag": "field"}
+    development.write_text(json.dumps(records), encoding="utf-8")
+    with pytest.raises(SystemExit, match="test partition"):
+        main(
+            [
+                "data",
+                "masks-calibrate",
+                str(development),
+                "--output",
+                str(work / "refused.json"),
+                "--target-dir",
+                str(first),
+                "--target-dir",
+                str(leaking),
+            ]
+        )
+    assert not (work / "refused.json").exists()
