@@ -148,6 +148,13 @@ from jute_disease.data.policies import (
     policy_matrix_binding,
     write_policy_manifests,
 )
+from jute_disease.data.scene_evaluate import (
+    POOL_POPULATIONS,
+    compare_scene_tags,
+    read_scene_tags,
+    run_scene_test,
+    score_scene_test,
+)
 from jute_disease.data.scene_sets import (
     SCENE_SET_ALLOCATION,
     draw_scene_sets,
@@ -346,6 +353,11 @@ __all__ += [
     "fit_scene_thresholds",
     "fit_thresholds_from_manifest",
     "draw_scene_sets",
+    "POOL_POPULATIONS",
+    "compare_scene_tags",
+    "read_scene_tags",
+    "run_scene_test",
+    "score_scene_test",
     "load_protected_test_images",
     "read_excluded_ids",
     "read_scene_set",
