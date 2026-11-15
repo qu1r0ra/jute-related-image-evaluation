@@ -43,6 +43,7 @@ from jute_disease.evaluation.diagnostic_inputs import (
     load_run_predictions,
     policy_predictions,
     primary_policy_runs,
+    read_bound_output,
     require_scene_tags_bound,
     verified_checkpoint,
 )
@@ -63,6 +64,8 @@ from jute_disease.evaluation.diagnostics import (
 from jute_disease.evaluation.freeze_record import (
     Authorization,
     FreezeRecordError,
+    default_reads_log_path,
+    log_test_read,
 )
 from jute_disease.evaluation.probes import (
     PERMUTATIONS,
@@ -222,12 +225,14 @@ def evaluate_image_diagnostics(
     image_root: Path | str,
     output_dir: Path | str,
     *,
+    root: Path | str,
     frozen_backbone_checkpoint: Path | str,
     assignment_table_path: Path | str,
     scene_tags: BoundOutput,
     sanity_checks: BoundOutput,
     model_name: str = "mobilenetv2_100.ra_in1k",
     mask_backend: MaskBackend | None = None,
+    additional_logs: Sequence[Path | str] = (),
     generating_command: Sequence[str] = (),
     source_artifacts: Sequence[Path | str] = (),
 ) -> dict[str, Any]:
@@ -239,12 +244,41 @@ def evaluate_image_diagnostics(
     compute them, and the policy predictions come from the run record: the
     authorized runs must cover all three policies at the pool, view and policy the
     freeze record fixed.
+
+    The caller's ``scene_tags`` and ``sanity_checks`` are claims, not evidence:
+    this function re-reads each bound file under ``root``, re-checks its digest,
+    freeze record binding and ledger completion row, and refuses unless the
+    re-verified output matches the one supplied. It then logs its own
+    ``image_diagnostics`` read intent to the ledger (and ``additional_logs``)
+    before any test image is opened, so no caller can reach the images by building
+    a ``BoundOutput`` by hand or by skipping the log.
+
+    The sanity checks are a checkpoint-level heuristic precondition for the leaf
+    score. They run on a small fixed sample (``SANITY_SAMPLE_SIZE``), so they do
+    not certify the images the leaf score is computed on, individually or in
+    aggregate.
     """
     if (scene_tags.kind, sanity_checks.kind) != (SCENE_TAGS_KIND, SANITY_CHECKS_KIND):
         raise FreezeRecordError("diagnostics inputs must be the logged command outputs")
     fit_ids = [run.fit_id for run in authorization.runs]
     require_analysis(authorization, "embeddings-test-pass", fit_ids)
     require_analysis(authorization, "gradcam-test-pass", fit_ids)
+    ledger = default_reads_log_path(root)
+    verified = []
+    for claimed in (scene_tags, sanity_checks):
+        genuine = read_bound_output(
+            claimed.path,
+            claimed.kind,
+            record_hash=authorization.record_hash,
+            reads_log=ledger,
+        )
+        if (genuine.sha256, genuine.body) != (claimed.sha256, claimed.body):
+            raise FreezeRecordError(
+                f"{claimed.kind.replace('_', ' ')} do not match the logged "
+                "command output they claim to be"
+            )
+        verified.append(genuine)
+    scene_tags, sanity_checks = verified
     runs, assignment, runs_by_policy = primary_policy_runs(
         authorization, assignment_table_path
     )
@@ -263,6 +297,15 @@ def evaluate_image_diagnostics(
     checkpoint_path = (base / str(selected.checkpoint)).resolve()
     receipt_path = base.joinpath(*selected.fit_id.split("/")) / "receipt.json"
 
+    # The intent row precedes the first manifest or image read, so a crash
+    # mid-pass still leaves the test partition marked as read.
+    log_test_read(
+        ledger,
+        authorization.record_hash,
+        fit_ids,
+        operation="image_diagnostics",
+        additional_logs=additional_logs,
+    )
     manifest = load_complete_manifest(target_dir)
     entries = tuple(sorted(manifest.partition("test"), key=lambda item: item.image_id))
     image_ids = tuple(entry.image_id for entry in entries)
@@ -388,6 +431,9 @@ def evaluate_image_diagnostics(
         "output_sha256": sanity_checks.sha256,
     }
     mask_audit_passed = bool(authorization.body.get("mask_audit", {}).get("passed"))
+    # The sanity pass is a checkpoint-level heuristic precondition computed on its
+    # own small sample; the leaf score below covers every test image and is not
+    # certified image by image by it.
     gate = leaf_score_gate(
         parameter_randomization=checks["parameter_randomization"]["status"] == "pass",
         mask_audit_passed=mask_audit_passed,

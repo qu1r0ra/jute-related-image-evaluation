@@ -88,7 +88,6 @@ from jute_disease.evaluation import (
     planned_probe_fit_ids,
     predict_leaf_only,
     predict_test,
-    primary_policy_runs,
     read_bound_output,
     require_scene_tags_bound,
     verify_freeze_record,
@@ -972,14 +971,11 @@ def _evaluate_diagnostics(args: argparse.Namespace) -> None:
             args.fit_id,
             args.target_dir,
         )
-        fit_ids = [run.fit_id for run in auth.runs]
         default_log = default_reads_log_path(args.root)
         additional_logs = [args.reads_log] if args.reads_log else []
-        # The run set must cover the frozen cell under all three policies; that
-        # needs no test image, so a refusal here leaves no image_diagnostics entry.
-        primary_policy_runs(auth, args.assignment_table)
-        # Both inputs must be outputs of the logged commands; checking them before
-        # the intent row means a refusal leaves no image_diagnostics entry.
+        # These reads only name the inputs; the entry point re-verifies both against
+        # the ledger and logs the image_diagnostics intent itself, so a refusal
+        # leaves no image_diagnostics entry and no caller can skip either step.
         scene_tags = read_bound_output(
             args.scene_tags,
             SCENE_TAGS_KIND,
@@ -992,24 +988,19 @@ def _evaluate_diagnostics(args: argparse.Namespace) -> None:
             record_hash=auth.record_hash,
             reads_log=default_log,
         )
-        log_test_read(
-            default_log,
-            auth.record_hash,
-            fit_ids,
-            operation="image_diagnostics",
-            additional_logs=additional_logs,
-        )
         result = evaluate_image_diagnostics(
             args.target_dir,
             auth,
             args.run_store or args.run_record.parent,
             args.image_root,
             args.output,
+            root=args.root,
             frozen_backbone_checkpoint=args.frozen_backbone_checkpoint,
             assignment_table_path=args.assignment_table,
             scene_tags=scene_tags,
             sanity_checks=sanity_checks,
             model_name=args.model_name,
+            additional_logs=additional_logs,
             generating_command=["jute-disease", *sys.argv[1:]],
             source_artifacts=[
                 args.freeze_record,
