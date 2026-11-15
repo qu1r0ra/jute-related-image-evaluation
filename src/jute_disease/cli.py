@@ -34,6 +34,7 @@ from jute_disease.data import (
     DEFAULT_DESIGN,
     DEFAULT_MAX_BYTES,
     OWNER_COUNT,
+    SCENE_TEST_FILE,
     SOURCES,
     TARGET_DIR,
     ColorThresholdBackend,
@@ -44,6 +45,7 @@ from jute_disease.data import (
     SourceMismatchError,
     build_audit_kit,
     collect_audit_kit,
+    compare_scene_tags,
     download_plant_doc,
     download_plant_village,
     draw_scene_sets,
@@ -65,6 +67,7 @@ from jute_disease.data import (
     residual_sample,
     run_masks_audit,
     run_masks_fixture,
+    run_scene_test,
     sample_edges,
     synthetic_recall,
     write_policy_manifests,
@@ -320,6 +323,56 @@ def _scene_sets(args: argparse.Namespace) -> None:
         )
     except (ValueError, OSError, KeyError) as error:
         raise SystemExit(f"scene sets blocked: {error}") from error
+
+
+def _scene_evaluate(args: argparse.Namespace) -> None:
+    try:
+        if args.scene_step == "compare":
+            judges = dict(item.split("=", 1) for item in args.judge if "=" in item)
+            if len(judges) != len(args.judge) or not all(judges.values()):
+                raise ValueError("--judge takes unique NAME=PATH values")
+            report = compare_scene_tags(
+                args.held_out,
+                args.owner,
+                {name: Path(path) for name, path in judges.items()},
+                args.thresholds,
+                args.output,
+                seed=args.seed,
+                recheck_count=args.recheck_count,
+            )
+            _print_json(
+                {
+                    "output": str(args.output),
+                    "seed": report["seed"],
+                    "images": report["images"],
+                    "judges": report["judges"],
+                    "disagreements": len(report["disagreements"]),
+                    "recheck_images": len(report["recheck"]["image_ids"]),
+                }
+            )
+            return
+        record = run_scene_test(
+            args.held_out,
+            args.thresholds,
+            args.compare,
+            args.owner,
+            args.final,
+            ColorThresholdBackend(),
+            recheck=args.recheck,
+        )
+        _print_json(
+            {
+                "record": str(args.compare / SCENE_TEST_FILE),
+                "digest": record["digest"],
+                "passed": record["passed"],
+                "pooled_accuracy": record["pooled"]["accuracy"]["estimate"],
+                "pooled_clean_recall": record["pooled"]["clean_recall"].get("estimate"),
+                "unknown": record["unknown"]["status"],
+                "recheck": record["recheck"]["status"],
+            }
+        )
+    except (ValueError, OSError, KeyError) as error:
+        raise SystemExit(f"scene evaluation blocked: {error}") from error
 
 
 def _audit_sitting(args: argparse.Namespace) -> None:
@@ -1322,6 +1375,84 @@ def build_parser() -> argparse.ArgumentParser:
     scene_sets.add_argument("--output", type=Path, required=True)
     scene_sets.add_argument("--seed", type=int, default=DEFAULT_SEED)
     scene_sets.set_defaults(run=_scene_sets)
+
+    scene_evaluate = data_actions.add_parser(
+        "scene-evaluate",
+        help="Compare the scene-tag judges, then run the held-out test once.",
+    )
+    scene_steps = scene_evaluate.add_subparsers(
+        dest="scene_step", metavar="STEP", required=True
+    )
+    scene_compare = scene_steps.add_parser(
+        "compare",
+        help="List judge disagreements, report each judge's kappa and draw "
+        "the recheck set.",
+    )
+    scene_compare.add_argument(
+        "--held-out", type=Path, required=True, help="held-out.json of scene-sets."
+    )
+    scene_compare.add_argument(
+        "--owner",
+        type=Path,
+        required=True,
+        help="owner-scenes.csv of audit-collect: the owner's first-pass tags.",
+    )
+    scene_compare.add_argument(
+        "--judge",
+        action="append",
+        required=True,
+        metavar="NAME=PATH",
+        help="Tag sheet of one agent judge. Repeat it for each judge.",
+    )
+    scene_compare.add_argument(
+        "--thresholds",
+        type=Path,
+        required=True,
+        help="Frozen scene thresholds the test step will score.",
+    )
+    scene_compare.add_argument("--output", type=Path, required=True)
+    scene_compare.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    scene_compare.add_argument(
+        "--recheck-count",
+        type=int,
+        default=30,
+        help="Unanimous images drawn for the owner's blind recheck.",
+    )
+    scene_compare.set_defaults(run=_scene_evaluate)
+    scene_test = scene_steps.add_parser(
+        "test",
+        help="Score the frozen thresholds against the final owner tags and "
+        "write test.json in the compare directory. Refused once that record "
+        "exists.",
+    )
+    scene_test.add_argument(
+        "--held-out", type=Path, required=True, help="held-out.json of scene-sets."
+    )
+    scene_test.add_argument(
+        "--thresholds",
+        type=Path,
+        required=True,
+        help="The frozen scene thresholds the compare step read.",
+    )
+    scene_test.add_argument(
+        "--compare", type=Path, required=True, help="Output of the compare step."
+    )
+    scene_test.add_argument(
+        "--owner",
+        type=Path,
+        required=True,
+        help="The first-pass owner sheet the compare step read.",
+    )
+    scene_test.add_argument(
+        "--final",
+        type=Path,
+        required=True,
+        help="The owner's final tags for every held-out image.",
+    )
+    scene_test.add_argument(
+        "--recheck", type=Path, help="The filled recheck.csv of the compare step."
+    )
+    scene_test.set_defaults(run=_scene_evaluate)
 
     masks_calibrate = data_actions.add_parser(
         "masks-calibrate",

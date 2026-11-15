@@ -302,8 +302,12 @@ def split_power(
     )
 
 
-def wilson_interval(successes: int, total: int, level: float = 0.95) -> Interval:
-    """Wilson score interval for a binomial proportion."""
+def wilson_interval(successes: float, total: float, level: float = 0.95) -> Interval:
+    """Wilson score interval for a binomial proportion.
+
+    The counts may be real-valued effective counts, such as a weighted
+    proportion times its effective sample size; ``total`` must be at least 1.
+    """
     if total < 1 or not 0 <= successes <= total or not 0 < level < 1:
         raise ValueError("invalid binomial counts or confidence level")
     p = successes / total
