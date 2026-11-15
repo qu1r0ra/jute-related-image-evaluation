@@ -33,9 +33,9 @@
     {
       "name": "Pair image panel",
       "kind": "custom",
-      "description": "Equal-width, scrollable panel for one side of a pair comparison.",
+      "description": "Equal-width panel for one side of a pair comparison, with synchronized scrolling.",
       "html": "<div class=\"ds-image-panel\"><img alt=\"Image A for this item\" src=\"\"></div>",
-      "css": ".ds-image-panel { width: 100%; height: auto; aspect-ratio: 4 / 3; overflow: auto; background: #777; display: flex; align-items: safe center; justify-content: safe center; } .ds-image-panel img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; } .ds-image-panel img.full { max-width: none; max-height: none; } @media (max-width: 1050px) { .ds-image-panel { height: min(40vh, 460px); } } @media (max-width: 640px) { .ds-image-panel { height: 36vh; } }"
+      "css": ".ds-image-panel { width: 100%; height: auto; aspect-ratio: 4 / 3; overflow: auto; background: #777; display: flex; align-items: safe center; justify-content: safe center; } .ds-image-panel img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; } .ds-image-panel img.full { max-width: none; max-height: none; flex: none; } @media (max-width: 1050px) { .ds-image-panel { height: min(40vh, 460px); } } @media (max-width: 640px) { .ds-image-panel { height: 36vh; } }"
     }
   ],
   "narrative": {
@@ -44,7 +44,7 @@
     "keyCharacteristics": [
       "Neutral page and control surfaces with a gray image well.",
       "System UI typography and compact heading hierarchy.",
-      "Equal-sized pair panels with independently scrollable image content.",
+      "Equal-sized pair panels with synchronized scrolling.",
       "Visible keyboard focus and selected-choice state."
     ],
     "rules": [],

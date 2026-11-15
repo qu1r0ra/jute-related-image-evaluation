@@ -44,7 +44,7 @@ The values below are a snapshot extracted from `static/style.css`. That styleshe
 **Key Characteristics:**
 - Neutral page and control surfaces with a gray image well.
 - System UI typography and compact heading hierarchy.
-- Equal-sized pair panels with independently scrollable image content.
+- Equal-sized pair panels with synchronized scrolling.
 - Visible keyboard focus and selected-choice state.
 
 ## Colors
@@ -58,7 +58,7 @@ The stylesheet uses neutral surfaces and text, with a blue focus outline as its 
 - **Text** (`#222`): Default foreground inherited by controls.
 - **Page** (`#f4f3f1`): Root background.
 - **Image well** (`#777`): Background behind images.
-- **Muted text** (`#555`): Shortcut labels.
+- **Muted text** (`#555`): Shortcut labels on unselected choices; selected shortcuts use white.
 - **White surface** (`#fff`): Default button background and selected-choice text.
 - **Selected charcoal** (`#444`): Pressed-choice background.
 - **Divider** (`#c9c7c4`): Pair-rubric separator.
@@ -78,7 +78,7 @@ The stylesheet uses neutral surfaces and text, with a blue focus outline as its 
 
 ## Layout
 
-The main region is centered up to `1500px` with `1.5rem` padding. At wider widths, the workspace uses a `1.4fr` image column and a `1fr` choice column with a `2rem` gap. Pair images sit in two equal columns with a `4 / 3` frame ratio. At `1050px` the workspace becomes one column and panel height is viewport-constrained; at `640px` pair panels also become one column. Image wells scroll when their content exceeds the frame.
+The main region is centered up to `1500px` with `1.5rem` padding. At wider widths, the workspace uses a `1.4fr` image column and a `1fr` choice column with a `2rem` gap. Pair images sit in two equal columns with a `4 / 3` frame ratio. At `1050px` the workspace becomes one column and panel height is viewport-constrained; at `640px` pair panels also become one column. Image wells scroll when their content exceeds the frame; pair scrolling is synchronized. Sitting navigation stays at the bottom of the viewport when needed.
 
 ## Elevation & Depth
 

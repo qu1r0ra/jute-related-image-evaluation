@@ -4,13 +4,15 @@ This file owns evidence from synthetic interface review. `PRODUCT.md` owns produ
 
 ## Review findings
 
-- Pair panels have equal sizing, opaque gray wells and independent scrolling. Choice labels, rubric text and sitting navigation remain readable at the reviewed desktop viewport.
+- The earlier synthetic review covered equal pair-panel sizing, opaque gray wells, choice labels, rubric text and sitting navigation at a desktop viewport. Pair scrolling has since been synchronized.
 - Keyboard review covered visible focus, named choices, pressed states, save/progress status, image-load gating, and failed-save recovery.
 - Synthetic browser behavior covered keyboard choices, undo, full-resolution inspection, synchronized zoom, actual-pixel sizing, swap, reset on item change, mixed pair/scene/mask rows, finish and read-only reopening.
 - HTTP checks covered rating allowlists, opaque image routes, path containment, no-store responses and invalid requests.
 - A Windows CLI smoke test used a synthetic pair sitting and pool root; it checked the page, choice API, image routes, no-store headers, save and finish.
 
 ## Detector and browser evidence
+
+- A separate synthetic design audit found rendered zoom, image-readiness gating and long-session usability problems. The subsequent implementation changed zoom sizing, synchronized pair panning, save recovery, keyboard navigation and finish confirmation. The implementation worker reported 32 focused tests passing and a clean static detector; the changed interface still needs a fresh running-page design review.
 
 - Impeccable 4.9.1 `detect` on `static/` reported no findings. The `npm run design-check` target scans the two CSS/JS files with regex rules; its output says parsed-page rules were not run. Treat this as a scoped static check, not a complete accessibility or usability audit.
 - Synthetic browser interaction review: Chromium 159.0.8154.6 at 1200 × 900. It checked keyboard shortcuts, accessible choice names, pressed states, focus, save/progress status, readable-image gating and failed-save recovery.
