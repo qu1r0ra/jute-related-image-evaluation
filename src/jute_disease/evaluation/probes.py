@@ -7,6 +7,7 @@ beat its permutation null reports "no detectable ... at this setting".
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Any
 
 import numpy as np
@@ -118,8 +119,26 @@ def subset(system: PredictionSet, image_ids: Sequence[str]) -> PredictionSet:
     )
 
 
-def _family_strata(system: PredictionSet) -> list[tuple[np.ndarray, np.ndarray]]:
-    """Group families by size: member indices and sorted label multisets."""
+@dataclass(frozen=True)
+class Stratum:
+    """Same-size families: member indices, observed labels, sorted multisets.
+
+    The stratum is exchangeable when its families hold at least two distinct
+    label multisets. ``exchangeable`` is the single criterion: the share report
+    and the null draw both read it, so they cannot disagree about what moves.
+    """
+
+    index: np.ndarray
+    observed: np.ndarray
+    multisets: np.ndarray
+
+    @cached_property
+    def exchangeable(self) -> bool:
+        return len(np.unique(self.multisets, axis=0)) >= 2
+
+
+def _family_strata(system: PredictionSet) -> list[Stratum]:
+    """Group families by size, keeping each stratum's observed labels."""
     truth = system.truth_index()
     members: dict[str, list[int]] = {}
     for image, family in enumerate(system.groups):
@@ -130,7 +149,7 @@ def _family_strata(system: PredictionSet) -> list[tuple[np.ndarray, np.ndarray]]
     strata = []
     for size in sorted(by_size):
         index = np.array(by_size[size], dtype=np.int64).reshape(-1, size)
-        strata.append((index, np.sort(truth[index], axis=1)))
+        strata.append(Stratum(index, truth[index], np.sort(truth[index], axis=1)))
     return strata
 
 
@@ -138,10 +157,9 @@ def _family_strata(system: PredictionSet) -> list[tuple[np.ndarray, np.ndarray]]
 class Exchangeable:
     """Images and families in strata whose label multisets can differ.
 
-    A stratum of same-size families is exchangeable when it holds at least two
-    distinct label multisets. Families in any other stratum keep their labels in
-    every draw, so they add the same amount to the observed score and to the
-    null: the test stays valid but loses power in proportion to what they hold.
+    Families in any other stratum keep their observed labels in every draw, so
+    they add the same amount to the observed score and to the null: the test
+    stays valid but loses power in proportion to what they hold.
     """
 
     images: int
@@ -150,35 +168,40 @@ class Exchangeable:
     total_families: int
 
 
-def exchangeable_share(strata: list[tuple[np.ndarray, np.ndarray]]) -> Exchangeable:
+def exchangeable_share(strata: list[Stratum]) -> Exchangeable:
     images = families = total_images = total_families = 0
-    for index, labels in strata:
-        total_images += index.size
-        total_families += index.shape[0]
-        if len(np.unique(labels, axis=0)) >= 2:
-            images += index.size
-            families += index.shape[0]
+    for stratum in strata:
+        total_images += stratum.index.size
+        total_families += stratum.index.shape[0]
+        if stratum.exchangeable:
+            images += stratum.index.size
+            families += stratum.index.shape[0]
     return Exchangeable(images, families, total_images, total_families)
 
 
 def family_permutation(
     system: PredictionSet,
     rng: np.random.Generator,
-    strata: list[tuple[np.ndarray, np.ndarray]] | None = None,
+    strata: list[Stratum] | None = None,
 ) -> np.ndarray:
     """One null draw of true labels, permuted at family level.
 
-    Each family's label multiset travels as a unit: it is handed to another
-    family of the same size, so families with mixed labels keep their mix and
-    the class counts of the test set never change. Which member of the receiving
-    family carries which label is drawn at random, since the pixels of a family
-    are not ordered. Returns one class index per image.
+    In each exchangeable stratum a family's label multiset travels as a unit: it
+    is handed to another family of the same size, so families with mixed labels
+    keep their mix and the class counts of the test set never change. Which
+    member of the receiving family carries which label is drawn at random, since
+    the pixels of a family are not ordered. Families in a stratum that is not
+    exchangeable keep their observed labels, so a unique-size family is never
+    shuffled. Returns one class index per image.
     """
     permuted = np.zeros(len(system.image_ids), dtype=np.int64)
-    for index, labels in strata if strata is not None else _family_strata(system):
-        moved = labels[rng.permutation(len(labels))]
+    for stratum in strata if strata is not None else _family_strata(system):
+        if not stratum.exchangeable:
+            permuted[stratum.index] = stratum.observed
+            continue
+        moved = stratum.multisets[rng.permutation(len(stratum.multisets))]
         order = np.argsort(rng.random(moved.shape), axis=1)
-        permuted[index] = np.take_along_axis(moved, order, axis=1)
+        permuted[stratum.index] = np.take_along_axis(moved, order, axis=1)
     return permuted
 
 

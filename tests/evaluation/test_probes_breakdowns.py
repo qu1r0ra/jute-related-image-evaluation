@@ -269,6 +269,60 @@ def test_probe_with_no_exchangeable_families_is_not_informative() -> None:
     assert "not informative at this exchangeable share" in result.statement
 
 
+def _fixed_families_system(extra: tuple[tuple[str, ...], ...] = ()) -> PredictionSet:
+    # The only mixed-label family has a unique size (4), so no other family can
+    # trade multisets with it. Predictions equal the labels. Any further families
+    # in ``extra`` are appended, one per tuple of labels.
+    families = (("a",), ("a", "a", "a"), ("a", "b", "b", "a"), *extra)
+    ids, truth, groups = [], [], []
+    for f, labels in enumerate(families):
+        for j, label in enumerate(labels):
+            ids.append(f"f{f}i{j}")
+            truth.append(label)
+            groups.append(f"fam{f}")
+    return PredictionSet(
+        CLASSES,
+        tuple(ids),
+        tuple(truth),
+        tuple(groups),
+        tuple("src" for _ in ids),
+        {0: tuple(truth)},
+    )
+
+
+def test_a_unique_size_mixed_family_keeps_its_labels_in_the_null() -> None:
+    # Nothing is exchangeable, so the null is the observed score in every draw
+    # and the one-sided p-value is 1; shuffling inside the mixed family would
+    # lower the null and report a detection that nothing licenses.
+    system = _fixed_families_system()
+    test = permutation_test(system, 199, seed=1)
+    assert test.exchangeable.images == 0
+    assert test.observed == 1.0
+    assert np.all(test.null == test.observed)
+    assert test.p_value == 1.0
+
+
+def test_non_exchangeable_families_stay_fixed_while_exchangeable_ones_move() -> None:
+    # Size-2 families hold two distinct multisets, so they trade labels; the size-4
+    # mixed family has no partner and must read its observed labels every time.
+    system = _fixed_families_system(extra=(("a", "a"), ("b", "b"), ("a", "a")))
+    truth = system.truth_index()
+    groups = np.array(system.groups)
+    fixed = np.isin(groups, ["fam0", "fam1", "fam2"])
+    moving = ~fixed
+    rng = np.random.default_rng(2)
+    seen = set()
+    for _ in range(40):
+        labels = family_permutation(system, rng)
+        assert np.array_equal(labels[fixed], truth[fixed])
+        assert sorted(labels[moving]) == sorted(truth[moving])
+        seen.add(tuple(labels[moving]))
+    assert len(seen) > 1
+    test = permutation_test(system, 99, seed=1)
+    assert test.exchangeable.images == 6
+    assert test.exchangeable.families == 3
+
+
 def test_not_informative_wording_is_kept_for_a_low_share_without_detection() -> None:
     assert 0 < EXCHANGEABLE_MIN_SHARE < 1
     enough = probe_result(
