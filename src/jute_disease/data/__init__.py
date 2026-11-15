@@ -12,9 +12,12 @@ from jute_disease.data.audit import (
     synthetic_recall,
 )
 from jute_disease.data.audit_kit import (
+    RATING_VALUES,
+    audit_row_complete,
     build_audit_kit,
     collect_audit_kit,
     next_audit_sitting,
+    validate_audit_row,
 )
 from jute_disease.data.audit_sampling import (
     DEFAULT_DESIGN,
@@ -376,6 +379,9 @@ __all__ += [
 
 
 __all__ += [
+    "RATING_VALUES",
+    "audit_row_complete",
+    "validate_audit_row",
     "build_audit_kit",
     "collect_audit_kit",
     "evaluate_ratings",
