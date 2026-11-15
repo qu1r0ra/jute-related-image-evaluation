@@ -1,26 +1,20 @@
-# Synthetic usability and accessibility review
+# Synthetic design review
 
-Impeccable 4.9.1 (npm `impeccable`, engine 0.1.24) was inspected in an isolated temporary directory with `--no-hooks`. Context and the new-work, craft-floor and Operate references were used for this applet. No hooks, automatic dispatch, runtime dependencies, or repository-wide configuration were added. Run a scoped manual check from this directory with `npx impeccable@4.9.1 detect static/`. The scoped detector returned no findings for `static/`. `npm run design-check` scanned two CSS/JS files with regex-only checks and warned that parsed-page rules were not run; this result is not treated as a complete audit. Do not provide real study images or ratings to design tools.
+This file owns evidence from synthetic interface review. `PRODUCT.md` owns product constraints, `DESIGN.md` summarizes the current CSS, and `README.md` owns operation and required owner-viewer provenance. No real study images, ratings or protected data were used.
 
-## Findings and changes
+## Review findings
 
-The owner delegated routine design decisions in the task brief. The interface uses neutral surroundings and equal-weight choices; saving feedback sits beside the choices. Synthetic browser checks cover keyboard choices, undo, zoom, failed image loading, delayed and failed saves, recovery by reload, finishing, and read-only reopening. The image element is created only after the opaque route is known, with a generic alt label, so the initial document does not expose a guessed item URL or render a broken-image box.
+- Pair panels have equal sizing, opaque gray wells and independent scrolling. Choice labels, rubric text and sitting navigation remain readable at the reviewed desktop viewport.
+- Keyboard review covered visible focus, named choices, pressed states, save/progress status, image-load gating, and failed-save recovery.
+- Synthetic browser behavior covered keyboard choices, undo, full-resolution inspection, synchronized zoom, actual-pixel sizing, swap, reset on item change, mixed pair/scene/mask rows, finish and read-only reopening.
+- HTTP checks covered rating allowlists, opaque image routes, path containment, no-store responses and invalid requests.
+- A Windows CLI smoke test used a synthetic pair sitting and pool root; it checked the page, choice API, image routes, no-store headers, save and finish.
 
-Impeccable 4.9.1 scanned the running app with a synthetic scene and image. Its first static scan flagged the image with no initial `src`; moving image creation until after the sitting item loads resolved that finding. The running-page scan and the scoped static scan then reported no findings. The browser interaction review used synthetic fixtures in Chromium 159.0.8154.6 at 1200 × 900. It covered keyboard shortcuts, visible choice names, pressed states, focus outline, live save/progress status, readable-image gating, and failed-save recovery. No real images or ratings were used. No Fable recommendation artifact was present in this checkout or in issue #235, so the review followed the tracked `PRODUCT.md` and the issue's confirmed interaction and blinding constraints.
+## Detector and browser evidence
 
-The first pair-layout browser review found that the hidden single-image frame still reserved height because `.image-frame { display: flex }` overrode the browser's hidden styling. At 1200 × 900 this pushed the pair content and navigation below the viewport. It also found that fixed panel height plus `aspect-ratio` could make frames wider than their columns and overlap the rating area. The app now honors `[hidden]` and sizes desktop pair frames from their available width. Browser assertions cover both hidden states and frame containment.
+- Impeccable 4.9.1 `detect` on `static/` reported no findings. The `npm run design-check` target scans the two CSS/JS files with regex rules; its output says parsed-page rules were not run. Treat this as a scoped static check, not a complete accessibility or usability audit.
+- Synthetic browser interaction review: Chromium 159.0.8154.6 at 1200 × 900. It checked keyboard shortcuts, accessible choice names, pressed states, focus, save/progress status, readable-image gating and failed-save recovery.
+- Windows visual review: Chrome 157 at 1200 × 900. Pair frames fit their columns and sitting navigation remained in view. The accessibility snapshot showed image and rating group names, generic image alt text, labeled zoom and sitting navigation; no console errors were observed.
+- Python Playwright browser coverage and the Windows CLI smoke use generated fixtures. These checks do not establish the viewing conditions of a real owner sitting.
 
-After those fixes, a Windows Chrome 157 review at 1200 × 900 showed two equal, opaque gray image panels (321 × 240/241 CSS pixels), readable controls and rubric, and navigation within the viewport. No console errors were present. The browser accessibility snapshot showed a named image region, a named rating group, generic image alt text, visible choice names and pressed states, a labeled zoom slider, and sitting navigation. Text and controls use dark foregrounds on the neutral gray surround or white surfaces; buttons are 46 px high and the focus ring is visible. The pair flow keeps identity, path, pool, and distribution metadata out of the page.
-
-The synthetic 1440 × 900 browser view was previously inspected: the initial image frame pushed navigation below the viewport, so its height was reduced. The current 1200 × 900 view keeps the choice and navigation controls visible without scrolling. Context7 documentation for Flask 3.1.2 and Playwright Python informed the local-request and browser-routing checks. The spec's separate finish reviewer was not launched because the worker was explicitly given no descendants and no separate review; the integration owner retains that review.
-
-Synthetic browser behavior checks cover the four keyboard-selectable ratings, save failure and reload recovery, undo, full-resolution loading, synchronized zoom, 1:1 display, swap, reset on item change, transition from pair to scene to mask items, required-field gating, finish, and read-only reopening. HTTP checks cover the rating allowlist, opaque image routes, path containment, no-store responses, and invalid requests. No study data or protected ratings were read or used.
-
-## Evidence
-
-- `impeccable detect --json static/`: `[]`.
-- `npm run design-check`: two CSS/JS files scanned; tool reports that parsed-page rules were not run.
-- Python Playwright Chromium browser test: keyboard choice, save failure/reload, undo, zoom/swap, mixed pair/scene/mask sitting, finish, and read-only reopening passed.
-- Windows CLI smoke: launched a synthetic pair sitting with `--pool-root A=...`; HTML, four-choice API, both image routes, no-store headers, save, and finish passed.
-- Browser inspection: Chrome 157, Windows, 1200 × 900 CSS viewport; pair panels fit their columns and navigation stayed in view after the layout fix.
-- All fixtures used locally generated synthetic images and ratings.
+The review aid is installed under this applet. No repository-wide Impeccable hook or automatic worker dispatch is configured. For each real owner sitting, capture instrument version, browser and version, display resolution, browser viewport size, browser zoom and operating-system display scaling in study methods as required by [#235](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/235) and [#237](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/237).

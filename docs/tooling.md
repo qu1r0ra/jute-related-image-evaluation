@@ -171,7 +171,7 @@ Each `audit-sitting` call writes `sitting-NNN.csv` holding only items not yet ra
 
 `audit-kit --held-out PATH` takes the `held-out.json` of `data scene-sets` (below) and adds one `scene` item per image, placed after the mask items and before the pairs and shuffled among themselves with the kit seed. A scene item is the image alone, copied into `scenes/` under its image ID, with no overlay, pool, label, source path or automatic tag; the kit refuses an image whose content does not match its ID. A sitting sheet shows a scene row with the image in `image_a` and only `scene_tag` to fill (any other rating on that row is refused), and `audit-sitting` prints the scene rubric with every sheet that holds scene rows. `audit-collect` then also writes `owner-scenes.csv` (`image_id`, `scene_tag`, `rubric_version`), the owner's first-pass scene tags. A kit with scene items is written as `jute-audit-kit-v2`; a kit without them keeps `jute-audit-kit-v1` and its former item order, and both remain readable.
 
-For owner entry on Windows, use the local browser instrument documented in [`rating_applet/README.md`](../src/jute_disease/rating_applet/README.md). It opens the existing sheet in order, handles mask, scene and pair rows, and saves each explicit choice. Pair image roots are configured with `--pool-root A=PATH` (one per pair pool); the app uses pair pool metadata from the kit and opaque, contained image routes. Finish a sitting in the app before using the unchanged external `audit-sitting` and `audit-collect` commands to make the next sheet and owner outputs.
+For Windows owner rating, follow the applet's [README](../src/jute_disease/rating_applet/README.md), which owns launch, pool-root, operation and viewer-provenance instructions. The [applet PRODUCT.md](../src/jute_disease/rating_applet/PRODUCT.md) owns product constraints; its [DESIGN.md](../src/jute_disease/rating_applet/DESIGN.md) and [DESIGN-REVIEW.md](../src/jute_disease/rating_applet/DESIGN-REVIEW.md) own the CSS snapshot and synthetic review evidence.
 
 Optionally, `--no-merge-ratings PATH` reads a UTF-8 CSV with the exact header
 `image_a,image_b,verdict`. Paths are relative to the target image root and must
@@ -243,29 +243,8 @@ The record scores the thresholds as follows:
 
 The record holds the per-pool and pooled results, the weighted and per-pool confusion matrices, each image's final tag, predicted tag and features, and `inputs`: the SHA-256 of the held-out set, the thresholds, `compare.json`, the first-pass sheet, each judge sheet, the final sheet and the recheck sheet. Its `digest` is the SHA-256 of its canonical JSON. The held-out test is run once: `test` refuses to run when the record already exists, and never replaces it.
 
-`data masks-fixture --output PATH` runs this workflow end to end with local synthetic images, the colour-threshold backend, a synthetic protected-test partition, and explicitly synthetic ratings. Its output is fixture evidence only; it contains no real threshold, owner rating, or audit result.
+`data masks-fixture --output PATH` runs this workflow end to end with synthetic images, the colour-threshold backend, a synthetic protected-test partition, ratings and evaluation. Its output is fixture evidence only and cannot be bound as a real audit result. It does not create an applet sitting or pair-image roots.
 
 ### Rating app persistence and recovery
 
-The rating app stores a backup for each opened session and a versioned change
-journal under `.rating-applet/<sitting filename>/` beside the sitting. These
-private files contain item identities and rating changes; keep the directory
-private and retain it with the sitting. It is ignored by Git and lies outside
-the collector's top-level sitting-sheet glob. Do not edit the sheet or run
-collection while the app is writing.
-
-An interrupted save is reconciled on the next access: if the sheet matches the
-previous revision, the attempted change is abandoned; if it matches the new
-revision, the change is recorded as committed. If neither matches, or the
-journal is incomplete, the app reports that recovery is required. Stop editing
-and preserve the sheet, journal and backups for inspection; do not delete or
-modify the journal to bypass the check. A failed save response does not confirm
-whether a replacement reached disk, so reload and check the sitting before
-continuing.
-
-Finishing a complete sitting makes it read-only. A genuine entry correction
-requires a deliberate external call to `reopen_sitting(sheet, reason)` from
-`jute_disease.rating_applet`; the nonempty reason is recorded in the private
-journal. Reopening is refused after collection, and collection itself also makes
-the sitting read-only. Generate the next sitting and collect using the existing
-commands above, outside the app.
+The applet [README](../src/jute_disease/rating_applet/README.md) owns save, recovery, finish and reopen behavior. It also records the required owner-viewer provenance fields. Use that guide when changing those procedures; this document owns the surrounding data workflow.

@@ -28,3 +28,7 @@ The app runs locally against an existing sitting. Items remain in sheet order; s
 ## Accessibility & Inclusion
 
 Support keyboard operation, visible focus, readable controls, and clear save and error feedback.
+
+## Document ownership
+
+This file owns product purpose, users and protocol constraints. `static/style.css` is the current UI implementation; [DESIGN.md](DESIGN.md) is its CSS-derived visual snapshot. [README.md](README.md) owns launch, operation and owner-viewer provenance. [DESIGN-REVIEW.md](DESIGN-REVIEW.md) owns synthetic review evidence and detector limits.

@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-15T19:57:51Z",
+  "title": "Design System: Local blind rating instrument",
+  "extensions": {
+    "colorMeta": {
+      "text": { "role": "neutral", "displayName": "Text" },
+      "page": { "role": "neutral", "displayName": "Page" },
+      "image-well": { "role": "neutral", "displayName": "Image well" },
+      "muted-text": { "role": "neutral", "displayName": "Muted text" },
+      "surface": { "role": "neutral", "displayName": "White surface" },
+      "selected-choice": { "role": "neutral", "displayName": "Selected charcoal" },
+      "divider": { "role": "neutral", "displayName": "Divider" },
+      "focus": { "role": "primary", "displayName": "Focus blue" }
+    },
+    "typographyMeta": {
+      "body": { "displayName": "System UI", "purpose": "Default interface text and inherited button typography." }
+    },
+    "breakpoints": [
+      { "name": "workspace-single-column", "value": "1050px" },
+      { "name": "pair-single-column", "value": "640px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Rating button",
+      "kind": "button",
+      "refersTo": "rating-button",
+      "description": "Explicit rating choice with selected, disabled, and visible keyboard-focus states.",
+      "html": "<button class=\"ds-rating-button\" type=\"button\" aria-pressed=\"true\">Exact</button>",
+      "css": ".ds-rating-button { background: #fff; border: 1px solid #555; border-radius: .25rem; padding: .65rem .8rem; color: #222; font: inherit; cursor: pointer; } .ds-rating-button[aria-pressed=\"true\"] { background: #444; color: #fff; } .ds-rating-button:disabled { opacity: .5; cursor: default; } .ds-rating-button:focus-visible { outline: 3px solid #1e4c79; outline-offset: 3px; }"
+    },
+    {
+      "name": "Pair image panel",
+      "kind": "custom",
+      "description": "Equal-width, scrollable panel for one side of a pair comparison.",
+      "html": "<div class=\"ds-image-panel\"><img alt=\"Image A for this item\" src=\"\"></div>",
+      "css": ".ds-image-panel { width: 100%; height: auto; aspect-ratio: 4 / 3; overflow: auto; background: #777; display: flex; align-items: safe center; justify-content: safe center; } .ds-image-panel img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; } .ds-image-panel img.full { max-width: none; max-height: none; } @media (max-width: 1050px) { .ds-image-panel { height: min(40vh, 460px); } } @media (max-width: 640px) { .ds-image-panel { height: 36vh; } }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Quiet Instrument",
+    "overview": "This is an operate interface for one reviewer working through an existing blind sitting. The observed visual system gives the images and explicit choices most of the attention. Neutral page and control colors, system typography, and simple borders support scanning without adding visual cues about an answer.\n\nThe values below are a snapshot extracted from static/style.css. That stylesheet remains the implementation source of truth. The interface currently has no shadow or motion rules.",
+    "keyCharacteristics": [
+      "Neutral page and control surfaces with a gray image well.",
+      "System UI typography and compact heading hierarchy.",
+      "Equal-sized pair panels with independently scrollable image content.",
+      "Visible keyboard focus and selected-choice state."
+    ],
+    "rules": [],
+    "dos": [
+      "Do preserve equal pair-panel sizing and the image aspect ratio.",
+      "Do keep keyboard focus visible with the stylesheet's focus outline.",
+      "Do keep selected choices visibly distinct from default choices."
+    ],
+    "donts": [
+      "Don't add decorative shadows or motion that are absent from the current interface.",
+      "Don't add visual styling that suggests a preferred rating."
+    ]
+  }
+}

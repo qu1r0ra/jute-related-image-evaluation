@@ -1,6 +1,8 @@
 # Local blind rating instrument
 
-The app opens an existing sitting sheet in a local browser. It does not create sheets, collect ratings, or run statistical gates. Work only from the synthetic fixtures during development; for study use, the owner opens the existing sheet in this reviewed instrument and keeps its prior values.
+The app opens an existing sitting sheet in a local browser. It does not create sheets, collect ratings, or run statistical gates. Use synthetic data for development and review; for study use, the owner opens the existing sheet in the reviewed instrument and retains its prior values.
+
+`PRODUCT.md` owns product and protocol constraints. `DESIGN.md` summarizes the current CSS, and `DESIGN-REVIEW.md` records synthetic review evidence and its limits. Applet developer instructions are in [AGENTS.md](AGENTS.md).
 
 ## Launch
 
@@ -14,12 +16,14 @@ Pair images are resolved relative to the pool roots configured for that kit. Add
 
 ```powershell
 uv run python -m jute_disease.rating_applet path/to/kit/sitting-001.csv `
-  --pool-root A=data/pools/A `
-  --pool-root B=data/pools/B `
-  --pool-root C=data/pools/C
+  --pool-root A=synthetic/pools/A `
+  --pool-root B=synthetic/pools/B `
+  --pool-root C=synthetic/pools/C
 ```
 
-The command reports the local URL. Open it on the same Windows computer and leave the terminal running. The app binds to `127.0.0.1`, uses the bundled Python assets, and makes no runtime network requests. `--port` selects another local port if 8765 is occupied. Do not configure a root from a different pool than its kit metadata; the app serves only the two paths listed on each pair row, after checking containment under that pool's root.
+The example roots are placeholders for directories containing the kit-listed synthetic pair images. The `data masks-fixture` workflow creates synthetic mask-audit evidence; it does not create an applet sitting or pair-image roots. Applet tests build their own temporary synthetic kits and roots in `tests/data/test_rating_applet.py`.
+
+The command reports the local URL. Open it on the same Windows computer and leave the terminal running. The app binds to `127.0.0.1`, uses the bundled Python assets, and makes no runtime network requests. `--port` selects another local port if 8765 is occupied. Relative `--pool-root` paths resolve from the launch directory. Configure each pair pool named by the sitting; the app serves only the two paths listed on each pair row, after checking containment under that pool's root.
 
 ## Rate a sitting
 
@@ -31,7 +35,7 @@ The item order comes from the sheet. The header shows only its position, total, 
 
 Buttons and shortcuts are equally available. Keys `1`–`3` select mask quality, `Q`/`W`/`E` select scene, and `1`–`4` select pair ratings. A shortcut is ignored while a zoom control or text entry has focus. Each selection is saved immediately. Wait for **Saved** before continuing; **Saving** blocks more input, and a failed save blocks navigation until the page is reloaded and its confirmed state is checked. The app never auto-advances.
 
-Use **Inspect full resolution** to load the original at its actual dimensions. The pair **Zoom** slider scales both images together. **Actual pixels** sets a one-to-one display scale; both panels remain independently scrollable. **Swap image order** changes only which panel is presented first. The pair identity, routes, and saved rating do not change. Swap and zoom reset when the next item opens.
+Use **Inspect full resolution** to load the original, then choose **Actual pixels**. It sets each image to the browser's intrinsic `naturalWidth` at scale 1, in CSS pixels. This is a density-corrected CSS size; browser zoom, device scale and display scaling affect its physical on-screen size. Both panels remain independently scrollable. The pair **Zoom** slider scales both images together. **Swap image order** changes only which panel is presented first. The pair identity, routes, and saved rating do not change. Swap and zoom reset when the next item opens.
 
 Use **Previous** to revisit a row and **Undo last choice** to reverse the latest saved choice on the current row. **Next** is available only after all required fields are saved and every required image loads. The progress indicator reports counts, never rating distributions. Reopening an unfinished sheet starts at its first incomplete row. A failed or missing image blocks advancing.
 
@@ -52,6 +56,6 @@ Backups, journals, finish records and preview caches live under `.rating-applet/
 
 ## Viewer provenance
 
-This tracked instrument is version **1.1.0**. Pair comparison uses equal 4:3 panels, aspect-preserving previews capped at 1400 × 1400 pixels, full-resolution inspection, synchronized 1×–4× zoom, and an explicit 1:1 actual-pixel option. The browser version and display resolution used for an actual owner sitting can be recorded with study methods; synthetic browser review alone does not claim identical viewing conditions.
+This instrument is version **1.1.0**. Pair comparison uses equal panels, aspect-preserving previews capped at 1400 × 1400 pixels, full-resolution inspection, synchronized 1×–4× zoom, and an explicit one-source-pixel-per-CSS-pixel option.
 
-The scoped design aid is Impeccable 4.9.1 (engine 0.1.24), with no hooks or automatic worker dispatch. The synthetic accessibility and usability review, including its browser and viewport, is recorded in [DESIGN-REVIEW.md](DESIGN-REVIEW.md). No real study images or ratings were used in that review.
+For every real owner sitting, record the instrument version, browser and version, display resolution, browser viewport size, browser zoom and operating-system display scaling in study methods. Record any other viewer configuration that changes how image detail appears. This capture is required by issues [#235](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/235) and [#237](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/237); synthetic browser review does not substitute for it. Review evidence and detector limits are in [DESIGN-REVIEW.md](DESIGN-REVIEW.md).
