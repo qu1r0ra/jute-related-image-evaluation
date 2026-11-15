@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 
-from flask import Flask, jsonify, request, send_file
+from flask import Flask, jsonify, request, send_file, send_from_directory
 from PIL import Image, ImageOps
 
 from jute_disease.data import MASK_RUBRIC, audit_row_complete, validate_audit_row
@@ -189,6 +189,23 @@ def create_app(sheet: Path) -> Flask:
     runtime = _runtime(sheet)
     session = uuid.uuid4().hex
     app = Flask(__name__)
+
+    @app.before_request
+    def local_request() -> object:
+        host = request.host.partition(":")[0].lower()
+        origin = request.headers.get("Origin")
+        if (
+            host not in {"127.0.0.1", "localhost"}
+            or request.headers.get("Sec-Fetch-Site") == "cross-site"
+            or (origin is not None and origin != request.host_url.rstrip("/"))
+        ):
+            return "Forbidden.", 403
+        return None
+
+    @app.get("/")
+    def index() -> object:
+        return send_from_directory(Path(__file__).parent / "static", "index.html")
+
     with _locked(runtime):
         try:
             content, _, rows = _read(sheet)
@@ -404,6 +421,7 @@ def create_app(sheet: Path) -> Flask:
                 if (
                     data.get("revision") != _revision(runtime, content)
                     or not rows
+                    or any(row["kind"] not in {"mask", "scene"} for row in rows)
                     or not all(map(audit_row_complete, rows))
                 ):
                     return jsonify(

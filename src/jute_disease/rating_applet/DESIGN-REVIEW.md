@@ -1,0 +1,7 @@
+# Development design aid
+
+Impeccable 4.9.1 (npm `impeccable`, engine 0.1.24) was inspected in an isolated temporary directory with `--no-hooks`. Context and the new-work, craft-floor and Operate references were used for this applet. No hooks, automatic dispatch or runtime dependency are installed. Run a scoped manual check from this directory with `npx impeccable@4.9.1 detect static/`. Do not provide real study images or ratings to design tools.
+
+The owner delegated routine design decisions in the task brief. The interface uses neutral surroundings and equal-weight choices; saving feedback sits beside the choices. Synthetic browser checks cover keyboard choices, undo, zoom, failed image loading, finishing and read-only reopening. The detector warns that the image has no initial source; JavaScript assigns its opaque route after loading the item. This is not a substitute for the integration owner's consolidated interface review.
+
+The synthetic 1440 × 900 browser view was inspected: the initial image frame pushed navigation below the viewport, so its height was reduced. A browser test checks keyboard entry, correction, zoom and unreadable-image blocking. Context7 CLI supplied the Flask 3.1.2 file-response guidance. The spec's separate finish reviewer was not launched because the worker was explicitly given no descendants and no separate review; the integration owner retains that review.

@@ -502,3 +502,119 @@ def test_image_routes_only_serve_contained_sitting_images(tmp_path: Path) -> Non
     assert client.get("/images/1/original").status_code == 200
     assert client.get("/images/2/original").status_code == 404
     assert client.get("/images/3/original").status_code == 404
+
+
+@pytest.mark.serial
+def test_browser_rates_and_finishes_synthetic_scene(tmp_path: Path) -> None:
+    from threading import Thread
+
+    from PIL import Image
+    from playwright.sync_api import sync_playwright
+    from werkzeug.serving import make_server
+
+    (tmp_path / "kit.json").write_text(
+        json.dumps({"scene_rubric": {"anchors": {"field": "Outdoor structure"}}}),
+        encoding="utf-8",
+    )
+    Image.new("RGB", (80, 40), "gray").save(tmp_path / "image.png")
+    sheet = tmp_path / "sitting-001.csv"
+    sheet.write_text(
+        "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\nsecret,scene,image.png,,,,,\n",
+        encoding="utf-8",
+    )
+    server = make_server("127.0.0.1", 0, create_app(sheet), threaded=True)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page()
+            page.goto(f"http://127.0.0.1:{server.server_port}/")
+            page.get_by_role("button", name="Field").click()
+            page.get_by_text("Saved", exact=True).wait_for()
+            page.get_by_role("button", name="Finish sitting").click()
+            page.get_by_text("Sitting finished", exact=False).wait_for()
+            page.reload()
+            page.get_by_text("Read-only", exact=False).wait_for()
+            browser.close()
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+@pytest.mark.serial
+def test_browser_mask_keyboard_undo_and_unreadable_image(tmp_path: Path) -> None:
+    from threading import Thread
+
+    from PIL import Image
+    from playwright.sync_api import sync_playwright
+    from werkzeug.serving import make_server
+
+    (tmp_path / "kit.json").write_text(
+        json.dumps({"scene_rubric": {"anchors": {}}}), encoding="utf-8"
+    )
+    Image.new("RGB", (120, 90), "gray").save(tmp_path / "mask.png")
+    sheet = tmp_path / "sitting-001.csv"
+    sheet.write_text(
+        "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\nsecret,mask,,,mask.png,,,\nsecret2,scene,missing.png,,,,,\n",
+        encoding="utf-8",
+    )
+    server = make_server("127.0.0.1", 0, create_app(sheet), threaded=True)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1200, "height": 900})
+            page.goto(f"http://127.0.0.1:{server.server_port}/")
+            page.get_by_role("button", name="Pass").wait_for()
+            page.keyboard.press("1")
+            page.get_by_text("Saved", exact=True).wait_for()
+            page.keyboard.press("w")
+            page.get_by_role("button", name="Next").wait_for(state="visible")
+            page.wait_for_function("!document.querySelector('#next').disabled")
+            page.get_by_role("button", name="Undo last choice").click()
+            page.wait_for_function(
+                "document.querySelector('#next').disabled && document.querySelector('#save').textContent === 'Saved'"
+            )
+            page.keyboard.press("w")
+            page.wait_for_function("!document.querySelector('#next').disabled")
+            page.get_by_role("button", name="Inspect full resolution").click()
+            page.get_by_role("button", name="Fit preview").wait_for()
+            page.wait_for_function("!document.querySelector('#next').disabled")
+            page.get_by_role("button", name="Next").click()
+            page.get_by_text("Image unavailable.", exact=False).wait_for()
+            assert page.get_by_role("button", name="Next").is_disabled()
+            browser.close()
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_cross_site_requests_cannot_read_local_sitting(tmp_path: Path) -> None:
+    sheet = tmp_path / "sitting-001.csv"
+    sheet.write_text(
+        "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\nsecret,scene,image.png,,,,,\n",
+        encoding="utf-8",
+    )
+    client = create_app(sheet).test_client()
+    assert (
+        client.get("/api/sitting", headers={"Host": "attacker.example"}).status_code
+        == 403
+    )
+    assert (
+        client.get("/api/sitting", headers={"Sec-Fetch-Site": "cross-site"}).status_code
+        == 403
+    )
+
+
+def test_pair_editing_and_finishing_are_refused(tmp_path: Path) -> None:
+    sheet = tmp_path / "sitting-001.csv"
+    sheet.write_text(
+        "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\nprivate,pair,a.png,b.png,,exact,,\n",
+        encoding="utf-8",
+    )
+    client = create_app(sheet).test_client()
+    revision = client.get("/api/sitting").json["revision"]
+    assert client.get("/api/items/1").status_code == 400
+    assert client.post("/api/finish", json={"revision": revision}).status_code == 409
