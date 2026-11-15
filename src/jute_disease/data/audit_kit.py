@@ -184,7 +184,8 @@ def build_audit_kit(
     }
 
 
-def _is_rated(row: dict[str, str]) -> bool:
+def audit_row_complete(row: dict[str, str]) -> bool:
+    """Return whether a sitting row has all ratings required by the collector."""
     if row["kind"] == "pair":
         return row["rating"] in RATING_VALUES
     if row["kind"] == "scene":
@@ -194,7 +195,7 @@ def _is_rated(row: dict[str, str]) -> bool:
     )
 
 
-def _check_row(row: dict[str, str]) -> None:
+def validate_audit_row(row: dict[str, str]) -> None:
     """Refuse a value outside the rubric; blank cells mean not yet rated."""
     if row["kind"] == "pair":
         values = {"rating": RATING_VALUES}
@@ -228,8 +229,8 @@ def _ratings(
             for row in csv.DictReader(handle):
                 if row["item_id"] not in items:
                     raise ValueError(f"{sheet.name}: unknown item {row['item_id']}")
-                _check_row(row)
-                if not _is_rated(row):
+                validate_audit_row(row)
+                if not audit_row_complete(row):
                     continue
                 kept = {
                     "rating": row["rating"],
