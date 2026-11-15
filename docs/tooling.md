@@ -242,3 +242,28 @@ The record scores the thresholds as follows:
 The record holds the per-pool and pooled results, the weighted and per-pool confusion matrices, each image's final tag, predicted tag and features, and `inputs`: the SHA-256 of the held-out set, the thresholds, `compare.json`, the first-pass sheet, each judge sheet, the final sheet and the recheck sheet. Its `digest` is the SHA-256 of its canonical JSON. The held-out test is run once: `test` refuses to run when the record already exists, and never replaces it.
 
 `data masks-fixture --output PATH` runs this workflow end to end with local synthetic images, the colour-threshold backend, a synthetic protected-test partition, and explicitly synthetic ratings. Its output is fixture evidence only; it contains no real threshold, owner rating, or audit result.
+
+### Rating app persistence and recovery
+
+The rating app stores a backup for each opened session and a versioned change
+journal under `.rating-applet/<sitting filename>/` beside the sitting. These
+private files contain item identities and rating changes; keep the directory
+private and retain it with the sitting. It is ignored by Git and lies outside
+the collector's top-level sitting-sheet glob. Do not edit the sheet or run
+collection while the app is writing.
+
+An interrupted save is reconciled on the next access: if the sheet matches the
+previous revision, the attempted change is abandoned; if it matches the new
+revision, the change is recorded as committed. If neither matches, or the
+journal is incomplete, the app reports that recovery is required. Stop editing
+and preserve the sheet, journal and backups for inspection; do not delete or
+modify the journal to bypass the check. A failed save response does not confirm
+whether a replacement reached disk, so reload and check the sitting before
+continuing.
+
+Finishing a complete sitting makes it read-only. A genuine entry correction
+requires a deliberate external call to `reopen_sitting(sheet, reason)` from
+`jute_disease.rating_applet`; the nonempty reason is recorded in the private
+journal. Reopening is refused after collection, and collection itself also makes
+the sitting read-only. Generate the next sitting and collect using the existing
+commands above, outside the app.
