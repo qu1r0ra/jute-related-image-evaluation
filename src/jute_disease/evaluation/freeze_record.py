@@ -1056,11 +1056,23 @@ class Authorization:
     post_hoc: bool
     runs: tuple[RunEntry, ...]
     body: Mapping[str, Any]
+    recorded_fit_ids: tuple[str, ...] | None = None
 
     @property
     def missing_fit_ids(self) -> tuple[str, ...]:
-        """Scored frozen fits with no authorized run; a read without them is partial."""
-        covered = {run.fit_id for run in self.runs}
+        """Scored frozen fits the run record does not cover.
+
+        ``runs`` are the fits this read selected, which can be one cell of the
+        matrix; coverage is the whole run record's, so a filtered read of a
+        complete matrix lists nothing as missing. Without ``recorded_fit_ids``
+        the selected runs are all the coverage there is.
+        """
+        recorded = (
+            (run.fit_id for run in self.runs)
+            if self.recorded_fit_ids is None
+            else self.recorded_fit_ids
+        )
+        covered = set(recorded)
         return tuple(sorted(scored_fit_ids(self.body.get("fit_ids", ())) - covered))
 
 
@@ -1230,7 +1242,9 @@ def authorize_test_read(
     entries = tuple(
         RunEntry(fit_id=fit_id, **fits[fit_id]) for fit_id in sorted(wanted)
     )
-    return Authorization(record["hash"], bool(body["post_hoc"]), entries, body)
+    return Authorization(
+        record["hash"], bool(body["post_hoc"]), entries, body, tuple(sorted(fits))
+    )
 
 
 def log_test_read(

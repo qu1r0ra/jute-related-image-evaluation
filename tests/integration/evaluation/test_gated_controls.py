@@ -5,6 +5,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 from shutil import copytree
+from typing import Any
 
 import pytest
 
@@ -486,14 +487,15 @@ def test_record_made_after_a_read_is_flagged_post_hoc(
     assert json.loads(record.read_text(encoding="utf-8"))["body"]["post_hoc"] is False
 
 
-def test_all_analyses_run_through_the_evaluator(
+def _analyses_report(
     tmp_path: Path,
     target: Path,
     root: Path,
     policy_dir: Path,
-    passing_mask_audit_report: Path,
+    audit_report: Path,
     capsys: pytest.CaptureFixture[str],
-) -> None:
+) -> tuple[dict[str, Any], list[str]]:
+    """Freeze, run every analysis through ``evaluate test`` and return its report."""
     fits = {
         "full": FIT.format(0),
         "leaf_only": "fixture/leaf/seed-0",
@@ -506,7 +508,7 @@ def test_all_analyses_run_through_the_evaluator(
         target,
         root,
         policy_dir,
-        passing_mask_audit_report,
+        audit_report,
         capsys,
         [fit for variant, fit in fits.items() if variant != "pad_cue"],
         config=minimal_benchmark(tmp_path),
@@ -573,6 +575,20 @@ def test_all_analyses_run_through_the_evaluator(
         12,
     )
     report = json.loads((tmp_path / "out.json").read_text(encoding="utf-8"))
+    return report, sample
+
+
+def test_all_analyses_run_through_the_evaluator(
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    passing_mask_audit_report: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    report, sample = _analyses_report(
+        tmp_path, target, root, policy_dir, passing_mask_audit_report, capsys
+    )
     system = report["systems"]["mobilenet_v2_direct"]
     assert system["class_scene_cells"] and system["scene_summaries"]
     assert system["leaf_only"] and system["full_on_leaf_sample"]
@@ -586,6 +602,62 @@ def test_all_analyses_run_through_the_evaluator(
     assert border["headline"] is None and "fewer than 50" in border["headline_withheld"]
     assert border["pad_cue"] is not None
     assert report["leaf_sample"]["image_ids"] == sample
+
+
+def test_a_filtered_read_of_a_complete_matrix_stays_confirmatory(
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Selecting fits with ``--fit-id`` does not turn recorded fits into missing ones."""
+    record, run_record, _ = _setup_runs(
+        tmp_path, target, root, policy_dir, mask_audit_report, capsys
+    )
+    selected = ("--fit-id", FIT.format(0), "--fit-id", LEAF_FIT.format(0))
+    _cli(*_test_args(tmp_path, target, root, record, run_record), *selected)
+    report = json.loads((tmp_path / "out.json").read_text(encoding="utf-8"))
+    assert report["missing_fit_ids"] == []
+    assert report["confirmatory"] is True
+    assert set(report["systems"]) == {"mobilenet_v2_direct"}
+
+
+def test_a_failed_mask_audit_withholds_the_background_statement(
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    mask_audit_report: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ADR 0002 gates the probe on the audit, so a failed audit reports no result."""
+    report, _ = _analyses_report(
+        tmp_path, target, root, policy_dir, mask_audit_report, capsys
+    )
+    probe = report["systems"]["mobilenet_v2_direct"]["background_probe"]
+    assert probe["reported"] is False
+    assert "audit did not pass" in probe["withheld"]
+    assert "statement" not in probe and "detected" not in probe
+    assert "p_value" not in probe
+
+
+def test_a_passed_mask_audit_reports_the_background_statement(
+    tmp_path: Path,
+    target: Path,
+    root: Path,
+    policy_dir: Path,
+    passing_mask_audit_report: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    report, _ = _analyses_report(
+        tmp_path, target, root, policy_dir, passing_mask_audit_report, capsys
+    )
+    probe = report["systems"]["mobilenet_v2_direct"]["background_probe"]
+    assert probe["reported"] is True
+    assert probe["statement"]
+    assert 0 <= probe["p_value"] <= 1
 
 
 def test_two_runs_for_one_system_and_seed_are_refused(

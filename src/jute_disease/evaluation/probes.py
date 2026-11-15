@@ -41,6 +41,14 @@ NOT_INFORMATIVE = "not informative at this exchangeable share"
 MIN_RETAINED_PER_CLASS = 50
 NO_BORDER = "no detectable border information at this frame width"
 NO_BACKGROUND = "no detectable background information at this setting"
+BACKGROUND_WITHHELD = (
+    "not reported because the ADR 0002 mask audit did not pass; the background "
+    "inputs are built from masks the audit did not clear"
+)
+DETECTED_BACKGROUND = (
+    "background-only input (leaf blanked) carries label information, which can "
+    "include leaf shape or aspect ratio"
+)
 HEADLINE_LIMIT = (
     "The mask audit rates whole-leaf mask quality; leaf share in a 32 px strip is "
     "more sensitive to mask edge errors."
@@ -326,7 +334,7 @@ def probe_result(
 def background_probe(system: PredictionSet, **kwargs: Any) -> ProbeResult:
     return probe_result(
         system,
-        "background-only pixels carry label information",
+        DETECTED_BACKGROUND,
         NO_BACKGROUND,
         **kwargs,
     )

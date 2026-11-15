@@ -10,7 +10,9 @@ from jute_disease.evaluation.breakdowns import (
 )
 from jute_disease.evaluation.probes import (
     EXCHANGEABLE_MIN_SHARE,
+    NO_BACKGROUND,
     NOT_INFORMATIVE,
+    background_probe,
     border_probe,
     family_permutation,
     frame_leaf_share,
@@ -220,6 +222,22 @@ def test_probe_decision_uses_the_permutation_p_value() -> None:
     )
     assert noise.detected == (noise.p_value < 0.05)
     assert noise.macro_f1.lower <= noise.macro_f1.estimate <= noise.macro_f1.upper
+
+
+def test_a_background_detection_names_the_leaf_shape_it_cannot_exclude() -> None:
+    """The blanked leaf still leaves its silhouette and aspect ratio in the input."""
+    options = {"resamples": 50, "permutations": 199}
+    signal = background_probe(
+        _mixed_system(np.random.default_rng(3), 4, predicted="truth"), **options
+    )
+    assert signal.detected
+    assert signal.statement == (
+        "background-only input (leaf blanked) carries label information, "
+        "which can include leaf shape or aspect ratio"
+    )
+    noise = background_probe(_mixed_system(np.random.default_rng(4), 4), **options)
+    if not noise.detected:
+        assert noise.statement in (NO_BACKGROUND, NOT_INFORMATIVE)
 
 
 def test_probe_reports_the_share_of_images_in_exchangeable_strata() -> None:
