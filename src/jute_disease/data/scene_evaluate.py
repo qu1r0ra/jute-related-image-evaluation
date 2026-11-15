@@ -295,8 +295,7 @@ def _weighted(weights: Sequence[Fraction], hits: Sequence[bool]) -> dict[str, An
     correct = sum((w for w, hit in zip(weights, hits, strict=True) if hit), Fraction(0))
     exact = correct / support
     effective = float(support**2 / sum((w * w for w in weights), Fraction(0)))
-    # The effective size is not a whole number; the Wilson formula takes it as is.
-    interval = wilson_interval(float(exact) * effective, effective)  # type: ignore[arg-type]
+    interval = wilson_interval(float(exact) * effective, effective)
     return {
         "exact": exact,
         "estimate": float(exact),
