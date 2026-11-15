@@ -46,7 +46,9 @@ CAM_SAMPLE_SEED = 0
 OUTPUT_MANIFEST = "output-manifest.json"
 # The three sanity-check constants below (sample size, cutoff, defined share) are
 # prespecified heuristic thresholds, not the output of a significance test. A
-# verdict describes the sampled images only and does not generalise past them.
+# verdict describes the sampled images only and does not generalise past them. It
+# is a checkpoint-level precondition for the leaf score, which is computed on a
+# separate, larger set of images; it does not certify those images individually.
 SANITY_SAMPLE_SIZE = 60
 SANITY_SEED = 0
 SANITY_MAX_MEDIAN_CORRELATION = 0.5
@@ -546,20 +548,25 @@ def letterbox_leaf_mask(mask: np.ndarray, content_mask: np.ndarray) -> np.ndarra
     return result
 
 
-def parameter_randomization_correlations(
+def randomization_stage_summary(
     reference: np.ndarray, randomized: Mapping[str, np.ndarray]
-) -> dict[str, list[float | None]]:
-    """Record absolute Spearman correlation with the reference at each stage.
+) -> dict[str, dict[str, Any]]:
+    """Score each randomized stage against the reference and count what was undefined.
 
-    A constant reference map has no rank order, so its correlation is ``None``.
-    A constant randomized map against a varying reference is evidence that the map
-    changed, so it scores 0. The sign is dropped so an inverted map is as
-    correlated as an identical one.
+    Per stage: ``correlations`` holds the absolute Spearman correlation per image
+    (``None`` where it is undefined), ``constant_maps`` counts randomized maps with
+    no rank order, and ``non_finite_maps`` counts randomized maps holding NaN or
+    infinity. A constant reference map has no rank order, so its correlation is
+    ``None``. A constant randomized map against a varying reference is evidence
+    that the map changed, so it scores 0. A non-finite randomized map is
+    undefined and counted rather than aborting the run; a non-finite reference
+    map is a defect in the original maps and raises. The sign is dropped so an
+    inverted map is as correlated as an identical one.
     """
     baseline = np.asarray(reference, dtype=np.float64)
     if baseline.ndim != 3:
         raise ValueError("reference CAMs must have shape (images, height, width)")
-    result: dict[str, list[float | None]] = {}
+    result: dict[str, dict[str, Any]] = {}
     for stage, candidate in randomized.items():
         values = np.asarray(candidate, dtype=np.float64)
         if values.shape != baseline.shape:
@@ -567,19 +574,44 @@ def parameter_randomization_correlations(
                 f"randomized CAMs for {stage} do not match reference shape"
             )
         correlations: list[float | None] = []
+        constant_maps = 0
+        non_finite_maps = 0
         for before, after in zip(baseline, values, strict=True):
-            if not np.isfinite(before).all() or not np.isfinite(after).all():
-                raise ValueError("CAM maps must contain finite values")
-            if np.ptp(before) == 0:
+            if not np.isfinite(before).all():
+                raise ValueError("reference CAM maps must contain finite values")
+            if not np.isfinite(after).all():
+                non_finite_maps += 1
                 correlations.append(None)
                 continue
-            if np.ptp(after) == 0:
+            after_is_constant = bool(np.ptp(after) == 0)
+            constant_maps += after_is_constant
+            if np.ptp(before) == 0:
+                correlations.append(None)
+            elif after_is_constant:
                 correlations.append(0.0)
-                continue
-            correlation = abs(float(spearmanr(before.ravel(), after.ravel()).statistic))
-            correlations.append(correlation if np.isfinite(correlation) else None)
-        result[stage] = correlations
+            else:
+                correlation = abs(
+                    float(spearmanr(before.ravel(), after.ravel()).statistic)
+                )
+                correlations.append(correlation if np.isfinite(correlation) else None)
+        result[stage] = {
+            "correlations": correlations,
+            "constant_maps": constant_maps,
+            "non_finite_maps": non_finite_maps,
+        }
     return result
+
+
+def parameter_randomization_correlations(
+    reference: np.ndarray, randomized: Mapping[str, np.ndarray]
+) -> dict[str, list[float | None]]:
+    """Record absolute Spearman correlation with the reference at each stage.
+
+    See :func:`randomization_stage_summary` for how constant and non-finite maps
+    are scored; this returns only the per-image correlations.
+    """
+    summary = randomization_stage_summary(reference, randomized)
+    return {stage: values["correlations"] for stage, values in summary.items()}
 
 
 def randomization_stages(model: nn.Module) -> list[tuple[str, list[nn.Module]]]:
@@ -641,6 +673,35 @@ def _reset_to_default_initialisation(module: nn.Module) -> None:
         reset()
 
 
+def _changed_share(before: Sequence[int], after: Sequence[int]) -> float:
+    """Share of positions whose label differs between two equal-length sequences."""
+    return sum(a != b for a, b in zip(before, after, strict=True)) / len(before)
+
+
+def _label_randomization_reason(
+    permuted_median: float | None,
+    control_median: float | None,
+    changed_share: float,
+) -> str:
+    """Say what the permuted-label refit showed against its control."""
+    if permuted_median is None or control_median is None:
+        comparison = (
+            "the permuted-label refit and the true-label control cannot be "
+            "compared because one has no defined correlation"
+        )
+    else:
+        relation = "is below" if permuted_median < control_median else "is not below"
+        comparison = (
+            f"the permuted-label refit median correlation {permuted_median:.3f} "
+            f"{relation} the true-label control {control_median:.3f}"
+        )
+    return (
+        f"{comparison} (permutation changed {changed_share:.0%} of the labels); "
+        "this head-refit variant is not the data-randomization retraining of the "
+        "original method, so it is reported, not gated"
+    )
+
+
 def _permuted_labels(labels: Sequence[int], seed: int) -> list[int]:
     """A seeded permutation of the true labels that differs from them."""
     values = np.asarray(labels, dtype=np.int64)
@@ -698,7 +759,10 @@ def sanity_check_results(
     with the original maps. It passes when the median absolute Spearman
     correlation at the final stage is below the cutoff and enough correlations are
     defined. A constant randomized map counts as changed; a constant reference map
-    is undefined.
+    or a non-finite randomized map is undefined. The record carries the count of
+    constant and of non-finite randomized maps per stage and the final-stage
+    per-image correlations, so a reader can see the thresholds were applied to
+    defined values only.
 
     The label-randomization variant refits only the classifier on a seeded
     permutation of ``true_labels`` over the checkpoint's own penultimate features.
@@ -710,8 +774,11 @@ def sanity_check_results(
 
     The three thresholds (sample size, correlation cutoff, defined share) are
     prespecified heuristics, not a significance test, and apply only to the
-    sampled images. Every random draw is seeded, so identical inputs give
-    identical results and the global random state is left as it was.
+    sampled images. The pass is a checkpoint-level heuristic precondition for the
+    leaf score: the leaf score is computed on a separate, larger set of images, and
+    this pass does not certify those images individually. Every random draw is
+    seeded, so identical inputs give identical results and the global random state
+    is left as it was.
     """
     if len(targets) != images.shape[0] or len(true_labels) != len(targets):
         raise ValueError("images, targets and true labels must align")
@@ -731,7 +798,10 @@ def sanity_check_results(
             for module in modules:
                 _reset_to_default_initialisation(module)
             stage_maps[name] = gradcam_maps(randomized, images, targets)
-    by_stage = parameter_randomization_correlations(reference, stage_maps)
+    stage_summary = randomization_stage_summary(reference, stage_maps)
+    by_stage = {
+        name: summary["correlations"] for name, summary in stage_summary.items()
+    }
     final_stage = next(reversed(by_stage))
     stage_median = {
         name: _median_defined(values)[0] for name, values in by_stage.items()
@@ -739,15 +809,11 @@ def sanity_check_results(
 
     with torch.no_grad():
         features = penultimate_features(model, images)
+    permuted_labels = _permuted_labels(true_labels, seed)
     permuted = _head_refit_correlations(
-        model,
-        images,
-        features,
-        _permuted_labels(true_labels, seed),
-        targets,
-        reference,
-        seed,
+        model, images, features, permuted_labels, targets, reference, seed
     )
+    permuted_changed_share = _changed_share(true_labels, permuted_labels)
     control = _head_refit_correlations(
         model, images, features, true_labels, targets, reference, seed
     )
@@ -773,6 +839,11 @@ def sanity_check_results(
             "prespecified_heuristic": True,
             "significance_test": False,
             "applies_to": "the sampled images only",
+            "role": (
+                "checkpoint-level heuristic precondition for the leaf score; the "
+                "leaf score is computed on a separate, larger set of images, and "
+                "this pass does not certify those images individually"
+            ),
             "parameter_randomization_stage": final_stage,
             "parameter_randomization_initialisation": (
                 "each layer's default reset_parameters, seeded"
@@ -785,7 +856,16 @@ def sanity_check_results(
             {
                 **common,
                 "stage_median_correlation": stage_median,
+                "constant_randomized_maps_by_stage": {
+                    name: summary["constant_maps"]
+                    for name, summary in stage_summary.items()
+                },
+                "non_finite_randomized_maps_by_stage": {
+                    name: summary["non_finite_maps"]
+                    for name, summary in stage_summary.items()
+                },
                 "final_stage": final_stage,
+                "final_stage_correlations": by_stage[final_stage],
             },
         ),
         "label_randomization": {
@@ -794,6 +874,7 @@ def sanity_check_results(
                 **common,
                 "refit_steps": SANITY_REFIT_STEPS,
                 "refit_learning_rate": SANITY_REFIT_LR,
+                "permuted_label_changed_share": permuted_changed_share,
                 "median_correlation": permuted_median,
                 "defined_share": permuted_share,
                 "permuted_correlations": permuted,
@@ -802,11 +883,8 @@ def sanity_check_results(
                 "control_defined_share": control_share,
                 "control_correlations": control,
                 "gates_leaf_score": False,
-                "reason": (
-                    "on synthetic fixtures a head refit on the true labels moved the "
-                    "maps as much as a refit on permuted labels, so this variant "
-                    "cannot separate label dependence from refit movement; it is "
-                    "reported, not gated"
+                "reason": _label_randomization_reason(
+                    permuted_median, control_median, permuted_changed_share
                 ),
             },
         },
@@ -881,6 +959,9 @@ def leaf_score_gate(
     """Report whether the protocol permits a leaf-score summary.
 
     The head-refit label-randomization variant is descriptive and does not gate.
+    The parameter-randomization input is the checkpoint-level sanity pass on its
+    small fixed sample. It is a heuristic precondition for the leaf score, not a
+    certification of the images the leaf score is computed on.
     """
     allowed = parameter_randomization and mask_audit_passed
     return {

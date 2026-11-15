@@ -28,7 +28,16 @@ from jute_disease.data import (
     make_synthetic_data,
 )
 from jute_disease.data.manifest import load_protected_test_manifest
-from jute_disease.evaluation import default_reads_log_path
+from jute_disease.evaluation import (
+    SANITY_CHECKS_KIND,
+    SCENE_TAGS_KIND,
+    BoundOutput,
+    FreezeRecordError,
+    authorize_test_read,
+    default_reads_log_path,
+    evaluate_image_diagnostics,
+    read_bound_output,
+)
 from jute_disease.models.dl import Classifier, TimmBackbone
 from jute_disease.training import RunStore
 
@@ -567,6 +576,131 @@ def test_diagnostics_and_test_refuse_hand_written_scene_tags(
     with pytest.raises(SystemExit, match="scene tags were not computed"):
         _cli(*arguments)
     assert "evaluate_test" not in _operations(staged_repo)
+
+
+def _call_entry_point(
+    env: Env,
+    root: Path,
+    output: Path,
+    scene_tags: BoundOutput,
+    sanity_checks: BoundOutput,
+) -> dict[str, Any]:
+    """Call the image-reading entry point directly, as a library caller would."""
+    authorization = authorize_test_read(
+        env.freeze, env.run_record, root, env.fit_ids, env.target
+    )
+    return evaluate_image_diagnostics(
+        env.target,
+        authorization,
+        env.base,
+        env.image_root,
+        output,
+        root=root,
+        frozen_backbone_checkpoint=env.frozen_backbone,
+        assignment_table_path=env.assignment,
+        scene_tags=scene_tags,
+        sanity_checks=sanity_checks,
+    )
+
+
+def _genuine(staged: Staged, root: Path) -> tuple[BoundOutput, BoundOutput]:
+    ledger = default_reads_log_path(root)
+    record = json.loads(staged.scene_tags.read_text(encoding="utf-8"))["body"][
+        "freeze_record_hash"
+    ]
+    return (
+        read_bound_output(
+            staged.scene_tags, SCENE_TAGS_KIND, record_hash=record, reads_log=ledger
+        ),
+        read_bound_output(
+            staged.sanity_checks,
+            SANITY_CHECKS_KIND,
+            record_hash=record,
+            reads_log=ledger,
+        ),
+    )
+
+
+def _hand_built(
+    case: str, slot: str, genuine: BoundOutput, tmp_path: Path
+) -> BoundOutput:
+    """A BoundOutput nobody obtained from the ledger, in one of four ways."""
+    if case == "wrong_digest":
+        return BoundOutput(genuine.kind, genuine.path, "0" * 64, genuine.body)
+    if case == "forged_body":
+        body = json.loads(json.dumps(genuine.body))
+        if slot == "sanity":
+            evidence = body["parameter_randomization"]["evidence"]
+            evidence["median_correlation"] = 0.0
+            evidence["defined_share"] = 1.0
+            evidence["edited_by_hand"] = True
+        else:
+            body["scenes"] = dict.fromkeys(body["scenes"], "leaf-on-plain-background")
+        assert body != genuine.body
+        return BoundOutput(genuine.kind, genuine.path, genuine.sha256, body)
+    if case == "unlogged_file":
+        forged = _hand_written(tmp_path / "unlogged.json", genuine.path)
+        digest = hashlib.sha256(forged.read_bytes()).hexdigest()
+        return BoundOutput(genuine.kind, forged, digest, genuine.body)
+    return BoundOutput(
+        genuine.kind, tmp_path / "absent.json", genuine.sha256, genuine.body
+    )
+
+
+@pytest.mark.parametrize("slot", ["scene_tags", "sanity"])
+@pytest.mark.parametrize(
+    "case", ["wrong_digest", "forged_body", "unlogged_file", "missing_file"]
+)
+def test_entry_point_refuses_a_hand_built_bound_output_before_any_image_read(
+    env: Env,
+    staged: Staged,
+    staged_repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    slot: str,
+) -> None:
+    scene_tags, sanity_checks = _genuine(staged, staged_repo)
+    if slot == "scene_tags":
+        scene_tags = _hand_built(case, slot, scene_tags, tmp_path)
+    else:
+        sanity_checks = _hand_built(case, slot, sanity_checks, tmp_path)
+
+    def no_image_may_open(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("a test image was opened before verification")
+
+    monkeypatch.setattr(Image, "open", no_image_may_open)
+    output = tmp_path / "diagnostics"
+    before = _operations(staged_repo)
+    with pytest.raises(FreezeRecordError):
+        _call_entry_point(env, staged_repo, output, scene_tags, sanity_checks)
+    assert not output.exists()
+    assert _operations(staged_repo) == before
+
+
+def test_entry_point_logs_its_read_intent_before_the_first_test_image_opens(
+    env: Env,
+    staged: Staged,
+    staged_repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scene_tags, sanity_checks = _genuine(staged, staged_repo)
+    real_open = Image.open
+    seen: list[list[str]] = []
+
+    def watched_open(*args: Any, **kwargs: Any) -> Any:
+        seen.append(_operations(staged_repo))
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(Image, "open", watched_open)
+    with _captured():
+        _call_entry_point(
+            env, staged_repo, tmp_path / "diagnostics", scene_tags, sanity_checks
+        )
+    assert seen
+    assert seen[0][-1] == "image_diagnostics"
+    assert _operations(staged_repo).count("image_diagnostics") == 1
 
 
 def _run_diagnostics(

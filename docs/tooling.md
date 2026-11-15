@@ -87,15 +87,25 @@ under the same freeze record:
   retraining), on the validation-median primary-cell checkpoint. The pass rule is
   fixed in code and its thresholds (60 sampled images, median absolute Spearman
   correlation below 0.5, at least half defined) are prespecified heuristics, not a
-  significance test; they apply to the sampled images only. The label variant is
-  descriptive, reported beside a true-label control refit, and does not gate the
+  significance test; they apply to the sampled images only. The pass is a
+  checkpoint-level heuristic precondition for the leaf score, which is computed on
+  a separate, larger set of images: it does not certify those images
+  individually. The record carries, per stage, the count of constant randomized
+  maps and of non-finite randomized maps (both leave a correlation undefined or
+  scored as changed, as stated above) and the final-stage per-image
+  correlations, so a reader can see the thresholds were applied to defined values
+  only. The label variant is descriptive, reported beside a true-label control
+  refit and the share of labels its permutation changed, and does not gate the
   leaf score.
 - `jute-disease evaluate scene-tags` computes a scene tag and frame leaf share
   for every test image with the thresholds and backend of the frozen mask audit.
 
 Pass their files as `--sanity-checks` and `--scene-tags`. Both are refused unless
 the ledger holds the completion row of the command that wrote those exact bytes,
-so a hand-written file is rejected. The policy predictions come from the run
+so a hand-written file is rejected. The image-reading entry point repeats this
+check itself rather than trusting the caller, and appends its own
+`image_diagnostics` intent row before it opens any test image. The policy
+predictions come from the run
 record, which must hold the runs of all three policies for the frozen cell; pass
 every fit with `--fit-id`. The freeze record, run record, lockfile and project
 configuration are hashed into the export. The command writes `diagnostics.json`,
