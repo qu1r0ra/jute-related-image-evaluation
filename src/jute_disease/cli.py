@@ -287,7 +287,13 @@ def _audit_cohort(args: argparse.Namespace) -> None:
 def _audit_kit(args: argparse.Namespace) -> None:
     try:
         _print_json(
-            build_audit_kit(args.cohort, args.mask_audit, args.output, seed=args.seed)
+            build_audit_kit(
+                args.cohort,
+                args.mask_audit,
+                args.output,
+                seed=args.seed,
+                held_out=args.held_out,
+            )
         )
     except (ValueError, OSError, KeyError) as error:
         raise SystemExit(f"audit blocked: {error}") from error
@@ -1246,6 +1252,12 @@ def build_parser() -> argparse.ArgumentParser:
         "mask_audit", type=Path, help="Audit directory from data masks-audit"
     )
     kit.add_argument("output", type=Path, help="New directory for the kit")
+    kit.add_argument(
+        "--held-out",
+        type=Path,
+        help="held-out.json from data scene-sets; adds one scene item per image, "
+        "shown without an overlay or any automatic tag.",
+    )
     kit.add_argument("--seed", type=int, default=DEFAULT_SEED)
     kit.set_defaults(run=_audit_kit)
     sitting = data_actions.add_parser(
