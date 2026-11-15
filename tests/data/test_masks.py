@@ -7,6 +7,7 @@ import pytest
 from PIL import Image
 
 from jute_disease.data.masks import (
+    MAX_DEVELOPMENT_IMAGES,
     ColorThresholdBackend,
     SceneFeatures,
     SceneObservation,
@@ -73,7 +74,7 @@ def test_color_uniformity_is_zero_for_empty_background() -> None:
     assert color_uniformity(np.empty((0, 3), dtype=np.uint8)) == 0.0
 
 
-def test_scene_calibration_requires_100_and_records_source_holdout() -> None:
+def test_scene_calibration_records_source_holdout() -> None:
     observations = []
     for index in range(100):
         category = index % 3
@@ -101,8 +102,6 @@ def test_scene_calibration_requires_100_and_records_source_holdout() -> None:
     assert len(thresholds.development_ids) == 100
     assert len(thresholds.development_sources) == 100
     assert restored == thresholds
-    with pytest.raises(ValueError, match="exactly 100"):
-        fit_scene_thresholds(observations[:99])
 
 
 def test_mask_artifacts_store_provenance_and_overlay(tmp_path: Path) -> None:
@@ -274,3 +273,147 @@ def test_thresholds_refuse_a_tag_record_outside_the_scene_tags() -> None:
     for tags in (["clean-background", "sky"], ["field", "unknown"]):
         with pytest.raises(ValueError, match="development tags"):
             SceneThresholds.from_dict({**stored, "development_tags": tags})
+
+
+def _stored_digest(thresholds: SceneThresholds) -> str:
+    stored = json.dumps(thresholds.to_dict(), sort_keys=True)
+    return hashlib.sha256(stored.encode("utf-8")).hexdigest()
+
+
+def test_development_limit_is_100_images() -> None:
+    assert MAX_DEVELOPMENT_IMAGES == 100
+
+
+def test_90_image_development_set_fits_and_records_its_count() -> None:
+    observations = _three_tag_observations()[:90]
+
+    thresholds = fit_scene_thresholds(observations)
+    stored = thresholds.to_dict()
+
+    assert stored["development_count"] == 90
+    assert len(thresholds.development_ids) == 90
+    assert len(thresholds.development_sources) == 90
+    assert len({digest for _, digest in thresholds.development_sources}) == 90
+    assert thresholds.method == "90-image grid search maximizing scene macro-F1"
+    assert thresholds.score == 1.0
+    assert SceneThresholds.from_dict(json.loads(json.dumps(stored))) == thresholds
+
+
+def test_90_image_two_tag_set_names_its_count_in_the_method() -> None:
+    observations = [
+        item
+        for item in _two_tag_observations()
+        if item.features.color_uniformity != 0.6
+    ]
+
+    thresholds = fit_scene_thresholds(observations)
+
+    assert len(observations) == 90
+    assert thresholds.to_dict()["development_count"] == 90
+    assert thresholds.method.startswith("90-image grid search")
+    assert thresholds.background_fraction_min == 0.0
+
+
+def test_one_image_of_each_required_tag_is_enough() -> None:
+    observations = _three_tag_observations()[:2]
+
+    thresholds = fit_scene_thresholds(observations)
+
+    assert thresholds.to_dict()["development_count"] == 2
+    assert SceneThresholds.from_dict(thresholds.to_dict()) == thresholds
+
+
+@pytest.mark.parametrize("count", [0, 101])
+def test_development_set_outside_1_to_100_images_is_refused(count: int) -> None:
+    cycle = _three_tag_observations()
+    observations = [
+        _observation(index, cycle[index % 3].scene_tag, cycle[index % 3].features)
+        for index in range(count)
+    ]
+
+    with pytest.raises(ValueError, match="between 1 and 100 development images"):
+        fit_scene_thresholds(observations)
+
+
+def test_development_set_with_a_repeated_id_is_refused() -> None:
+    observations = _three_tag_observations()[:90]
+    observations[1] = SceneObservation(
+        observations[0].image_id,
+        observations[1].features,
+        observations[1].scene_tag,
+        observations[1].source_sha256,
+    )
+
+    with pytest.raises(ValueError, match="IDs must be unique"):
+        fit_scene_thresholds(observations)
+
+
+def test_development_set_with_a_repeated_source_hash_is_refused() -> None:
+    observations = _three_tag_observations()[:90]
+    observations[1] = SceneObservation(
+        observations[1].image_id,
+        observations[1].features,
+        observations[1].scene_tag,
+        observations[0].source_sha256,
+    )
+
+    with pytest.raises(ValueError, match="unique source content"):
+        fit_scene_thresholds(observations)
+
+
+def _stored_with(count: int) -> dict:
+    stored = fit_scene_thresholds(_three_tag_observations()[:90]).to_dict()
+    extra = [
+        _observation(index, "field", SceneFeatures(0.5, 0.5)) for index in range(101)
+    ]
+    stored["development_ids"] = [item.image_id for item in extra[:count]]
+    stored["development_sources"] = [
+        {"image_id": item.image_id, "sha256": item.source_sha256}
+        for item in extra[:count]
+    ]
+    return stored
+
+
+@pytest.mark.parametrize("count", [0, 101])
+def test_stored_thresholds_outside_1_to_100_images_are_refused(count: int) -> None:
+    with pytest.raises(ValueError, match="between 1 and 100"):
+        SceneThresholds.from_dict(_stored_with(count))
+
+
+def test_stored_thresholds_with_a_repeated_id_are_refused() -> None:
+    stored = _stored_with(90)
+    stored["development_ids"][1] = stored["development_ids"][0]
+
+    with pytest.raises(ValueError, match="unique development IDs"):
+        SceneThresholds.from_dict(stored)
+
+
+def test_stored_thresholds_with_a_repeated_source_hash_are_refused() -> None:
+    stored = _stored_with(90)
+    sources = stored["development_sources"]
+    sources[1]["sha256"] = sources[0]["sha256"]
+
+    with pytest.raises(ValueError, match="unique source content"):
+        SceneThresholds.from_dict(stored)
+
+
+def test_stored_thresholds_with_fewer_sources_than_ids_are_refused() -> None:
+    stored = _stored_with(90)
+    stored["development_sources"].pop()
+
+    with pytest.raises(ValueError, match="one source per development ID"):
+        SceneThresholds.from_dict(stored)
+
+
+def test_100_image_sets_keep_the_record_they_had_under_the_exact_count() -> None:
+    # Digests of the stored records fitted at 48423d6, when the count was fixed.
+    three_tag = fit_scene_thresholds(_three_tag_observations())
+    two_tag = fit_scene_thresholds(_two_tag_observations())
+
+    assert _stored_digest(three_tag) == (
+        "bbbf7de23e021671de4630605ef445082334a9a5ccdd6d3b508b8ebf4648a465"
+    )
+    assert _stored_digest(two_tag) == (
+        "035dae33cb15a55561b4e785de2eb52a09f21e31e949a8c54ae020909aae15f2"
+    )
+    assert three_tag.to_dict()["development_count"] == 100

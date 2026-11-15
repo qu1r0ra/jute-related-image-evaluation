@@ -522,3 +522,67 @@ def test_calibration_fits_and_prints_the_tags_of_a_set_with_no_unknown_image(
     assert printed["development_tags"] == ["clean-background", "field"]
     assert printed["background_fraction_min"] == 0.0
     assert json.loads(output.read_text(encoding="utf-8")) == printed
+
+
+def test_a_90_image_development_set_calibrates_and_the_audit_accepts_it(
+    freeze: dict[str, Path], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scenes = [SCENES[index % 3] for index in range(90)]
+    development = _write_records(tmp_path, "dev", scenes, tagged=True, start=0)
+    thresholds = tmp_path / "thresholds.json"
+    capsys.readouterr()
+
+    main(
+        [
+            "data",
+            "masks-calibrate",
+            str(development),
+            "--output",
+            str(thresholds),
+            "--target-dir",
+            str(freeze["target"]),
+        ]
+    )
+    printed = json.loads(capsys.readouterr().out)
+    inventory = _inventory(tmp_path, "inventory")
+    _audit(freeze, {"thresholds": thresholds}, inventory, tmp_path / "audit")
+
+    assert printed["development_count"] == 90
+    assert len(printed["development_ids"]) == 90
+    assert len({item["sha256"] for item in printed["development_sources"]}) == 90
+    assert json.loads(thresholds.read_text(encoding="utf-8")) == printed
+    audit = json.loads((tmp_path / "audit" / "audit.json").read_text(encoding="utf-8"))
+    assert len(audit["records"]) == 12
+
+
+@pytest.mark.parametrize("count", [0, 101])
+def test_calibration_refuses_a_development_set_outside_1_to_100_images(
+    freeze: dict[str, Path], tmp_path: Path, count: int
+) -> None:
+    scenes = [SCENES[index % 3] for index in range(count)]
+    development = _write_records(tmp_path, "dev", scenes, tagged=True, start=0)
+    output = tmp_path / "thresholds.json"
+
+    refused = _run(
+        [
+            "data",
+            "masks-calibrate",
+            str(development),
+            "--output",
+            str(output),
+            "--target-dir",
+            str(freeze["target"]),
+        ]
+    )
+
+    assert "between 1 and 100 images" in str(refused.code)
+    assert not output.exists()
+
+
+def test_calibrate_help_states_the_limit_of_at_most_100_images(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _run(["data", "--help"])
+
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "at most 100 held-apart labeled dev images" in help_text
