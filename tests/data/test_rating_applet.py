@@ -798,21 +798,33 @@ def test_preview_cache_is_private_and_refreshes_when_source_changes(
     client = create_app(sheet).test_client()
 
     first = client.get("/images/1/preview")
+    first_original = client.get("/images/1/original")
 
     assert first.status_code == 200
+    assert first_original.status_code == 200
     cache = kit / ".rating-applet" / sheet.name / "previews"
+    original_cache = kit / ".rating-applet" / sheet.name / "originals"
     cached_files = list(cache.glob("*.png"))
     assert len(cached_files) == 1
+    assert len(list(original_cache.glob("*.png"))) == 1
     assert source.read_bytes() == original
     first_color = Image.open(BytesIO(first.data)).getpixel((20, 20))
     assert first_color == (255, 0, 0)
+    first_original_color = Image.open(BytesIO(first_original.data)).getpixel((20, 20))
+    assert first_original_color == (255, 0, 0)
+    assert Image.open(BytesIO(first_original.data)).size == (1800, 900)
+    assert client.get("/images/1/original").data == first_original.data
     Image.new("RGB", (1800, 900), "blue").save(source)
 
     second = client.get("/images/1/preview")
+    second_original = client.get("/images/1/original")
 
     assert second.status_code == 200
+    assert second_original.status_code == 200
     assert len(list(cache.glob("*.png"))) == 2
+    assert len(list(original_cache.glob("*.png"))) == 2
     assert Image.open(BytesIO(second.data)).getpixel((20, 20)) == (0, 0, 255)
+    assert Image.open(BytesIO(second_original.data)).getpixel((20, 20)) == (0, 0, 255)
     assert b"private" not in second.data
 
 
@@ -845,6 +857,14 @@ def test_browser_rates_and_finishes_synthetic_scene(tmp_path: Path) -> None:
             page.get_by_role("button", name="Field").click()
             page.get_by_text("Saved", exact=True).wait_for()
             page.get_by_role("button", name="Finish sitting").click()
+            page.get_by_role("button", name="Confirm finish").wait_for()
+            assert page.get_by_text("Read-only", exact=True).count() == 0
+            page.get_by_role("button", name="Cancel").click()
+            page.get_by_role("button", name="Finish sitting").wait_for()
+            assert page.get_by_text("Read-only", exact=True).count() == 0
+            page.get_by_role("button", name="Finish sitting").click()
+            page.get_by_role("button", name="Confirm finish").wait_for()
+            page.get_by_role("button", name="Confirm finish").click()
             page.get_by_text("Sitting finished", exact=False).wait_for()
             page.reload()
             page.get_by_text("Read-only", exact=False).wait_for()
@@ -925,7 +945,8 @@ def test_browser_failed_save_is_not_claimed_saved_and_can_resume(
     sheet = tmp_path / "sitting-001.csv"
     sheet.write_text(
         "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\n"
-        "private,scene,image.png,,,,,\n",
+        "private,scene,image.png,,,,,field\n"
+        "private-incomplete,scene,image.png,,,,,\n",
         encoding="utf-8",
     )
     app = create_app(sheet)
@@ -951,23 +972,31 @@ def test_browser_failed_save_is_not_claimed_saved_and_can_resume(
             browser = playwright.chromium.launch()
             page = browser.new_page()
             page.goto(f"http://127.0.0.1:{server.server_port}/")
-            page.get_by_role("button", name="Field").click()
+            page.get_by_text("Item 2 of 2", exact=True).wait_for()
+            page.get_by_role("button", name="Previous").click()
+            page.get_by_text("Item 1 of 2", exact=True).wait_for()
+            page.get_by_role("button", name="Unknown").click()
             page.get_by_text(
                 "Synthetic save failure. Reload to verify the saved state.", exact=True
             ).wait_for()
-            assert page.get_by_role("button", name="Field").is_disabled()
+            assert page.get_by_role("button", name="Unknown").is_disabled()
             assert page.get_by_role("button", name="Next").is_disabled()
             assert page.get_by_text(
-                "0 completed · 1 remaining", exact=True
+                "1 completed · 1 remaining", exact=True
             ).is_visible()
 
             page.reload()
-            page.get_by_role("button", name="Field").wait_for(state="visible")
-            assert page.get_by_role("button", name="Field").is_enabled()
-            page.get_by_role("button", name="Field").click()
+            page.get_by_text("Item 1 of 2", exact=True).wait_for()
+            page.get_by_text(
+                "A previous save did not confirm. Review this item before continuing.",
+                exact=True,
+            ).wait_for()
+            page.get_by_role("button", name="Unknown").wait_for(state="visible")
+            assert page.get_by_role("button", name="Unknown").is_enabled()
+            page.get_by_role("button", name="Unknown").click()
             page.get_by_text("Saved", exact=True).wait_for()
             assert page.get_by_text(
-                "1 completed · 0 remaining", exact=True
+                "1 completed · 1 remaining", exact=True
             ).is_visible()
             browser.close()
     finally:
@@ -1078,6 +1107,12 @@ def test_browser_mask_keyboard_undo_and_unreadable_image(tmp_path: Path) -> None
             page.get_by_role("button", name="Next").click()
             page.get_by_text("Image unavailable.", exact=False).wait_for()
             assert page.get_by_role("button", name="Next").is_disabled()
+            assert page.get_by_role("button", name="Field").is_disabled()
+            assert page.get_by_role("button", name="Clean background").is_disabled()
+            page.keyboard.press("w")
+            with sheet.open(newline="", encoding="utf-8") as handle:
+                unreadable_row = list(csv.DictReader(handle))[1]
+            assert unreadable_row["scene_tag"] == ""
             browser.close()
     finally:
         server.shutdown()
@@ -1239,8 +1274,8 @@ def test_browser_rates_pair_with_keyboard_zoom_swap_and_finish(tmp_path: Path) -
 
     pool = tmp_path / "pool"
     pool.mkdir()
-    Image.new("RGB", (160, 80), "red").save(pool / "a.png")
-    Image.new("RGB", (80, 160), "blue").save(pool / "b.png")
+    Image.new("RGB", (1600, 800), "red").save(pool / "a.png")
+    Image.new("RGB", (800, 1600), "blue").save(pool / "b.png")
     Image.new("RGB", (80, 120), "gray").save(tmp_path / "scene.png")
     Image.new("RGB", (100, 60), "green").save(tmp_path / "mask.png")
     (tmp_path / "kit.json").write_text(
@@ -1291,11 +1326,35 @@ def test_browser_rates_pair_with_keyboard_zoom_swap_and_finish(tmp_path: Path) -
     try:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch()
-            page = browser.new_page(viewport={"width": 1440, "height": 1000})
+            page = browser.new_page(viewport={"width": 1200, "height": 900})
             requests: list[str] = []
             page.on("request", lambda request: requests.append(request.url))
             page.goto(f"http://127.0.0.1:{server.server_port}/")
             page.get_by_role("button", name="Near-duplicate").wait_for()
+            page.keyboard.press("Tab")
+            assert page.evaluate("document.activeElement.id") == "zoom"
+            assert (
+                page.locator("#zoom").evaluate(
+                    "button => getComputedStyle(button).outlineStyle"
+                )
+                == "solid"
+            )
+            assert (
+                page.get_by_role("button", name="Previous").get_attribute(
+                    "aria-keyshortcuts"
+                )
+                == "["
+            )
+            assert (
+                page.get_by_role("button", name="Next").get_attribute(
+                    "aria-keyshortcuts"
+                )
+                == "]"
+            )
+            nav_bottom = page.locator("nav").evaluate(
+                "navigation => navigation.getBoundingClientRect().bottom"
+            )
+            assert nav_bottom <= 900
             page.wait_for_function(
                 "[...document.querySelectorAll('#pair-frames img')].length === 2 "
                 "&& [...document.querySelectorAll('#pair-frames img')].every(i => i.complete && i.naturalWidth > 0)"
@@ -1310,7 +1369,15 @@ def test_browser_rates_pair_with_keyboard_zoom_swap_and_finish(tmp_path: Path) -
                 "frames => frames.map(frame => [Math.round(frame.getBoundingClientRect().width), "
                 "Math.round(frame.getBoundingClientRect().height)])"
             )
-            assert panel_sizes[0] == panel_sizes[1]
+            assert all(
+                abs(left - right) <= 1
+                for left, right in zip(panel_sizes[0], panel_sizes[1], strict=True)
+            )
+            preview_sizes = page.locator(".pair-image-frame").evaluate_all(
+                "frames => frames.map(frame => [Math.round(frame.querySelector('img').getBoundingClientRect().width), "
+                "Math.round(frame.querySelector('img').getBoundingClientRect().height)])"
+            )
+            assert preview_sizes == panel_sizes
             assert page.locator("#pair-frames").evaluate(
                 "container => [...container.querySelectorAll('.pair-image-frame')].every(frame => "
                 "frame.getBoundingClientRect().right <= container.getBoundingClientRect().right + 1)"
@@ -1338,27 +1405,57 @@ def test_browser_rates_pair_with_keyboard_zoom_swap_and_finish(tmp_path: Path) -
                 == "false"
             )
 
-            page.get_by_role("button", name="Inspect full resolution").click()
+            page.get_by_role("button", name="1:1 image pixels").click()
             page.get_by_role("button", name="Fit preview").wait_for()
             page.wait_for_function(
                 "[...document.querySelectorAll('#pair-frames img')].every(i => i.complete && i.naturalWidth > 0)"
             )
             assert any("/images/1/a/original" in request for request in requests)
             assert any("/images/1/b/original" in request for request in requests)
-            page.get_by_role("button", name="Actual pixels").click()
+            page.get_by_role("button", name="Use zoom scale").wait_for()
             actual_widths = page.locator("#pair-frames img").evaluate_all(
                 "images => images.map(image => Number.parseFloat(image.style.width))"
             )
-            assert actual_widths == [160, 80]
+            rendered_widths = page.locator("#pair-frames img").evaluate_all(
+                "images => images.map(image => image.getBoundingClientRect().width)"
+            )
+            assert actual_widths == [1600, 800]
+            assert rendered_widths == actual_widths
+            assert (
+                page.get_by_role("button", name="Use zoom scale").get_attribute(
+                    "aria-pressed"
+                )
+                == "true"
+            )
             page.locator("#scale").evaluate(
                 "input => { input.value = '2'; input.dispatchEvent(new Event('input', {bubbles: true})); }"
             )
             zoom_widths = page.locator("#pair-frames img").evaluate_all(
                 "images => images.map(image => Number.parseFloat(image.style.width))"
             )
-            assert zoom_widths == [320, 160]
+            rendered_zoom_widths = page.locator("#pair-frames img").evaluate_all(
+                "images => images.map(image => image.getBoundingClientRect().width)"
+            )
+            assert zoom_widths == [3200, 1600]
+            assert rendered_zoom_widths == zoom_widths
+            assert (
+                page.get_by_role("button", name="1:1 image pixels").get_attribute(
+                    "aria-pressed"
+                )
+                == "false"
+            )
+            pan = page.locator(".pair-image-frame").evaluate_all(
+                "async frames => { const [a, b] = frames; "
+                "const maxLeft = a.scrollWidth - a.clientWidth; "
+                "const maxTop = a.scrollHeight - a.clientHeight; "
+                "a.scrollLeft = maxLeft * 0.4; a.scrollTop = maxTop * 0.3; "
+                "await new Promise(requestAnimationFrame); "
+                "return [a.scrollLeft / maxLeft, b.scrollLeft / (b.scrollWidth - b.clientWidth), "
+                "a.scrollTop / maxTop, b.scrollTop / (b.scrollHeight - b.clientHeight)]; }"
+            )
+            assert pan == pytest.approx([0.4, 0.4, 0.3, 0.3], abs=0.02)
 
-            page.evaluate("document.activeElement.blur()")
+            page.locator("#zoom").focus()
             page.keyboard.press("2")
             page.get_by_text(
                 "Synthetic pair save failure. Reload to verify the saved state.",
@@ -1378,6 +1475,12 @@ def test_browser_rates_pair_with_keyboard_zoom_swap_and_finish(tmp_path: Path) -
                 )
                 == "true"
             )
+            assert (
+                page.get_by_role("button", name="Near-duplicate")
+                .locator(".shortcut")
+                .evaluate("shortcut => getComputedStyle(shortcut).color")
+                == "rgb(255, 255, 255)"
+            )
             page.get_by_role("button", name="Undo last choice").click()
             page.get_by_text("Saved", exact=True).wait_for()
             assert (
@@ -1389,7 +1492,8 @@ def test_browser_rates_pair_with_keyboard_zoom_swap_and_finish(tmp_path: Path) -
             page.evaluate("document.activeElement.blur()")
             page.keyboard.press("2")
             page.get_by_text("Saved", exact=True).wait_for()
-            page.get_by_role("button", name="Next").click()
+            page.locator("#zoom").focus()
+            page.keyboard.press("]")
             page.get_by_text("Item 2 of 4", exact=True).wait_for()
             page.wait_for_function(
                 "[...document.querySelectorAll('#pair-frames img')].every(i => i.complete && i.naturalWidth > 0)"
@@ -1438,6 +1542,12 @@ def test_browser_rates_pair_with_keyboard_zoom_swap_and_finish(tmp_path: Path) -
             page.get_by_role("button", name="Clean background").click()
             page.get_by_text("Saved", exact=True).wait_for()
             page.get_by_role("button", name="Finish sitting").click()
+            page.get_by_role("button", name="Confirm finish").wait_for()
+            assert page.get_by_text(
+                "Finishing makes this sitting read-only. Confirm to finish.", exact=True
+            ).is_visible()
+            assert page.get_by_text("Read-only", exact=True).count() == 0
+            page.get_by_role("button", name="Confirm finish").click()
             page.get_by_text("Sitting finished", exact=False).wait_for()
             page.reload()
             page.get_by_text("Read-only", exact=False).wait_for()

@@ -338,37 +338,31 @@ def create_app(sheet: Path, pool_roots: dict[str, Path] | None = None) -> Flask:
                 if not path.is_relative_to(root) or not path.is_file():
                     raise ValueError("Image outside kit")
                 source_bytes = path.read_bytes()
+                cache_version = f"{_VERSION}:{variant}"
                 if variant == "preview":
-                    cache_key = _digest(
-                        f"{_VERSION}:preview:{_PREVIEW_SIZE}:".encode() + source_bytes
-                    )
-                    cache = runtime / "previews" / f"{cache_key}.png"
-                    if not cache.is_file():
-                        cache.parent.mkdir(parents=True, exist_ok=True)
-                        with Image.open(io.BytesIO(source_bytes)) as source:
-                            picture = ImageOps.exif_transpose(source).convert("RGB")
-                            picture.thumbnail(_PREVIEW_SIZE, Image.Resampling.LANCZOS)
-                            temp_name = ""
-                            try:
-                                with tempfile.NamedTemporaryFile(
-                                    dir=cache.parent, delete=False, suffix=".tmp"
-                                ) as temp:
-                                    temp_name = temp.name
-                                    picture.save(temp, format="PNG")
-                                    temp.flush()
-                                    os.fsync(temp.fileno())
-                                os.replace(temp_name, cache)
-                            finally:
-                                if temp_name and os.path.exists(temp_name):
-                                    os.unlink(temp_name)
-                    output = io.BytesIO(cache.read_bytes())
-                else:
+                    cache_version += f":{_PREVIEW_SIZE}"
+                cache_key = _digest(f"{cache_version}:".encode() + source_bytes)
+                cache = runtime / f"{variant}s" / f"{cache_key}.png"
+                if not cache.is_file():
+                    cache.parent.mkdir(parents=True, exist_ok=True)
                     with Image.open(io.BytesIO(source_bytes)) as source:
                         picture = ImageOps.exif_transpose(source).convert("RGB")
-                        output = io.BytesIO()
-                        picture.save(output, format="PNG")
-                    output.seek(0)
-                response = send_file(output, mimetype="image/png", max_age=0)
+                        if variant == "preview":
+                            picture.thumbnail(_PREVIEW_SIZE, Image.Resampling.LANCZOS)
+                        temp_name = ""
+                        try:
+                            with tempfile.NamedTemporaryFile(
+                                dir=cache.parent, delete=False, suffix=".tmp"
+                            ) as temp:
+                                temp_name = temp.name
+                                picture.save(temp, format="PNG")
+                                temp.flush()
+                                os.fsync(temp.fileno())
+                            os.replace(temp_name, cache)
+                        finally:
+                            if temp_name and os.path.exists(temp_name):
+                                os.unlink(temp_name)
+                response = send_file(cache, mimetype="image/png", max_age=0)
                 response.headers["Cache-Control"] = "no-store"
                 return response
         except OSError, ValueError, KeyError, csv.Error, Image.DecompressionBombError:
