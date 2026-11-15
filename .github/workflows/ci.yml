@@ -63,6 +63,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --all-groups
 
+      - name: Install browser for synthetic rating tests
+        run: uv run python -m playwright install --with-deps chromium
+
       - name: Verify Linux CPU imports
         run: uv run python -c "import torch, torchvision; assert not torch.cuda.is_available(); print(torch.__version__, torchvision.__version__)"
 

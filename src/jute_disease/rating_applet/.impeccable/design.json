@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-15T20:53:35Z",
+  "title": "Design System: Local blind rating instrument",
+  "extensions": {
+    "colorMeta": {
+      "text": { "role": "neutral", "displayName": "Text" },
+      "page": { "role": "neutral", "displayName": "Page" },
+      "image-well": { "role": "neutral", "displayName": "Image well" },
+      "muted-text": { "role": "neutral", "displayName": "Muted text" },
+      "surface": { "role": "neutral", "displayName": "White surface" },
+      "selected-choice": { "role": "neutral", "displayName": "Selected charcoal" },
+      "divider": { "role": "neutral", "displayName": "Divider" },
+      "focus": { "role": "primary", "displayName": "Focus blue" }
+    },
+    "typographyMeta": {
+      "body": { "displayName": "System UI", "purpose": "Default interface text and inherited button typography." }
+    },
+    "breakpoints": [
+      { "name": "image-panel-compact-height", "value": "1050px" },
+      { "name": "workspace-compact-columns", "value": "961px–1050px" },
+      { "name": "workspace-stacked", "value": "960px" },
+      { "name": "pair-single-column", "value": "640px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Rating button",
+      "kind": "button",
+      "refersTo": "rating-button",
+      "description": "Explicit rating choice with selected, disabled, and visible keyboard-focus states.",
+      "html": "<button class=\"ds-rating-button\" type=\"button\" aria-pressed=\"true\">Exact</button>",
+      "css": ".ds-rating-button { background: #fff; border: 1px solid #555; border-radius: .25rem; padding: .65rem .8rem; color: #222; font: inherit; cursor: pointer; } .ds-rating-button[aria-pressed=\"true\"] { background: #444; color: #fff; } .ds-rating-button:disabled { opacity: .5; cursor: default; } .ds-rating-button:focus-visible { outline: 3px solid #1e4c79; outline-offset: 3px; }"
+    },
+    {
+      "name": "Pair image panel",
+      "kind": "custom",
+      "description": "Equal-width panel for one side of a pair comparison, sized for desktop inspection, with synchronized scrolling and shared zoom. The compact 961px–1050px workspace keeps all four rating buttons and sticky navigation visible at 1000 × 700; definitions may continue below the fold.",
+      "html": "<div class=\"ds-image-panel\"><img alt=\"Image A for this item\" src=\"\"></div>",
+      "css": ".ds-workspace { grid-template-columns: minmax(0, 1.7fr) minmax(22rem, 1fr); gap: 1.5rem; } .ds-image-panel { width: 100%; height: min(56vh, 660px); min-height: 320px; overflow: auto; background: #777; display: flex; align-items: safe center; justify-content: safe center; } .ds-image-panel img { display: block; max-width: none; max-height: none; object-fit: contain; flex: none; } @media (max-width: 1050px) { .ds-image-panel { height: min(46vh, 460px); min-height: 260px; } } @media (min-width: 961px) and (max-width: 1050px) { .ds-workspace { grid-template-columns: minmax(0, 1.7fr) minmax(18rem, 1fr); gap: 1rem; } } @media (max-width: 960px) { .ds-workspace { grid-template-columns: 1fr; } } @media (max-width: 640px) { .ds-pair-frames { grid-template-columns: 1fr; } .ds-image-panel { height: 36vh; min-height: 220px; } }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Quiet Instrument",
+    "overview": "This is an operate interface for one reviewer working through an existing blind sitting. The observed visual system gives the images and explicit choices most of the attention. Neutral page and control colors, system typography, and simple borders support scanning without adding visual cues about an answer.\n\nThe values below are a snapshot extracted from static/style.css. That stylesheet remains the implementation source of truth. The interface currently has no shadow or motion rules.",
+    "keyCharacteristics": [
+      "Neutral page and control surfaces with a gray image well.",
+      "System UI typography and compact heading hierarchy.",
+      "Equal-sized pair panels use more desktop width and viewport height, with synchronized scrolling; compact layout keeps choices visible at 1000 × 700.",
+      "Shared zoom scales both previews and original images while preserving the approximate viewed position; preview upscaling adds no image detail.",
+      "Finish confirmation is a separate keyboard-accessible control that Escape or a rating change cancels.",
+      "Visible keyboard focus and selected-choice state."
+    ],
+    "rules": [],
+    "dos": [
+      "Do preserve equal pair-panel sizing and the image aspect ratio.",
+      "Do keep keyboard focus visible with the stylesheet's focus outline.",
+      "Do keep selected choices visibly distinct from default choices."
+    ],
+    "donts": [
+      "Don't add decorative shadows or motion that are absent from the current interface.",
+      "Don't add visual styling that suggests a preferred rating."
+    ]
+  }
+}

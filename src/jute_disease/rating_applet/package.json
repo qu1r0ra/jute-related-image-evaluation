@@ -1,0 +1,6 @@
+{
+  "private": true,
+  "description": "Scoped development-only design detector; no hooks or worker dispatch.",
+  "scripts": {"design-check": "impeccable detect static/"},
+  "devDependencies": {"impeccable": "4.9.1"}
+}
