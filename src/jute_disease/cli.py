@@ -46,6 +46,7 @@ from jute_disease.data import (
     collect_audit_kit,
     download_plant_doc,
     download_plant_village,
+    draw_scene_sets,
     evaluate_masks_audit,
     evaluate_ratings,
     export_blind,
@@ -60,6 +61,7 @@ from jute_disease.data import (
     prepare_cohort,
     probe_cache,
     read_candidates,
+    read_excluded_ids,
     residual_sample,
     run_masks_audit,
     run_masks_fixture,
@@ -289,6 +291,29 @@ def _audit_kit(args: argparse.Namespace) -> None:
         )
     except (ValueError, OSError, KeyError) as error:
         raise SystemExit(f"audit blocked: {error}") from error
+
+
+def _pool_paths(items: list[str], option: str) -> dict[str, Path]:
+    paths = dict(item.split("=", 1) for item in items if "=" in item)
+    if len(paths) != len(items) or not all(paths.values()):
+        raise ValueError(f"{option} takes unique POOL=PATH values")
+    return {pool: Path(path) for pool, path in paths.items()}
+
+
+def _scene_sets(args: argparse.Namespace) -> None:
+    try:
+        _print_json(
+            draw_scene_sets(
+                _pool_paths(args.target_dir, "--target-dir"),
+                _pool_paths(args.image_root, "--image-root"),
+                args.development,
+                args.output,
+                seed=args.seed,
+                excluded_ids=read_excluded_ids(args.exclude) if args.exclude else (),
+            )
+        )
+    except (ValueError, OSError, KeyError) as error:
+        raise SystemExit(f"scene sets blocked: {error}") from error
 
 
 def _audit_sitting(args: argparse.Namespace) -> None:
@@ -1251,6 +1276,40 @@ def build_parser() -> argparse.ArgumentParser:
         "--gate-output", type=Path, help="Write a new freeze-compatible gate record."
     )
     evaluate_audit.set_defaults(run=_audit_evaluate)
+
+    scene_sets = data_actions.add_parser(
+        "scene-sets",
+        help="Draw the held-out scene-tag set, its reserve and the audit inventory.",
+    )
+    scene_sets.add_argument(
+        "--target-dir",
+        action="append",
+        required=True,
+        metavar="POOL=PATH",
+        help="Frozen target directory of one pool. Repeat it for pools A, B and C.",
+    )
+    scene_sets.add_argument(
+        "--image-root",
+        action="append",
+        required=True,
+        metavar="POOL=PATH",
+        help="Directory the pool's manifest paths are relative to. No image is "
+        "opened; the root only makes the written paths resolvable.",
+    )
+    scene_sets.add_argument(
+        "--development",
+        type=Path,
+        required=True,
+        help="Development manifest whose images' families are excluded.",
+    )
+    scene_sets.add_argument(
+        "--exclude",
+        type=Path,
+        help="JSON array of further image IDs whose families are excluded.",
+    )
+    scene_sets.add_argument("--output", type=Path, required=True)
+    scene_sets.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    scene_sets.set_defaults(run=_scene_sets)
 
     masks_calibrate = data_actions.add_parser(
         "masks-calibrate",
