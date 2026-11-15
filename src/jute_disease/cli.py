@@ -34,6 +34,7 @@ from jute_disease.data import (
     DEFAULT_DESIGN,
     DEFAULT_MAX_BYTES,
     OWNER_COUNT,
+    SCENE_TEST_FILE,
     SOURCES,
     TARGET_DIR,
     ColorThresholdBackend,
@@ -334,6 +335,7 @@ def _scene_evaluate(args: argparse.Namespace) -> None:
                 args.held_out,
                 args.owner,
                 {name: Path(path) for name, path in judges.items()},
+                args.thresholds,
                 args.output,
                 seed=args.seed,
                 recheck_count=args.recheck_count,
@@ -355,13 +357,12 @@ def _scene_evaluate(args: argparse.Namespace) -> None:
             args.compare,
             args.owner,
             args.final,
-            args.output,
             ColorThresholdBackend(),
             recheck=args.recheck,
         )
         _print_json(
             {
-                "record": str(args.output),
+                "record": str(args.compare / SCENE_TEST_FILE),
                 "digest": record["digest"],
                 "passed": record["passed"],
                 "pooled_accuracy": record["pooled"]["accuracy"]["estimate"],
@@ -1403,6 +1404,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="NAME=PATH",
         help="Tag sheet of one agent judge. Repeat it for each judge.",
     )
+    scene_compare.add_argument(
+        "--thresholds",
+        type=Path,
+        required=True,
+        help="Frozen scene thresholds the test step will score.",
+    )
     scene_compare.add_argument("--output", type=Path, required=True)
     scene_compare.add_argument("--seed", type=int, default=DEFAULT_SEED)
     scene_compare.add_argument(
@@ -1414,14 +1421,18 @@ def build_parser() -> argparse.ArgumentParser:
     scene_compare.set_defaults(run=_scene_evaluate)
     scene_test = scene_steps.add_parser(
         "test",
-        help="Score the frozen thresholds against the final owner tags. "
-        "Refused once its record exists.",
+        help="Score the frozen thresholds against the final owner tags and "
+        "write test.json in the compare directory. Refused once that record "
+        "exists.",
     )
     scene_test.add_argument(
         "--held-out", type=Path, required=True, help="held-out.json of scene-sets."
     )
     scene_test.add_argument(
-        "--thresholds", type=Path, required=True, help="Frozen scene thresholds."
+        "--thresholds",
+        type=Path,
+        required=True,
+        help="The frozen scene thresholds the compare step read.",
     )
     scene_test.add_argument(
         "--compare", type=Path, required=True, help="Output of the compare step."
@@ -1440,9 +1451,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scene_test.add_argument(
         "--recheck", type=Path, help="The filled recheck.csv of the compare step."
-    )
-    scene_test.add_argument(
-        "--output", type=Path, required=True, help="The one record to write."
     )
     scene_test.set_defaults(run=_scene_evaluate)
 

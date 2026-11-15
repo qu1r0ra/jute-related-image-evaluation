@@ -155,6 +155,9 @@ from jute_disease.data.scene_evaluate import (
     run_scene_test,
     score_scene_test,
 )
+from jute_disease.data.scene_evaluate import (
+    TEST_FILE as SCENE_TEST_FILE,
+)
 from jute_disease.data.scene_sets import (
     SCENE_SET_ALLOCATION,
     draw_scene_sets,
@@ -354,6 +357,7 @@ __all__ += [
     "fit_thresholds_from_manifest",
     "draw_scene_sets",
     "POOL_POPULATIONS",
+    "SCENE_TEST_FILE",
     "compare_scene_tags",
     "read_scene_tags",
     "run_scene_test",

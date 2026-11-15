@@ -109,6 +109,7 @@ def test_compare_lists_disagreements_and_reports_each_judges_kappa(
             "haiku": _write_tags(tmp_path / "haiku.csv", haiku),
             "luna": _write_tags(tmp_path / "luna.csv", luna),
         },
+        _thresholds(tmp_path),
         output,
         seed=7,
         resamples=500,
@@ -117,11 +118,20 @@ def test_compare_lists_disagreements_and_reports_each_judges_kappa(
     assert report == json.loads((output / "compare.json").read_text("utf-8"))
     assert report["judges"]["haiku"]["kappa"] == pytest.approx(2 / 3)
     assert report["judges"]["haiku"]["agreed"] == 10
-    assert (
-        report["judges"]["haiku"]["lower_95"]
-        <= 2 / 3
-        <= report["judges"]["haiku"]["upper_95"]
-    )
+    # The interval is the 2.5th and 97.5th percentile of the kappas of 500
+    # paired resamples drawn with the seed, undefined resamples left out.
+    first = np.array([owner[image_id] == FIELD for image_id in sorted(ids)])
+    second = np.array([haiku[image_id] == FIELD for image_id in sorted(ids)])
+    kappas = []
+    for draw in np.random.default_rng(7).integers(0, 12, size=(500, 12)):
+        a, b = first[draw], second[draw]
+        chance = a.mean() * b.mean() + (1 - a.mean()) * (1 - b.mean())
+        if chance != 1:
+            kappas.append(((a == b).mean() - chance) / (1 - chance))
+    lower, upper = np.percentile(kappas, [2.5, 97.5])
+    assert lower < 2 / 3 < upper
+    assert report["judges"]["haiku"]["lower_95"] == pytest.approx(lower)
+    assert report["judges"]["haiku"]["upper_95"] == pytest.approx(upper)
     assert report["judges"]["luna"]["kappa"] == pytest.approx(1.0)
     assert report["judges"]["luna"]["sample_size"] == 12
     assert report["disagreements"] == sorted([ids[0], ids[6]])
@@ -133,6 +143,7 @@ def test_compare_lists_disagreements_and_reports_each_judges_kappa(
             "haiku": _sha(tmp_path / "haiku.csv"),
             "luna": _sha(tmp_path / "luna.csv"),
         },
+        "thresholds": _sha(tmp_path / "scene-thresholds.json"),
     }
     listed = {row["image_id"]: row for row in _read_csv(output / "disagreements.csv")}
     assert listed == {
@@ -141,6 +152,30 @@ def test_compare_lists_disagreements_and_reports_each_judges_kappa(
     }
     first_pass = _read_csv(output / "first-pass.csv")
     assert {row["image_id"]: row["owner"] for row in first_pass} == owner
+
+
+def test_compare_reports_an_undefined_kappa_when_every_tag_is_the_same(
+    tmp_path: Path,
+) -> None:
+    held_out, ids = _held_out(tmp_path, 6)
+    sheet = _write_tags(tmp_path / "tags.csv", dict.fromkeys(ids, FIELD))
+
+    report = compare_scene_tags(
+        held_out,
+        sheet,
+        {"haiku": sheet},
+        _thresholds(tmp_path),
+        tmp_path / "compare",
+        seed=7,
+    )
+
+    judge = report["judges"]["haiku"]
+    assert (judge["sample_size"], judge["agreed"]) == (6, 6)
+    assert judge["kappa"] is None
+    assert judge["lower_95"] is None
+    assert judge["upper_95"] is None
+    assert "undefined" in judge["method"]
+    assert report["disagreements"] == []
 
 
 def _compare_fifty(tmp_path: Path, name: str, seed: int, count: int = 30) -> dict:
@@ -155,6 +190,7 @@ def _compare_fifty(tmp_path: Path, name: str, seed: int, count: int = 30) -> dic
             "haiku": _write_tags(tmp_path / "haiku.csv", haiku),
             "luna": _write_tags(tmp_path / "luna.csv", luna),
         },
+        _thresholds(tmp_path),
         tmp_path / name,
         seed=seed,
         recheck_count=count,
@@ -239,6 +275,7 @@ def test_compare_refuses_a_damaged_tag_sheet(
             held_out,
             bad if sheet == "owner" else fine,
             {"haiku": bad if sheet == "judge" else fine},
+            _thresholds(tmp_path),
             tmp_path / "compare",
             seed=7,
         )
@@ -248,14 +285,36 @@ def test_compare_refuses_a_damaged_tag_sheet(
 def test_compare_refuses_an_existing_output_and_no_judge(tmp_path: Path) -> None:
     held_out, ids = _held_out(tmp_path, 6)
     sheet = _write_tags(tmp_path / "tags.csv", dict.fromkeys(ids, FIELD))
+    thresholds = _thresholds(tmp_path)
 
     with pytest.raises(ValueError, match="at least one judge"):
-        compare_scene_tags(held_out, sheet, {}, tmp_path / "compare", seed=7)
+        compare_scene_tags(
+            held_out, sheet, {}, thresholds, tmp_path / "compare", seed=7
+        )
     (tmp_path / "compare").mkdir()
     with pytest.raises(FileExistsError):
         compare_scene_tags(
-            held_out, sheet, {"haiku": sheet}, tmp_path / "compare", seed=7
+            held_out, sheet, {"haiku": sheet}, thresholds, tmp_path / "compare", seed=7
         )
+
+
+def test_compare_refuses_a_held_out_image_used_for_development(
+    tmp_path: Path,
+) -> None:
+    held_out, ids = _held_out(tmp_path, 6)
+    sheet = _write_tags(tmp_path / "tags.csv", dict.fromkeys(ids, FIELD))
+    development = (ids[0], *(f"dev-{index}" for index in range(99)))
+
+    with pytest.raises(ValueError, match="development"):
+        compare_scene_tags(
+            held_out,
+            sheet,
+            {"haiku": sheet},
+            _thresholds(tmp_path, development),
+            tmp_path / "compare",
+            seed=7,
+        )
+    assert not (tmp_path / "compare").exists()
 
 
 # --- Scoring ----------------------------------------------------------------
@@ -488,11 +547,16 @@ def test_scoring_refuses_a_missing_pool_and_a_foreign_tag() -> None:
 # --- Test step --------------------------------------------------------------
 
 
-def _thresholds(tmp_path: Path, ids: tuple[str, ...] | None = None) -> Path:
+def _thresholds(
+    tmp_path: Path,
+    ids: tuple[str, ...] | None = None,
+    *,
+    color_uniformity_min: float = 0.9,
+) -> Path:
     ids = ids or tuple(f"dev-{index}" for index in range(100))
     thresholds = SceneThresholds(
         background_fraction_min=0.5,
-        color_uniformity_min=0.9,
+        color_uniformity_min=color_uniformity_min,
         development_ids=ids,
         development_sources=tuple(
             (image_id, hashlib.sha256(f"source-{index}".encode()).hexdigest())
@@ -551,11 +615,13 @@ def _test_world(tmp_path: Path) -> dict:
     first = final | {ids[6]: UNKNOWN}
     owner = _write_tags(tmp_path / "owner-scenes.csv", first)
     haiku = _write_tags(tmp_path / "haiku.csv", final)
+    thresholds = _thresholds(tmp_path)
     compare = tmp_path / "compare"
     report = compare_scene_tags(
         held_out,
         owner,
         {"haiku": haiku},
+        thresholds,
         compare,
         seed=7,
         recheck_count=3,
@@ -570,13 +636,13 @@ def _test_world(tmp_path: Path) -> dict:
         "final_tags": final,
         "recheck_tags": recheck,
         "held_out": held_out,
-        "thresholds": _thresholds(tmp_path),
+        "thresholds": thresholds,
         "compare": compare,
         "owner": owner,
         "haiku": haiku,
         "final": _write_tags(tmp_path / "final.csv", final),
         "recheck": _write_tags(tmp_path / "recheck-tags.csv", recheck),
-        "output": tmp_path / "evaluation.json",
+        "record": compare / "test.json",
     }
 
 
@@ -588,7 +654,6 @@ def _run(world: dict, **changes) -> dict:
         paths["compare"],
         paths["owner"],
         paths["final"],
-        paths["output"],
         ColorThresholdBackend(),
         recheck=paths["recheck"],
     )
@@ -601,7 +666,7 @@ def test_test_step_scores_the_frozen_thresholds_against_final_tags(
 
     record = _run(world)
 
-    assert record == json.loads(world["output"].read_text("utf-8"))
+    assert record == json.loads(world["record"].read_text("utf-8"))
     assert record["pooled"]["accuracy"]["estimate"] == pytest.approx(9030.5 / 11884)
     assert record["pooled"]["clean_recall"]["estimate"] == pytest.approx(3548.5 / 6402)
     assert record["pools"]["A"]["images"] == 2
@@ -671,14 +736,55 @@ def test_test_step_runs_without_recheck_tags(tmp_path: Path) -> None:
     assert record["inputs"]["recheck_tags"] is None
 
 
-def test_a_second_test_run_is_refused(tmp_path: Path) -> None:
+def test_a_second_test_run_is_refused_whatever_its_arguments(tmp_path: Path) -> None:
     world = _test_world(tmp_path)
     _run(world)
-    written = world["output"].read_bytes()
+    written = world["record"].read_bytes()
 
     with pytest.raises(FileExistsError, match="run once"):
         _run(world)
-    assert world["output"].read_bytes() == written
+    with pytest.raises(FileExistsError, match="run once"):
+        _run(world, recheck=None)
+    assert world["record"].read_bytes() == written
+    assert sorted(path.name for path in world["compare"].iterdir()) == [
+        "compare.json",
+        "disagreements.csv",
+        "first-pass.csv",
+        "recheck.csv",
+        "test.json",
+    ]
+
+
+def test_a_run_that_stops_while_classifying_leaves_its_claim(tmp_path: Path) -> None:
+    world = _test_world(tmp_path)
+
+    class Stopped(ColorThresholdBackend):
+        def predict(self, image: Image.Image) -> None:
+            raise RuntimeError("stopped")
+
+    with pytest.raises(RuntimeError, match="stopped"):
+        run_scene_test(
+            world["held_out"],
+            world["thresholds"],
+            world["compare"],
+            world["owner"],
+            world["final"],
+            Stopped(),
+        )
+    assert world["record"].read_bytes() == b""
+    with pytest.raises(FileExistsError, match="run once"):
+        _run(world)
+
+
+def test_test_step_refuses_thresholds_changed_after_the_compare_step(
+    tmp_path: Path,
+) -> None:
+    world = _test_world(tmp_path)
+    _thresholds(tmp_path, color_uniformity_min=0.8)
+
+    with pytest.raises(ValueError, match="thresholds differ"):
+        _run(world)
+    assert not world["record"].exists()
 
 
 def test_test_step_refuses_a_final_tag_changed_outside_the_disagreements(
@@ -689,7 +795,7 @@ def test_test_step_refuses_a_final_tag_changed_outside_the_disagreements(
 
     with pytest.raises(ValueError, match="not a listed disagreement"):
         _run(world, final=_write_tags(tmp_path / "moved.csv", moved))
-    assert not world["output"].exists()
+    assert not world["record"].exists()
 
 
 @pytest.mark.parametrize(
@@ -724,7 +830,7 @@ def test_test_step_refuses_a_damaged_tag_sheet(
 
     with pytest.raises(ValueError, match=message):
         _run(world, **{sheet: bad})
-    assert not world["output"].exists()
+    assert not world["record"].exists()
 
 
 def test_test_step_refuses_inputs_the_compare_step_did_not_see(
@@ -749,16 +855,7 @@ def test_test_step_refuses_an_image_that_does_not_match_its_id(
 
     with pytest.raises(ValueError, match="does not match its image ID"):
         _run(world)
-
-
-def test_test_step_refuses_a_held_out_image_used_for_development(
-    tmp_path: Path,
-) -> None:
-    world = _test_world(tmp_path)
-    ids = (world["ids"][0], *(f"dev-{index}" for index in range(99)))
-
-    with pytest.raises(ValueError, match="development"):
-        _run(world, thresholds=_thresholds(tmp_path, ids))
+    assert not world["record"].exists()
 
 
 # --- Command ----------------------------------------------------------------
@@ -781,6 +878,8 @@ def test_scene_evaluate_command_compares_then_tests_once(
             str(world["owner"]),
             "--judge",
             f"haiku={world['haiku']}",
+            "--thresholds",
+            str(world["thresholds"]),
             "--output",
             str(compare),
             "--seed",
@@ -812,17 +911,18 @@ def test_scene_evaluate_command_compares_then_tests_once(
         str(world["final"]),
         "--recheck",
         str(world["recheck"]),
-        "--output",
-        str(world["output"]),
     ]
     main(arguments)
     summary = json.loads(capsys.readouterr().out)
     assert summary["passed"] is False
     assert summary["pooled_accuracy"] == pytest.approx(9030.5 / 11884)
-    assert json.loads(world["output"].read_text("utf-8"))["passed"] is False
+    assert summary["record"] == str(compare / "test.json")
+    assert json.loads((compare / "test.json").read_text("utf-8"))["passed"] is False
 
     with pytest.raises(SystemExit, match="scene evaluation blocked.*run once"):
         main(arguments)
+    with pytest.raises(SystemExit, match="2"):
+        main([*arguments, "--output", str(tmp_path / "elsewhere.json")])
 
 
 def test_scene_evaluate_command_reports_a_bad_judge_option(tmp_path: Path) -> None:
@@ -840,6 +940,8 @@ def test_scene_evaluate_command_reports_a_bad_judge_option(tmp_path: Path) -> No
                 str(world["owner"]),
                 "--judge",
                 str(world["haiku"]),
+                "--thresholds",
+                str(world["thresholds"]),
                 "--output",
                 str(tmp_path / "out"),
             ]

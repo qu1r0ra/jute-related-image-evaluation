@@ -2,11 +2,12 @@
 
 The compare step reads the owner's first-pass tags and one sheet per agent
 judge. It lists the disagreements, reports each judge's agreement with the
-owner, and draws the unanimous images the owner rechecks blind. The test step
-classifies every held-out image from the frozen thresholds, scores it against
-the owner's final tags with each pool weighted by its population, and writes
-one record. That record is never replaced, because the held-out test is run
-once.
+owner, and draws the unanimous images the owner rechecks blind, and binds the frozen
+thresholds by their digest. The test step classifies every held-out image
+from those thresholds, scores it against the owner's final tags with each
+pool weighted by its population, and writes one record at a fixed name inside
+the compare directory. That record is claimed before any image is classified
+and is never replaced, because the held-out test is run once.
 """
 
 from __future__ import annotations
@@ -46,6 +47,7 @@ ACCURACY_BAR = Fraction(9, 10)
 CLEAN_RECALL_BAR = Fraction(8, 10)
 MIN_SUPPORT = 10
 COMPARE_FILE = "compare.json"
+TEST_FILE = "test.json"
 FIRST_PASS_FILE = "first-pass.csv"
 DISAGREEMENTS_FILE = "disagreements.csv"
 RECHECK_FILE = "recheck.csv"
@@ -65,6 +67,10 @@ def _canonical_digest(value: Mapping[str, Any]) -> str:
 
 def _some(ids: set[str]) -> str:
     return ", ".join(sorted(ids)[:5])
+
+
+def _read_thresholds(path: Path) -> SceneThresholds:
+    return SceneThresholds.from_dict(json.loads(Path(path).read_text("utf-8")))
 
 
 def read_scene_tags(
@@ -162,6 +168,7 @@ def compare_scene_tags(
     held_out: Path,
     owner: Path,
     judges: Mapping[str, Path],
+    thresholds: Path,
     output: Path,
     *,
     seed: int,
@@ -174,11 +181,14 @@ def compare_scene_tags(
     tags of the owner and every judge (``first-pass.csv``), the images where
     any judge differs from the owner (``disagreements.csv``), and a blank
     sheet of at most ``recheck_count`` images every judge agreed with the
-    owner on (``recheck.csv``), drawn with ``seed``.
+    owner on (``recheck.csv``), drawn with ``seed``. ``compare.json`` records
+    the digest of ``thresholds``, the frozen scene thresholds, so the test
+    step scores those thresholds and no others.
 
     Raises:
-        ValueError: no judge is given, a judge name is unusable, or a tag
-            sheet does not tag exactly the held-out images within the rubric.
+        ValueError: no judge is given, a judge name is unusable, a tag sheet
+            does not tag exactly the held-out images within the rubric, or a
+            held-out image is in the development set of the thresholds.
         FileExistsError: ``output`` already exists.
     """
     output = Path(output)
@@ -194,6 +204,12 @@ def compare_scene_tags(
     records = read_scene_set(held_out)
     ids = sorted(record["image_id"] for record in records)
     paths = {record["image_id"]: record["path"] for record in records}
+    shared = set(ids) & set(_read_thresholds(thresholds).development_ids)
+    if shared:
+        raise ValueError(
+            f"{len(shared)} held-out image(s) are in the development set the "
+            f"thresholds were fitted on: {_some(shared)}"
+        )
     first = read_scene_tags(owner, ids, sheet="the owner's first-pass sheet")
     judged = {
         name: read_scene_tags(path, ids, sheet=f"judge {name}'s sheet")
@@ -225,6 +241,7 @@ def compare_scene_tags(
             "held_out": file_sha256(held_out),
             "owner_first_pass": file_sha256(owner),
             "judges": {name: file_sha256(judges[name]) for name in names},
+            "thresholds": file_sha256(thresholds),
         },
         "judges": {
             name: _judge_agreement(
@@ -421,20 +438,24 @@ def score_scene_test(
     }
 
 
-def _classify(
-    records: Sequence[Mapping[str, str]],
-    thresholds: SceneThresholds,
-    backend: MaskBackend,
-) -> dict[str, dict[str, Any]]:
-    """Classify each held-out image, checking its content against its ID."""
-    predicted: dict[str, dict[str, Any]] = {}
+def _check_images(records: Sequence[Mapping[str, str]]) -> None:
+    """Check that each held-out image is present and matches its ID."""
     for record in records:
         path = Path(record["path"])
         if not path.is_file():
             raise ValueError(f"held-out image is missing: {path}")
         if file_sha256(path) != record["image_id"]:
             raise ValueError(f"held-out image does not match its image ID: {path}")
-        with Image.open(path) as opened:
+
+
+def _classify(
+    records: Sequence[Mapping[str, str]],
+    thresholds: SceneThresholds,
+    backend: MaskBackend,
+) -> dict[str, dict[str, Any]]:
+    predicted: dict[str, dict[str, Any]] = {}
+    for record in records:
+        with Image.open(record["path"]) as opened:
             image = opened.convert("RGB")
         features = extract_scene_features(image, backend.predict(image).mask)
         predicted[record["image_id"]] = {
@@ -451,31 +472,35 @@ def run_scene_test(
     compare: Path,
     owner: Path,
     final: Path,
-    output: Path,
     backend: MaskBackend,
     *,
     recheck: Path | None = None,
 ) -> dict[str, Any]:
     """Score the frozen thresholds on the held-out set and write the one record.
 
-    ``compare`` is the directory the compare step wrote; the held-out set and
-    the owner's first-pass sheet must be the files it read. ``final`` tags
-    every held-out image and may differ from the first pass only on a listed
-    disagreement. ``recheck`` is the filled ``recheck.csv``.
+    ``compare`` is the directory the compare step wrote; the held-out set,
+    the owner's first-pass sheet and the thresholds must be the files it
+    read. ``final`` tags every held-out image and may differ from the first
+    pass only on a listed disagreement. ``recheck`` is the filled
+    ``recheck.csv``.
+
+    The record is ``test.json`` inside ``compare``. Once every input is
+    checked, that file is created exclusively, before any image is
+    classified, and filled when the scores are known. A run that stops in
+    between leaves the file empty, and it still refuses every later run.
 
     Raises:
-        FileExistsError: ``output`` exists; the held-out test is run once.
+        FileExistsError: the record exists; the held-out test is run once.
         ValueError: an input differs from what the compare step read, a tag
             sheet is incomplete or outside the rubric, a final tag changed on
-            an image that was not a disagreement, a held-out image is
-            missing, altered or part of the development set, or the
-            thresholds were fitted with another mask backend.
+            an image that was not a disagreement, a held-out image is missing
+            or altered, or the thresholds were fitted with another mask
+            backend.
     """
-    output = Path(output)
+    output = Path(compare) / TEST_FILE
+    refusal = f"the held-out scene test is run once and its record exists: {output}"
     if output.exists():
-        raise FileExistsError(
-            f"the held-out scene test is run once and its record exists: {output}"
-        )
+        raise FileExistsError(refusal)
     compare_file = Path(compare) / COMPARE_FILE
     compared = json.loads(compare_file.read_text(encoding="utf-8"))
     if compared.get("schema") != SCENE_COMPARE_SCHEMA:
@@ -486,6 +511,8 @@ def run_scene_test(
         raise ValueError(
             "the owner's first-pass tags differ from the ones the compare step read"
         )
+    if file_sha256(thresholds) != compared["inputs"]["thresholds"]:
+        raise ValueError("the thresholds differ from the ones the compare step read")
     records = read_scene_set(held_out)
     ids = sorted(record["image_id"] for record in records)
     first = read_scene_tags(owner, ids, sheet="the owner's first-pass sheet")
@@ -517,58 +544,58 @@ def run_scene_test(
             "changed": moved,
         }
 
-    frozen = SceneThresholds.from_dict(
-        json.loads(Path(thresholds).read_text(encoding="utf-8"))
-    )
+    frozen = _read_thresholds(thresholds)
     require_colour_threshold(backend.model, backend.version)
     if (backend.model, backend.version) != (frozen.mask_model, frozen.mask_version):
         raise ValueError("scene thresholds were fitted with a different mask backend")
-    shared = set(ids) & set(frozen.development_ids)
-    if shared:
-        raise ValueError(
-            f"{len(shared)} held-out image(s) are in the development set the "
-            f"thresholds were fitted on: {_some(shared)}"
-        )
-    predicted = _classify(records, frozen, backend)
-    pools = {record["image_id"]: record["pool"] for record in records}
-    scores = score_scene_test(
-        [
-            (pools[image_id], final_tags[image_id], predicted[image_id]["predicted"])
-            for image_id in ids
-        ]
-    )
-    record: dict[str, Any] = {
-        "schema": SCENE_EVALUATION_SCHEMA,
-        "rubric_version": SCENE_RUBRIC_VERSION,
-        "inputs": {
-            "held_out": compared["inputs"]["held_out"],
-            "thresholds": file_sha256(thresholds),
-            "compare": file_sha256(compare_file),
-            "owner_first_pass": compared["inputs"]["owner_first_pass"],
-            "judges": compared["inputs"]["judges"],
-            "final_tags": file_sha256(final),
-            "recheck_tags": None if recheck is None else file_sha256(recheck),
-        },
-        "mask_backend": {"model": backend.model, "version": backend.version},
-        **scores,
-        "final_tags": {
-            "changed_from_first_pass": changed,
-            "disagreements_reviewed": len(compared["disagreements"]),
-        },
-        "recheck": rechecked,
-        "images": [
-            {
-                "image_id": image_id,
-                "pool": pools[image_id],
-                "owner_final": final_tags[image_id],
-                **predicted[image_id],
-            }
-            for image_id in ids
-        ],
+    _check_images(records)
+    input_digests = {
+        "held_out": compared["inputs"]["held_out"],
+        "thresholds": compared["inputs"]["thresholds"],
+        "compare": file_sha256(compare_file),
+        "owner_first_pass": compared["inputs"]["owner_first_pass"],
+        "judges": compared["inputs"]["judges"],
+        "final_tags": file_sha256(final),
+        "recheck_tags": None if recheck is None else file_sha256(recheck),
     }
-    record["digest"] = _canonical_digest(record)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("x", encoding="utf-8", newline="\n") as handle:
-        json.dump(record, handle, indent=2, sort_keys=True)
-        handle.write("\n")
+    try:
+        claim = output.open("x", encoding="utf-8", newline="\n")
+    except FileExistsError:
+        raise FileExistsError(refusal) from None
+    with claim:
+        predicted = _classify(records, frozen, backend)
+        pools = {record["image_id"]: record["pool"] for record in records}
+        scores = score_scene_test(
+            [
+                (
+                    pools[image_id],
+                    final_tags[image_id],
+                    predicted[image_id]["predicted"],
+                )
+                for image_id in ids
+            ]
+        )
+        record: dict[str, Any] = {
+            "schema": SCENE_EVALUATION_SCHEMA,
+            "rubric_version": SCENE_RUBRIC_VERSION,
+            "inputs": input_digests,
+            "mask_backend": {"model": backend.model, "version": backend.version},
+            **scores,
+            "final_tags": {
+                "changed_from_first_pass": changed,
+                "disagreements_reviewed": len(compared["disagreements"]),
+            },
+            "recheck": rechecked,
+            "images": [
+                {
+                    "image_id": image_id,
+                    "pool": pools[image_id],
+                    "owner_final": final_tags[image_id],
+                    **predicted[image_id],
+                }
+                for image_id in ids
+            ],
+        }
+        record["digest"] = _canonical_digest(record)
+        claim.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
     return record
