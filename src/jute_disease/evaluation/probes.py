@@ -14,6 +14,7 @@ import numpy as np
 
 from jute_disease.data.probe_pixels import (
     FRAME_WIDTH_PX,
+    background_only_image,
     frame_mask,
     frame_only_image,
 )
@@ -21,7 +22,13 @@ from jute_disease.evaluation.resampling import Interval, resample_metrics
 from jute_disease.evaluation.scores import PredictionSet, metric_values
 from jute_disease.training.benchmark import PROBE_SYSTEM, Benchmark, is_probe_base
 
-__all__ = ["FRAME_WIDTH_PX", "PROBE_SYSTEM", "frame_mask", "frame_only_image"]
+__all__ = [
+    "FRAME_WIDTH_PX",
+    "PROBE_SYSTEM",
+    "background_only_image",
+    "frame_mask",
+    "frame_only_image",
+]
 
 LEAF_CUTOFF = 0.05
 PERMUTATIONS = 9_999
@@ -83,16 +90,6 @@ def planned_probe_fit_ids(benchmark: Benchmark) -> list[str]:
             )
         }
     )
-
-
-def background_only_image(
-    pixels: np.ndarray, leaf_mask: np.ndarray, valid_mask: np.ndarray
-) -> np.ndarray:
-    """Mask the leaf and the letterbox padding, keeping only background pixels."""
-    out = np.zeros_like(pixels)
-    keep = np.asarray(valid_mask, dtype=bool) & ~np.asarray(leaf_mask, dtype=bool)
-    out[keep] = pixels[keep]
-    return out
 
 
 def frame_leaf_share(

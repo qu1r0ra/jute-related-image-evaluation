@@ -42,17 +42,18 @@ def build_plan(benchmark: Benchmark) -> tuple[Stage, ...]:
 
 
 def build_probe_plan(benchmark: Benchmark) -> tuple[Stage, ...]:
-    """The border and pad-cue probe fits, after the fits a border probe reuses.
+    """The background, border and pad-cue probe fits, after the fits they reuse.
 
-    A border probe takes its tuning selection from its base fit, and the queue
-    omits a fit whose tuning did not complete in the same run. The stage so
-    starts with each base fit's tuning fit and the prepare fit that tuning
-    needs; a completed one is skipped, not retrained.
+    A background or border probe takes its tuning selection from its base fit,
+    and the queue omits a fit whose tuning did not complete in the same run. The
+    stage so starts with each base fit's tuning fit and the prepare fit that
+    tuning needs; a completed one is skipped, not retrained.
     """
     declared = {fit.fit_id: fit for fit in benchmark.fits()}
     borders = benchmark.border_fits()
+    backgrounds = benchmark.background_fits()
     closure: dict[str, FitSpec] = {}
-    for border in borders:
+    for border in (*borders, *backgrounds):
         tuning_id = benchmark.tuning_dependency(border)
         tuning = None if tuning_id is None else declared[tuning_id]
         if tuning is None:
@@ -61,4 +62,9 @@ def build_probe_plan(benchmark: Benchmark) -> tuple[Stage, ...]:
         if prepare_id is not None:
             closure[prepare_id] = declared[prepare_id]
         closure[tuning.fit_id] = tuning
-    return (Stage("probes", (*closure.values(), *benchmark.pad_cue_fits(), *borders)),)
+    return (
+        Stage(
+            "probes",
+            (*closure.values(), *benchmark.pad_cue_fits(), *borders, *backgrounds),
+        ),
+    )

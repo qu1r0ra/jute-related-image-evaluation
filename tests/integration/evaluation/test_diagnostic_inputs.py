@@ -41,12 +41,13 @@ from jute_disease.evaluation import (
 from jute_disease.models.dl import Classifier, TimmBackbone
 from jute_disease.training import RunStore
 
-from .conftest import audit_manifest_of
+from .conftest import audit_manifest_of, minimal_benchmark
 from .test_gated_evaluator import (
     SYSTEM,
     _cli,
     _issue_receipts,
     _outcomes,
+    _pad_cue_run,
     _spec,
     _write,
 )
@@ -210,16 +211,21 @@ def _build(tmp: Path, policy_dir: Path, audit_report: Path) -> Env:
             )
             fit_ids.append(fit_id)
     del truth
+    # The freeze lists one scored fit besides these 15, so its run is filed too.
+    runs.append(_pad_cue_run(store, target))
+    benchmark = minimal_benchmark(tmp)
 
     stand_in = _stand_in_root(tmp / "freeze-root")
     probes = io.StringIO()
     with contextlib.redirect_stdout(probes):
-        _cli("evaluate", "probe-plan")
-    spec = _spec(tmp, fit_ids, json.loads(probes.getvalue()))
+        _cli("evaluate", "probe-plan", "--benchmark", benchmark)
+    spec = _spec(tmp, fit_ids, json.loads(probes.getvalue()), benchmark)
     freeze = tmp / "freeze-record.json"
     _cli(
         "evaluate",
         "freeze-record",
+        "--benchmark",
+        benchmark,
         "--spec",
         spec,
         "--outcomes",

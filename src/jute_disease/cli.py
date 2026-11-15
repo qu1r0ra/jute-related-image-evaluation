@@ -933,6 +933,7 @@ def _evaluate_test(args: argparse.Namespace) -> None:
             args.root,
             args.fit_id or None,
             args.target_dir,
+            require_full_matrix=True,
         )
         default_log = default_reads_log_path(args.root)
         fit_ids = [r.fit_id for r in auth.runs]

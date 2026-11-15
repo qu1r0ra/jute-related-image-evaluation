@@ -59,7 +59,7 @@ PAD_CUE_FEATURES = "pad-cue"
 
 
 def is_probe_base(fit: FitSpec, benchmark: Benchmark) -> bool:
-    """Whether ``fit`` is a final primary-split fit a border probe is made from.
+    """Whether ``fit`` is a final primary-split fit a border or background probe uses.
 
     The probes use the classical fits and the MobileNetV2 ImageNet route.
     """
@@ -105,7 +105,8 @@ class FitSpec:
     split: int = 0
     seed_index: int = 0
     phase: str = "final"
-    # A probe's input variant ("border", "pad_cue"); empty for every ordinary fit.
+    # A probe's input variant ("border", "pad_cue", "background_only"); empty for
+    # every ordinary fit.
     variant: str = ""
 
 
@@ -160,9 +161,27 @@ class Benchmark:
             if is_probe_base(fit, self)
         )
 
+    def background_fits(self) -> tuple[FitSpec, ...]:
+        """Background-only probes of every probe base fit, each under its own ID.
+
+        A background fit trains and is scored on the pixels the audited
+        colour-threshold mask leaves, with the base fit's own tuning selection.
+        """
+        return tuple(
+            replace(
+                fit, fit_id=f"probe/background/{fit.fit_id}", variant="background_only"
+            )
+            for fit in self.fits()
+            if is_probe_base(fit, self)
+        )
+
     def probe_fit(self, fit_id: str) -> FitSpec | None:
-        """The declared border or pad-cue probe fit with this ID, if there is one."""
-        for fit in (*self.border_fits(), *self.pad_cue_fits()):
+        """The declared background, border or pad-cue probe fit with this ID."""
+        for fit in (
+            *self.background_fits(),
+            *self.border_fits(),
+            *self.pad_cue_fits(),
+        ):
             if fit.fit_id == fit_id:
                 return fit
         return None

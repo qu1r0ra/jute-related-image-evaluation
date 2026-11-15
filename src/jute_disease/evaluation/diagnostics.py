@@ -22,13 +22,13 @@ from typing import Any
 
 import numpy as np
 import torch
-from PIL import Image
 from scipy.stats import spearmanr
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 from torch import nn
 
 from jute_disease.data import POLICIES
+from jute_disease.data.probe_pixels import letterbox_leaf_mask as letterbox_leaf_mask
 from jute_disease.evaluation.freeze_record import (
     Authorization,
     FreezeRecordError,
@@ -524,28 +524,6 @@ def leaf_attention_score(
         return None
     leaf_content = leaf & content
     return float(mass[leaf_content].sum() / total - leaf_content.sum() / content_area)
-
-
-def letterbox_leaf_mask(mask: np.ndarray, content_mask: np.ndarray) -> np.ndarray:
-    """Resize an original-image binary mask onto the ADR 0002 letterbox canvas."""
-    source = np.asarray(mask, dtype=bool)
-    content = np.asarray(content_mask, dtype=bool)
-    if source.ndim != 2 or content.ndim != 2 or not content.any():
-        raise ValueError("leaf and content masks must be non-empty 2D arrays")
-    ys, xs = np.nonzero(content)
-    top, bottom = int(ys.min()), int(ys.max()) + 1
-    left, right = int(xs.min()), int(xs.max()) + 1
-    resized = (
-        np.asarray(
-            Image.fromarray(source.astype(np.uint8) * 255).resize(
-                (right - left, bottom - top), Image.Resampling.NEAREST
-            )
-        )
-        > 0
-    )
-    result = np.zeros_like(content)
-    result[top:bottom, left:right] = resized
-    return result
 
 
 def randomization_stage_summary(
