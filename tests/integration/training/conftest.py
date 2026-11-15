@@ -6,7 +6,6 @@ every training path runs through verified manifests without touching real data.
 """
 
 import json
-from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -36,11 +35,12 @@ class Inputs:
     freeze_dir: Path
     target_dir: Path
     sources: dict[str, tuple[Path, Path]]
+    specs: dict[str, object]
 
 
 def _register_source(
     name: str, base_spec: object, package: Path, freeze_dir: Path
-) -> None:
+) -> object:
     records = build_inventory(package, workers=2)
     spec = replace(
         base_spec,
@@ -55,12 +55,13 @@ def _register_source(
         package_version=spec.version,
         package_digest=inventory_digest(records),
     )
+    return spec
 
 
 @pytest.fixture(scope="session")
 def inputs(
     synthetic: SyntheticPlan, tmp_path_factory: pytest.TempPathFactory
-) -> Iterator[Inputs]:
+) -> Inputs:
     base = tmp_path_factory.mktemp("training-inputs")
     rules = json.loads(CURATION_RULES_PATH.read_text(encoding="utf-8"))
     rules["min_support"] = 2
@@ -84,6 +85,7 @@ def inputs(
     )
     saved = dict(SOURCES)
     sources: dict[str, tuple[Path, Path]] = {}
+    specs: dict[str, object] = {}
     try:
         for name, base_spec, seed in (
             ("plantvillage", PLANTVILLAGE, 100),
@@ -106,14 +108,29 @@ def inputs(
             )
             for duplicate in (package / "test").rglob("*bytecopy.png"):
                 duplicate.unlink()
-            _register_source(name, base_spec, package, freeze_dir)
+            specs[name] = _register_source(name, base_spec, package, freeze_dir)
             sources[name] = (freeze_dir / f"source_{name}", package)
-        yield Inputs(
-            image_root=synthetic.root,
-            freeze_dir=freeze_dir,
-            target_dir=freeze_dir / TARGET_DIR,
-            sources=sources,
-        )
     finally:
+        # The registration is only needed to build the intake. Leaving it in
+        # the shared table for the whole session changed the pinned digests
+        # every later test saw, so tests re-apply it one at a time instead.
         SOURCES.clear()
         SOURCES.update(saved)
+    return Inputs(
+        image_root=synthetic.root,
+        freeze_dir=freeze_dir,
+        target_dir=freeze_dir / TARGET_DIR,
+        sources=sources,
+        specs=specs,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _registered_sources(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Register the synthetic source specs for one test that uses the inputs."""
+    if "inputs" not in request.fixturenames:
+        return
+    for name, spec in request.getfixturevalue("inputs").specs.items():
+        monkeypatch.setitem(SOURCES, name, spec)

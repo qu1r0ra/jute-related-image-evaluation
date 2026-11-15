@@ -13,21 +13,11 @@ is a dependency of every cache.
 import hashlib
 import json
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
-import torch
 from PIL import Image as PILImage
 from PIL.Image import Image
-from torchvision.transforms import (
-    ColorJitter,
-    Compose,
-    InterpolationMode,
-    RandomHorizontalFlip,
-    RandomResizedCrop,
-    RandomVerticalFlip,
-)
-from torchvision.transforms import functional as F
 
 from jute_disease.config import DEFAULT_SEED, IMAGE_SIZE
 from jute_disease.data.probe_pixels import (
@@ -37,6 +27,13 @@ from jute_disease.data.probe_pixels import (
     frame_mask,
     frame_only_image,
 )
+
+if TYPE_CHECKING:
+    import torch
+    from torchvision.transforms import Compose
+
+# torch and torchvision load inside the calls that need them, so the preprocessing
+# identity and letterbox geometry import without the training stack.
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -126,6 +123,9 @@ class ImagePipeline:
     def __call__(
         self, img: Image | np.ndarray
     ) -> torch.Tensor | np.ndarray | ImageWithMask:
+        from torchvision.transforms import InterpolationMode
+        from torchvision.transforms import functional as F
+
         image = PILImage.fromarray(np.asarray(img)).convert("RGB")
         width, height = image.size
         width, height = letterbox_dimensions(width, height, self.size)
@@ -154,6 +154,8 @@ class ImagePipeline:
             )
             valid_mask = frame
         if self.is_train:
+            import torch
+
             worker = torch.utils.data.get_worker_info()
             worker_seed = worker.seed if worker else self.seed
             with torch.random.fork_rng(devices=[]):
@@ -170,6 +172,14 @@ class ImagePipeline:
 
     @property
     def augmentation(self) -> Compose:
+        from torchvision.transforms import (
+            ColorJitter,
+            Compose,
+            RandomHorizontalFlip,
+            RandomResizedCrop,
+            RandomVerticalFlip,
+        )
+
         return Compose(
             [
                 RandomResizedCrop(self.size, scale=(0.5, 1.0)),
