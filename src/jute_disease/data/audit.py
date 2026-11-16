@@ -28,6 +28,11 @@ from jute_disease.data.audit_sampling import (
 )
 from jute_disease.data.gates import KAPPA_THRESHOLD
 from jute_disease.data.grouping import flip_canonical_dhash, union_find_components
+from jute_disease.data.rating_rubric import (
+    PAIR_RUBRIC,
+    PAIR_RUBRIC_VERSION,
+    RATING_RUBRIC_VERSION,
+)
 from jute_disease.evaluation import (
     Interval,
     StratumCounts,
@@ -37,7 +42,40 @@ from jute_disease.evaluation import (
     design_weighted_upper_bound,
 )
 
-RUBRIC = {"exact": 1, "near-duplicate": 1, "very similar": 0, "different": 0}
+RUBRIC = {
+    category["value"]: int(category["merge"]) for category in PAIR_RUBRIC["categories"]
+}
+
+
+def validate_review_record(kind: str, status: str, history_json: str) -> None:
+    """Require review status to agree with its durable, note-backed history."""
+    if status not in {"", "open", "resolved"}:
+        raise ValueError("invalid review status")
+    try:
+        history = json.loads(history_json or "[]")
+    except json.JSONDecodeError as exc:
+        raise ValueError("invalid review history") from exc
+    if not isinstance(history, list) or any(
+        not isinstance(event, dict) for event in history
+    ):
+        raise ValueError("invalid review history")
+    expected_kind = {"pair": "identity", "mask": "target"}.get(kind)
+    actions: list[str] = []
+    for event in history:
+        action = event.get("action")
+        if (
+            expected_kind is None
+            or action not in {"flagged", "resolved"}
+            or event.get("kind") != expected_kind
+            or (actions and actions[-1] == action)
+        ):
+            raise ValueError("invalid review history")
+        if action == "resolved" and not str(event.get("note", "")).strip():
+            raise ValueError("review resolution requires a note")
+        actions.append(action)
+    expected_action = {"": None, "open": "flagged", "resolved": "resolved"}[status]
+    if (actions[-1] if actions else None) != expected_action:
+        raise ValueError("review status does not match its history")
 
 
 def feature_neighbors(
@@ -354,9 +392,12 @@ def prepare_cohort(
         "pairs": rows,
         "denominators": denominators,
         "grouping_version": version,
+        "rubric_version": PAIR_RUBRIC_VERSION,
+        "instrument_version": RATING_RUBRIC_VERSION,
         "threshold": threshold,
         "inventory_digests": samples.get("inventory_digests", {}),
         "agent": {"name": agent["name"], "version": agent["version"]},
+        "pair_rubric": PAIR_RUBRIC,
         "dataset_quality": samples["dataset_quality"],
         "selection": {
             "seed": seed,
@@ -388,7 +429,15 @@ def export_blind(rows: Sequence[dict[str, Any]], path: Path) -> None:
         raise ValueError("pair IDs must be unique")
     with Path(path).open("x", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
-            handle, fieldnames=["pair_id", "image_a", "image_b", "rating"]
+            handle,
+            fieldnames=[
+                "pair_id",
+                "image_a",
+                "image_b",
+                "rating",
+                "rubric_version",
+                "instrument_version",
+            ],
         )
         writer.writeheader()
         writer.writerows(
@@ -397,6 +446,8 @@ def export_blind(rows: Sequence[dict[str, Any]], path: Path) -> None:
                 "image_a": row["image_a"],
                 "image_b": row["image_b"],
                 "rating": "",
+                "rubric_version": PAIR_RUBRIC_VERSION,
+                "instrument_version": RATING_RUBRIC_VERSION,
             }
             for row in rows
         )
@@ -572,6 +623,7 @@ def evaluate_ratings(
     seed: int = 42,
     previous: dict[str, Any] | None = None,
     revision: str | None = None,
+    rubric_adoption: str | None = None,
 ) -> dict[str, Any]:
     """Import owner ratings for a cohort and report agreement and error rates.
 
@@ -606,7 +658,9 @@ def evaluate_ratings(
     elif previous is not None or revision is not None:
         raise ValueError("previous round and revision apply only to a retry")
     with Path(owner_path).open(newline="", encoding="utf-8") as handle:
-        owner = list(csv.DictReader(handle))
+        reader = csv.DictReader(handle)
+        owner_columns = set(reader.fieldnames or [])
+        owner = list(reader)
     by_id = {row["pair_id"]: row for row in rows}
     if (
         len(by_id) != len(rows)
@@ -615,6 +669,42 @@ def evaluate_ratings(
         or {r["pair_id"] for r in owner} != set(by_id)
     ):
         raise ValueError("owner ratings must match the sampled pair IDs exactly")
+    target_rubric = cohort.get("rubric_version", "legacy-unversioned")
+    source_rubrics = {
+        row.get("rubric_version") or "legacy-unversioned" for row in owner
+    }
+    source_instruments = {
+        row.get("instrument_version") or "legacy-unversioned" for row in owner
+    }
+    if any(row.get("review_status") == "open" for row in owner):
+        raise ValueError("unresolved review flags block audit evaluation")
+    for row in owner:
+        validate_review_record(
+            "pair", row.get("review_status", ""), row.get("review_history", "")
+        )
+    target_instrument = cohort.get("instrument_version")
+    incompatible = source_rubrics != {target_rubric} or (
+        target_instrument is not None and source_instruments != {target_instrument}
+    )
+    if incompatible and not (rubric_adoption and rubric_adoption.strip()):
+        raise ValueError(
+            "owner evidence rubric version is incompatible with the cohort; "
+            "use explicit documented rubric adoption"
+        )
+    if rubric_adoption is not None and not rubric_adoption.strip():
+        raise ValueError("rubric adoption requires a documentation note")
+    if (
+        target_rubric != "legacy-unversioned"
+        and "rubric_version" not in owner_columns
+        and not rubric_adoption
+    ):
+        raise ValueError("owner ratings lack explicit rubric provenance")
+    if (
+        target_instrument is not None
+        and "instrument_version" not in owner_columns
+        and not rubric_adoption
+    ):
+        raise ValueError("owner ratings lack explicit instrument provenance")
     ordered = []
     first, second = [], []
     similar = []
@@ -679,6 +769,22 @@ def evaluate_ratings(
         rates["false_split"] = previous["false_split"]
     return {
         "grouping_version": cohort["grouping_version"],
+        "rubric_version": target_rubric,
+        "source_rubric_versions": sorted(source_rubrics),
+        "instrument_version": target_instrument,
+        "source_instrument_versions": sorted(source_instruments),
+        "rubric_adoption": (
+            {
+                "source_versions": sorted(source_rubrics),
+                "target_version": target_rubric,
+                "source_instrument_versions": sorted(source_instruments),
+                "target_instrument_version": target_instrument,
+                "note": rubric_adoption.strip(),
+            }
+            if rubric_adoption and incompatible
+            else None
+        ),
+        "pair_label_mapping": RUBRIC,
         "hamming_threshold": cohort["threshold"],
         "inventory_digests": cohort.get("inventory_digests", {}),
         "agent": cohort["agent"],
@@ -779,7 +885,15 @@ def fixture_round(
         "w", newline="", encoding="utf-8"
     ) as handle:
         writer = csv.DictWriter(
-            handle, fieldnames=["pair_id", "image_a", "image_b", "rating"]
+            handle,
+            fieldnames=[
+                "pair_id",
+                "image_a",
+                "image_b",
+                "rating",
+                "rubric_version",
+                "instrument_version",
+            ],
         )
         writer.writeheader()
         writer.writerows(owner)
@@ -788,7 +902,15 @@ def fixture_round(
     failed_path = output / "synthetic_failed_ratings.csv"
     with failed_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
-            handle, fieldnames=["pair_id", "image_a", "image_b", "rating"]
+            handle,
+            fieldnames=[
+                "pair_id",
+                "image_a",
+                "image_b",
+                "rating",
+                "rubric_version",
+                "instrument_version",
+            ],
         )
         writer.writeheader()
         writer.writerows(owner)

@@ -151,6 +151,14 @@ from jute_disease.data.policies import (
     policy_matrix_binding,
     write_policy_manifests,
 )
+from jute_disease.data.rating_rubric import (
+    AGENT_INSTRUCTIONS,
+    CALIBRATION_EXAMPLES,
+    PAIR_RUBRIC,
+    PAIR_RUBRIC_VERSION,
+    RATING_RUBRIC_VERSION,
+    SCENE_GUIDANCE,
+)
 from jute_disease.data.scene_evaluate import (
     POOL_POPULATIONS,
     compare_scene_tags,
@@ -380,6 +388,12 @@ __all__ += [
 
 __all__ += [
     "RATING_VALUES",
+    "AGENT_INSTRUCTIONS",
+    "CALIBRATION_EXAMPLES",
+    "PAIR_RUBRIC",
+    "PAIR_RUBRIC_VERSION",
+    "RATING_RUBRIC_VERSION",
+    "SCENE_GUIDANCE",
     "audit_row_complete",
     "validate_audit_row",
     "build_audit_kit",
