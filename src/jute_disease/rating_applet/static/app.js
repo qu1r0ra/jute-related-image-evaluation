@@ -205,14 +205,18 @@ function applyScale(positions = panPositions()) {
       const wrapper = picture.parentElement;
       wrapper.style.width = `${sideways ? height : width}px`;
       wrapper.style.height = `${sideways ? width : height}px`;
-      picture.style.transform = `translate(-50%, -50%) rotate(${transform.rotation}deg) scale(${transform.horizontal ? -1 : 1}, ${transform.vertical ? -1 : 1})`;
+      picture.style.transform = `translate(-50%, -50%) scale(${transform.horizontal ? -1 : 1}, ${transform.vertical ? -1 : 1}) rotate(${transform.rotation}deg)`;
     }
   });
   restorePan(positions);
 }
 
+function originalOrientation() {
+  return { rotation: 0, horizontal: false, vertical: false };
+}
+
 function resetTransforms() {
-  for (const side of ['a', 'b']) transforms[side] = { rotation: 0, horizontal: false, vertical: false };
+  for (const side of ['a', 'b']) transforms[side] = originalOrientation();
   document.querySelectorAll('.pair-transform button[aria-pressed]').forEach(button => button.setAttribute('aria-pressed', 'false'));
   document.querySelectorAll('.orientation-status').forEach(status => { status.textContent = 'Original orientation'; });
   applyScale();
@@ -237,7 +241,7 @@ function pairTransformControls(side) {
       const positions = panPositions();
       const current = transforms[side];
       if (action === 'rotate') current.rotation = (current.rotation + 90) % 360;
-      else if (action === 'reset') transforms[side] = { rotation: 0, horizontal: false, vertical: false };
+      else if (action === 'reset') transforms[side] = originalOrientation();
       else current[action] = !current[action];
       container.querySelectorAll('button[aria-pressed]').forEach(control => {
         const key = control.dataset.flip;

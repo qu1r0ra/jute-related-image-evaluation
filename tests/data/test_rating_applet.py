@@ -1420,6 +1420,12 @@ def test_browser_rates_pair_with_keyboard_zoom_swap_and_finish(tmp_path: Path) -
             assert "rotate(0deg)" in image_b.get_attribute("style")
             page.get_by_role("button", name="Flip horizontal image A").click()
             assert (
+                image_a.evaluate(
+                    "image => new DOMMatrix(getComputedStyle(image).transform).b"
+                )
+                == 1
+            )
+            assert (
                 page.get_by_role(
                     "button", name="Flip horizontal image A"
                 ).get_attribute("aria-pressed")
@@ -1427,6 +1433,25 @@ def test_browser_rates_pair_with_keyboard_zoom_swap_and_finish(tmp_path: Path) -
             )
             page.get_by_role("button", name="Flip vertical image A").click()
             assert "scale(-1, -1)" in image_a.get_attribute("style")
+            page.locator("#scale").evaluate(
+                "input => { input.value = '2'; input.dispatchEvent(new Event('input', {bubbles: true})); }"
+            )
+            page.get_by_role("button", name="Swap image order").click()
+            assert "rotate(90deg)" in image_a.get_attribute("style")
+            assert "scale(-1, -1)" in image_a.get_attribute("style")
+            page.get_by_role("button", name="Swap image order").click()
+            page.get_by_role("button", name="Inspect full resolution").click()
+            page.wait_for_function(
+                "document.querySelector('#pair-frames img').classList.contains('full') && document.querySelector('#pair-frames img').complete"
+            )
+            assert "rotate(90deg)" in image_a.get_attribute("style")
+            page.get_by_role("button", name="Fit preview").click()
+            page.wait_for_function(
+                "!document.querySelector('#pair-frames img').classList.contains('full') && document.querySelector('#pair-frames img').complete"
+            )
+            page.locator("#scale").evaluate(
+                "input => { input.value = '1'; input.dispatchEvent(new Event('input', {bubbles: true})); }"
+            )
             page.get_by_role("button", name="Reset image A").click()
             assert "rotate(0deg)" in image_a.get_attribute("style")
             assert (
@@ -1615,6 +1640,7 @@ def test_browser_rates_pair_with_keyboard_zoom_swap_and_finish(tmp_path: Path) -
             page.evaluate("document.activeElement.blur()")
             page.keyboard.press("2")
             page.get_by_text("Saved", exact=True).wait_for()
+            page.get_by_role("button", name="Rotate 90° image A").click()
             page.locator("#zoom").focus()
             page.keyboard.press("]")
             page.get_by_text("Item 2 of 4", exact=True).wait_for()
@@ -1622,6 +1648,7 @@ def test_browser_rates_pair_with_keyboard_zoom_swap_and_finish(tmp_path: Path) -
             page.wait_for_function(
                 "[...document.querySelectorAll('#pair-frames img')].every(i => i.complete && i.naturalWidth > 0)"
             )
+            assert "rotate(0deg)" in image_a.get_attribute("style")
             assert (
                 page.get_by_role("button", name="Swap image order").get_attribute(
                     "aria-pressed"
