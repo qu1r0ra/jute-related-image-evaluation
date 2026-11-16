@@ -99,6 +99,7 @@ Buttons use a `0.25rem` corner radius and a thin border. Image panels are rectan
 ### Image panels
 - **Pair layout:** Two equal-width panels at wide sizes, each sized to the available image column and viewport height.
 - **Image fit:** Previews and originals preserve aspect ratio. Shared 1×–4× zoom works in both modes; fit preview scales both sides by the same rule and may enlarge a small preview without adding detail. Full-resolution images and enlarged previews can scroll inside the frame.
+- **Orientation:** Each image has labeled rotate, flip, and reset controls and a text status. Transformations affect the displayed image only and follow its panel when swapped.
 - **Finish flow:** Separate finish and confirmation controls keep accidental repeated activation from confirming a read-only transition. Confirmation is keyboard reachable, Escape cancels it, and a changed rating disarms it.
 
 ## Do's and Don'ts

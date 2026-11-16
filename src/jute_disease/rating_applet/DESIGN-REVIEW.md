@@ -13,6 +13,7 @@ This file records synthetic interface evidence. `PRODUCT.md` owns product constr
 
 ## Verification evidence
 
+- Pair orientation controls were exercised with synthetic images in the Chromium browser test, including independent rotation and flips, reset, zoom, swap, and reset after a saved rating. A synthetic 1920 × 947 rendered page was inspected. The applet-local Impeccable scan of that running page found no anti-patterns and one advisory about an existing rubric line break.
 - `uv run python -m pytest tests/data/test_rating_applet.py -q -p no:cacheprovider`: **33 passed**. The suite uses generated images, a temporary synthetic kit and sitting, and Playwright Chromium 159.0.8154.6. Browser assertions cover the finish confirmation regression, Escape/rating-change cancellation, save and image failures, stale recovery clearing, focus restoration including after finishing, rendered preview zoom, pan retention, equal panels, and the three viewport sizes above.
 - `uv run ruff check src/jute_disease/rating_applet/__init__.py tests/data/test_rating_applet.py`: passed.
 - `node --check src/jute_disease/rating_applet/static/app.js`: passed.

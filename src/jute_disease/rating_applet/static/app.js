@@ -14,6 +14,7 @@ let finishArmed = false;
 let syncingPan = false;
 let focusEpoch = 0;
 let pendingPan = null;
+let transforms = {};
 
 const groups = {
   rating: {
@@ -63,6 +64,9 @@ function controls() {
   });
   document.querySelectorAll('.zoom button, .zoom input').forEach(control => {
     control.disabled = busy;
+  });
+  document.querySelectorAll('.pair-transform button').forEach(button => {
+    button.disabled = busy || !readable;
   });
   $('previous').disabled = busy || failed || position <= 1;
   $('next').disabled = busy || failed || !readable || !complete() || position >= state.total;
@@ -185,17 +189,75 @@ function applyScale(positions = panPositions()) {
   document.querySelectorAll('#image-frame img, #pair-frames img').forEach(picture => {
     const frame = picture.closest('.image-frame');
     if (!picture.naturalWidth || !frame) return;
+    const transform = transforms[picture.dataset.side];
+    const sideways = transform && transform.rotation % 180 !== 0;
     const fitScale = Math.min(
-      frame.clientWidth / picture.naturalWidth,
-      frame.clientHeight / picture.naturalHeight
+      frame.clientWidth / (sideways ? picture.naturalHeight : picture.naturalWidth),
+      frame.clientHeight / (sideways ? picture.naturalWidth : picture.naturalHeight)
     );
     const width = picture.naturalWidth * (full ? 1 : fitScale) * scale;
+    const height = picture.naturalHeight * (full ? 1 : fitScale) * scale;
     picture.style.width = `${width}px`;
     picture.style.height = 'auto';
     picture.style.maxWidth = 'none';
     picture.style.maxHeight = 'none';
+    if (transform) {
+      const wrapper = picture.parentElement;
+      wrapper.style.width = `${sideways ? height : width}px`;
+      wrapper.style.height = `${sideways ? width : height}px`;
+      picture.style.transform = `translate(-50%, -50%) scale(${transform.horizontal ? -1 : 1}, ${transform.vertical ? -1 : 1}) rotate(${transform.rotation}deg)`;
+    }
   });
   restorePan(positions);
+}
+
+function originalOrientation() {
+  return { rotation: 0, horizontal: false, vertical: false };
+}
+
+function resetTransforms() {
+  for (const side of ['a', 'b']) transforms[side] = originalOrientation();
+  document.querySelectorAll('.pair-transform button[aria-pressed]').forEach(button => button.setAttribute('aria-pressed', 'false'));
+  document.querySelectorAll('.orientation-status').forEach(status => { status.textContent = 'Original orientation'; });
+  applyScale();
+}
+
+function pairTransformControls(side) {
+  const container = document.createElement('div');
+  container.className = 'pair-transform';
+  container.setAttribute('role', 'group');
+  container.setAttribute('aria-label', `Image ${side.toUpperCase()} orientation`);
+  const status = document.createElement('span');
+  status.className = 'orientation-status';
+  status.setAttribute('aria-live', 'polite');
+  status.textContent = 'Original orientation';
+  for (const [action, label] of [['rotate', 'Rotate 90°'], ['horizontal', 'Flip horizontal'], ['vertical', 'Flip vertical'], ['reset', 'Reset']]) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = label;
+    button.setAttribute('aria-label', `${label} image ${side.toUpperCase()}`);
+    if (action === 'horizontal' || action === 'vertical') button.setAttribute('aria-pressed', 'false');
+    button.addEventListener('click', () => {
+      const positions = panPositions();
+      const current = transforms[side];
+      if (action === 'rotate') current.rotation = (current.rotation + 90) % 360;
+      else if (action === 'reset') transforms[side] = originalOrientation();
+      else current[action] = !current[action];
+      container.querySelectorAll('button[aria-pressed]').forEach(control => {
+        const key = control.dataset.flip;
+        control.setAttribute('aria-pressed', String(transforms[side][key]));
+      });
+      const updated = transforms[side];
+      status.textContent = updated.rotation || updated.horizontal || updated.vertical
+        ? `Rotated ${updated.rotation}°${updated.horizontal ? ', flipped horizontally' : ''}${updated.vertical ? ', flipped vertically' : ''}`
+        : 'Original orientation';
+      applyScale(positions);
+    });
+    if (action === 'horizontal' || action === 'vertical') button.dataset.flip = action;
+    container.append(button);
+  }
+  container.append(status);
+  return container;
 }
 
 function syncPairPan(source) {
@@ -260,13 +322,16 @@ function setImageSources() {
       const figure = document.createElement('figure');
       const caption = document.createElement('figcaption');
       const frame = document.createElement('div');
+      const wrapper = document.createElement('div');
       figure.className = 'pair-panel';
       figure.dataset.side = side;
       caption.textContent = `Image ${side.toUpperCase()}`;
       frame.className = 'image-frame pair-image-frame';
-      frame.append(pictures[index]);
+      wrapper.className = 'pair-image-wrapper';
+      wrapper.append(pictures[index]);
+      frame.append(wrapper);
       frame.addEventListener('scroll', () => syncPairPan(frame), { passive: true });
-      figure.append(caption, frame);
+      figure.append(caption, frame, pairTransformControls(side));
       $('pair-frames').append(figure);
     }
     $('swap').hidden = false;
@@ -295,6 +360,8 @@ async function show(nextPosition) {
     full = false;
     actualPixels = false;
     swapped = false;
+    transforms = {};
+    resetTransforms();
     finishArmed = false;
     readable = false;
     failed = false;
@@ -354,6 +421,7 @@ async function save(field, value, undo = false) {
     item[field] = value;
     if (!undo) history.push({ field, value: oldValue });
     await refresh(result.revision);
+    if (item.kind === 'pair') resetTransforms();
     sessionStorage.removeItem('rating-applet-recovery-position');
     $('save').textContent = 'Saved';
     $('notice').textContent = '';
