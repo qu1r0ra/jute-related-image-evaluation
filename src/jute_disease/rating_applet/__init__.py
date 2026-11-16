@@ -523,10 +523,7 @@ def create_app(sheet: Path, pool_roots: dict[str, Path] | None = None) -> Flask:
                     )
                 if row["kind"] not in {"mask", "scene"}:
                     return jsonify(error="Unsupported item."), 400
-                rubric = json.loads(
-                    (sheet.parent / "kit.json").read_text(encoding="utf-8")
-                )
-                anchors = rubric.get("scene_rubric", {}).get("anchors", {})
+                anchors = SCENE_RUBRIC["anchors"]
                 return jsonify(
                     kind=row["kind"],
                     mask_quality=row["mask_quality"],
@@ -702,10 +699,14 @@ def create_app(sheet: Path, pool_roots: dict[str, Path] | None = None) -> Flask:
                     return jsonify(revision=_revision(runtime, content))
                 row[field] = data["value"]
                 _add_review_columns(columns, rows)
-                row["rubric_version"] = _current_rubric_version(row["kind"])
-                row["instrument_version"] = RATING_RUBRIC_VERSION
                 if field == "scene_tag":
                     row["scene_rubric_version"] = SCENE_RUBRIC_VERSION
+                    if row["kind"] == "scene":
+                        row["rubric_version"] = SCENE_RUBRIC_VERSION
+                        row["instrument_version"] = RATING_RUBRIC_VERSION
+                else:
+                    row["rubric_version"] = _current_rubric_version(row["kind"])
+                    row["instrument_version"] = RATING_RUBRIC_VERSION
                 try:
                     validate_audit_row(row)
                 except ValueError, TypeError:
@@ -771,7 +772,7 @@ def create_app(sheet: Path, pool_roots: dict[str, Path] | None = None) -> Flask:
                     expected_kind = {"pair": "identity", "mask": "target"}.get(
                         row["kind"]
                     )
-                    if data.get("kind") != expected_kind:
+                    if expected_kind is None or data.get("kind") != expected_kind:
                         return jsonify(
                             error="This review flag does not apply to the item."
                         ), 400

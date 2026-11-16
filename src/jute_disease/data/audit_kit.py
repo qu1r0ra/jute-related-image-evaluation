@@ -21,17 +21,17 @@ from jute_disease.data.audit import cohort_digest, validate_review_record
 from jute_disease.data.audit_sampling import grouping_threshold
 from jute_disease.data.masks import (
     MASK_QUALITY_RATINGS,
-    MASK_RUBRIC,
-    MASK_RUBRIC_VERSION,
-    SCENE_RUBRIC,
-    SCENE_RUBRIC_VERSION,
     SCENE_TAGS,
 )
-from jute_disease.data.masks_audit import AUDIT_SCHEMA as MASK_AUDIT_SCHEMA
+from jute_disease.data.masks_audit import AUDIT_SCHEMAS as MASK_AUDIT_SCHEMAS
 from jute_disease.data.rating_rubric import (
+    MASK_RUBRIC,
+    MASK_RUBRIC_VERSION,
     PAIR_RUBRIC,
     PAIR_RUBRIC_VERSION,
     RATING_RUBRIC_VERSION,
+    SCENE_RUBRIC,
+    SCENE_RUBRIC_VERSION,
 )
 from jute_disease.data.scene_sets import read_scene_set
 
@@ -69,6 +69,7 @@ PAIR_COLUMNS = (
     "rating",
     "rubric_version",
     "instrument_version",
+    "review_status",
     "review_history",
 )
 MASK_COLUMNS = (
@@ -79,6 +80,7 @@ MASK_COLUMNS = (
     "rubric_version",
     "scene_rubric_version",
     "instrument_version",
+    "review_status",
     "review_history",
 )
 OWNER_PAIR_SHEET = "owner.csv"
@@ -144,8 +146,8 @@ def build_audit_kit(
     if not all(str(agent.get(key, "")).strip() for key in ("name", "version")):
         raise ValueError("the cohort does not name the agent rater")
     masks = _read_json(mask_audit_dir / "audit.json")
-    if masks.get("schema") != MASK_AUDIT_SCHEMA:
-        raise ValueError(f"mask audit schema must be {MASK_AUDIT_SCHEMA}")
+    if masks.get("schema") not in MASK_AUDIT_SCHEMAS:
+        raise ValueError(f"mask audit schema must be one of {list(MASK_AUDIT_SCHEMAS)}")
     records = {record["audit_id"]: record for record in masks["records"]}
     owner_ids = list(masks["owner_audit_ids"])
     if unknown := sorted(set(owner_ids) - set(records)):
@@ -327,6 +329,7 @@ def _ratings(
                     "rubric_version": row.get("rubric_version", ""),
                     "scene_rubric_version": row.get("scene_rubric_version", ""),
                     "instrument_version": row.get("instrument_version", ""),
+                    "review_status": row.get("review_status", ""),
                 }
                 existing = rated.setdefault(row["item_id"], kept)
                 if {key: existing[key] for key in kept} != kept:
@@ -410,6 +413,7 @@ def collect_audit_kit(kit_dir: Path) -> dict[str, Any]:
                     "rating": rating["rating"],
                     "rubric_version": rating["rubric_version"],
                     "instrument_version": rating["instrument_version"],
+                    "review_status": rating["review_status"],
                     "review_history": rating["review_history"],
                 }
             )
@@ -434,6 +438,7 @@ def collect_audit_kit(kit_dir: Path) -> dict[str, Any]:
                     "rubric_version": rating["rubric_version"],
                     "scene_rubric_version": rating["scene_rubric_version"],
                     "instrument_version": rating["instrument_version"],
+                    "review_status": rating["review_status"],
                     "review_history": rating["review_history"],
                 }
             )

@@ -12,17 +12,6 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from jute_disease.data.rating_rubric import (
-    MASK_RUBRIC as _VERSIONED_MASK_RUBRIC,
-)
-from jute_disease.data.rating_rubric import (
-    MASK_RUBRIC_VERSION,
-    SCENE_RUBRIC_VERSION,
-)
-from jute_disease.data.rating_rubric import (
-    SCENE_RUBRIC as _VERSIONED_SCENE_RUBRIC,
-)
-
 SCENE_TAGS = ("clean-background", "field", "unknown")
 REQUIRED_DEVELOPMENT_TAGS = ("clean-background", "field")
 MAX_DEVELOPMENT_IMAGES = 100
@@ -32,8 +21,33 @@ TWO_TAG_METHOD = (
     "no unknown development image, background cutoff fixed at 0"
 )
 MASK_QUALITY_RATINGS = ("pass", "minor", "fail")
-MASK_RUBRIC: dict[str, Any] = _VERSIONED_MASK_RUBRIC
-SCENE_RUBRIC: dict[str, Any] = _VERSIONED_SCENE_RUBRIC
+MASK_RUBRIC_VERSION = "leaf-mask-v1"
+SCENE_RUBRIC_VERSION = "scene-tag-v2"
+MASK_RUBRIC: dict[str, Any] = {
+    "version": MASK_RUBRIC_VERSION,
+    "categories": list(MASK_QUALITY_RATINGS),
+    "criteria": ["leaf coverage", "clipped lesions", "background leakage"],
+    "anchors": {
+        "pass": "Leaf and visible lesions are covered; "
+        "background leakage is negligible.",
+        "minor": "Some edge clipping or leakage is visible, but most leaf tissue "
+        "and lesions remain covered.",
+        "fail": "Substantial leaf or lesion clipping, or substantial background "
+        "leakage, is present.",
+    },
+}
+SCENE_RUBRIC: dict[str, Any] = {
+    "version": SCENE_RUBRIC_VERSION,
+    "categories": list(SCENE_TAGS),
+    "anchors": {
+        "clean-background": "Most visible background is a uniform, uncluttered "
+        "surface.",
+        "field": "The background contains substantial outdoor or field structure. "
+        "A leaf photographed against other leaves or plants is field.",
+        "unknown": "Only for a tight crop, a blurred image, or an image with no "
+        "readable background.",
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -400,10 +414,14 @@ def save_mask_artifacts(
     image_id: str,
     model_version: str,
     rubric_version: str = MASK_RUBRIC_VERSION,
+    rubric: dict[str, Any] | None = None,
 ) -> MaskArtifacts:
     """Write an image mask, red overlay and provenance sidecar without clobbering."""
     if not image_id or not model_version or not rubric_version:
         raise ValueError("image ID, model version and rubric version are required")
+    artifact_rubric = MASK_RUBRIC if rubric is None else rubric
+    if artifact_rubric.get("version") != rubric_version:
+        raise ValueError("mask rubric content does not match its declared version")
     rgb = image.convert("RGB")
     if result.mask.shape != (rgb.height, rgb.width):
         raise ValueError("mask dimensions must match the source image")
@@ -442,7 +460,7 @@ def save_mask_artifacts(
             "model": result.model,
             "model_version": model_version,
             "rubric_version": rubric_version,
-            "rubric": MASK_RUBRIC,
+            "rubric": artifact_rubric,
             "diagnostics": result.diagnostics,
             "mask_sha256": hashlib.sha256(paths.mask_path.read_bytes()).hexdigest(),
             "overlay_sha256": hashlib.sha256(

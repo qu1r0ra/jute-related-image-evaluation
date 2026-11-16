@@ -167,6 +167,10 @@ def cohort_gate(
     ratings = {}
     for row in cohort["pairs"]:
         ratings[row["pair_id"]] = row["agent_rating"] = _owner_rating(row, scenario)
+        row["agent_rubric_version"] = cohort["rubric_version"]
+        row["agent_instrument_version"] = cohort["instrument_version"]
+        row["agent_review_status"] = ""
+        row["agent_review_history"] = "[]"
     (base / "cohort" / "agent.json").write_text(json.dumps(cohort), encoding="utf-8")
     _sheet(base / "cohort" / "owner.csv", ratings)
     run(
@@ -578,6 +582,10 @@ def test_false_split_is_evaluated_once_on_the_owners_imported_ratings(
         row["agent_rating"] = (
             "different" if owner[row["pair_id"]] == "near-duplicate" else "exact"
         )
+        row["agent_rubric_version"] = cohort["rubric_version"]
+        row["agent_instrument_version"] = cohort["instrument_version"]
+        row["agent_review_status"] = ""
+        row["agent_review_history"] = "[]"
     (base / "cohort" / "agent.json").write_text(json.dumps(cohort), encoding="utf-8")
     _sheet(base / "cohort" / "owner.csv", owner)
     evaluate = [

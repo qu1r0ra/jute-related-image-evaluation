@@ -372,6 +372,10 @@ def prepare_cohort(
                 "image_b": b,
                 "distance": distance,
                 "agent_rating": "",
+                "agent_rubric_version": "",
+                "agent_instrument_version": "",
+                "agent_review_status": "",
+                "agent_review_history": "[]",
                 "algorithm_merge": stratum["band"] == "merged",
                 "stratum": pair["stratum"],
                 "pool": stratum["pool"],
@@ -640,6 +644,23 @@ def evaluate_ratings(
     if not all(str(cohort["agent"].get(k, "")).strip() for k in ("name", "version")):
         raise ValueError("cohort does not name the agent rater")
     rows, denominators = cohort["pairs"], cohort["denominators"]
+    target_agent_rubric = cohort.get("rubric_version") or "legacy-unversioned"
+    target_agent_instrument = cohort.get("instrument_version") or "legacy-unversioned"
+    for row in rows:
+        if (
+            row.get("agent_rubric_version") != target_agent_rubric
+            or row.get("agent_instrument_version") != target_agent_instrument
+            or "agent_review_status" not in row
+            or "agent_review_history" not in row
+        ):
+            raise ValueError("agent pass provenance is missing or incompatible")
+        if row.get("agent_review_status") == "open":
+            raise ValueError("unresolved agent review flags block audit evaluation")
+        validate_review_record(
+            "pair",
+            row.get("agent_review_status", ""),
+            row.get("agent_review_history", ""),
+        )
     _check_inclusion(rows, denominators)
     digest = cohort_digest(cohort)
     if round_number == 2:
@@ -871,6 +892,10 @@ def fixture_round(
         row["agent_rating"] = (
             "near-duplicate" if row["algorithm_merge"] else "different"
         )
+        row["agent_rubric_version"] = cohort["rubric_version"]
+        row["agent_instrument_version"] = cohort["instrument_version"]
+        row["agent_review_status"] = ""
+        row["agent_review_history"] = "[]"
     (output / "agent.json").write_text(
         json.dumps(cohort, indent=2) + "\n", encoding="utf-8"
     )

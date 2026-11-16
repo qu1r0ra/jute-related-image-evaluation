@@ -128,12 +128,12 @@ SCENE_RUBRIC: dict[str, Any] = {
             "Most visible background is a uniform, uncluttered surface."
         ),
         "field": (
-            "The background contains substantial outdoor or field structure. "
-            "A leaf photographed against other leaves or plants is field."
+            "The background contains substantial outdoor or field structure, "
+            "including other leaves or plants."
         ),
         "unknown": (
-            "Only for a tight crop, a blurred image, or an image with no "
-            "readable background."
+            "The image provides insufficient readable background, for example "
+            "because of a tight crop or blur."
         ),
     },
 }
