@@ -8,14 +8,32 @@ import pytest
 from PIL import Image
 
 from jute_disease.cli import main
-from jute_disease.data.masks import SCENE_TAGS, ColorThresholdBackend, SceneThresholds
+from jute_disease.data.masks import (
+    SCENE_TAGS,
+    ColorThresholdBackend,
+    MaskPrediction,
+    SceneThresholds,
+    save_mask_artifacts,
+)
 from jute_disease.data.masks_audit import (
+    AGENT_PROVENANCE_COLUMNS,
+    LEGACY_AUDIT_SCHEMA,
     CandidateImage,
     ProtectedTestImages,
     evaluate_masks_audit,
     fit_thresholds_from_manifest,
     read_development_observations,
     run_masks_audit,
+)
+from jute_disease.data.rating_rubric import (
+    MASK_RUBRIC as REVISED_MASK_RUBRIC,
+)
+from jute_disease.data.rating_rubric import (
+    MASK_RUBRIC_VERSION as REVISED_MASK_RUBRIC_VERSION,
+)
+from jute_disease.data.rating_rubric import (
+    RATING_RUBRIC_VERSION,
+    SCENE_RUBRIC_VERSION,
 )
 
 PROTECTED = ProtectedTestImages(
@@ -73,9 +91,7 @@ def _candidates(tmp_path: Path) -> list[CandidateImage]:
 
 def _fill_ratings(manifest: dict, out: Path) -> None:
     with (out / "agent.csv").open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(
-            handle, fieldnames=("audit_id", "overlay_path", "mask_quality")
-        )
+        writer = csv.DictWriter(handle, fieldnames=AGENT_PROVENANCE_COLUMNS)
         writer.writeheader()
         for index, row in enumerate(manifest["records"]):
             writer.writerow(
@@ -83,12 +99,26 @@ def _fill_ratings(manifest: dict, out: Path) -> None:
                     "audit_id": row["audit_id"],
                     "overlay_path": row["overlay_path"],
                     "mask_quality": ("pass", "minor", "fail")[index % 3],
+                    "rubric_version": REVISED_MASK_RUBRIC_VERSION,
+                    "instrument_version": RATING_RUBRIC_VERSION,
+                    "review_status": "",
+                    "review_history": "[]",
                 }
             )
     with (out / "owner.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=("audit_id", "overlay_path", "mask_quality", "scene_tag"),
+            fieldnames=(
+                "audit_id",
+                "overlay_path",
+                "mask_quality",
+                "scene_tag",
+                "rubric_version",
+                "scene_rubric_version",
+                "instrument_version",
+                "review_status",
+                "review_history",
+            ),
         )
         writer.writeheader()
         for index, audit_id in enumerate(manifest["owner_audit_ids"]):
@@ -101,6 +131,11 @@ def _fill_ratings(manifest: dict, out: Path) -> None:
                     "overlay_path": row["overlay_path"],
                     "mask_quality": ("pass", "minor", "fail")[index % 3],
                     "scene_tag": row["predicted_scene"],
+                    "rubric_version": REVISED_MASK_RUBRIC_VERSION,
+                    "scene_rubric_version": SCENE_RUBRIC_VERSION,
+                    "instrument_version": RATING_RUBRIC_VERSION,
+                    "review_status": "",
+                    "review_history": "[]",
                 }
             )
 
@@ -145,14 +180,25 @@ def test_stratified_audit_oversamples_rare_scenes_and_blinds_sheets(
     )
     owner_columns = next(csv.reader((tmp_path / "audit" / "owner.csv").open()))
     agent_columns = next(csv.reader((tmp_path / "audit" / "agent.csv").open()))
-    assert owner_columns == ["audit_id", "overlay_path", "mask_quality", "scene_tag"]
-    assert agent_columns == ["audit_id", "overlay_path", "mask_quality"]
+    assert owner_columns == [
+        "audit_id",
+        "overlay_path",
+        "mask_quality",
+        "scene_tag",
+        "rubric_version",
+        "scene_rubric_version",
+        "instrument_version",
+        "review_status",
+        "review_history",
+    ]
+    assert agent_columns == list(AGENT_PROVENANCE_COLUMNS)
     metadata = json.loads(
         (tmp_path / "audit" / manifest["records"][0]["metadata_path"]).read_text()
     )
     assert metadata["model"] == ColorThresholdBackend.model
     assert metadata["model_version"] == ColorThresholdBackend.version
-    assert metadata["rubric"]["version"] == "leaf-mask-v1"
+    assert metadata["rubric"]["version"] == REVISED_MASK_RUBRIC_VERSION
+    assert metadata["rubric"] == REVISED_MASK_RUBRIC
 
     _fill_ratings(manifest, tmp_path / "audit")
     report = evaluate_masks_audit(
@@ -170,6 +216,256 @@ def test_stratified_audit_oversamples_rare_scenes_and_blinds_sheets(
     assert report["mask_quality"]["fail_rate"]["population"] == 20
     assert len(report["digest"]) == 64
     assert report["mask_backend"] == manifest["mask_backend"]
+
+
+def test_new_mask_audit_declares_revised_rubric_on_all_generated_evidence(
+    tmp_path: Path,
+) -> None:
+    manifest = run_masks_audit(
+        _candidates(tmp_path),
+        _thresholds(),
+        ColorThresholdBackend(),
+        tmp_path / "audit",
+        PROTECTED,
+        sample_count=12,
+        owner_count=6,
+    )
+
+    assert manifest["schema"] != LEGACY_AUDIT_SCHEMA
+    assert manifest["rubric_provenance"] == {
+        "mask_rubric_version": REVISED_MASK_RUBRIC_VERSION,
+        "scene_rubric_version": SCENE_RUBRIC_VERSION,
+        "instrument_version": RATING_RUBRIC_VERSION,
+    }
+    assert manifest["mask_rubric"] == REVISED_MASK_RUBRIC
+    assert REVISED_MASK_RUBRIC_VERSION in manifest["instructions"]["agent"]
+    with (tmp_path / "audit" / "agent.csv").open(
+        newline="", encoding="utf-8"
+    ) as handle:
+        agent = next(csv.DictReader(handle))
+    assert agent["rubric_version"] == REVISED_MASK_RUBRIC_VERSION
+    assert agent["instrument_version"] == RATING_RUBRIC_VERSION
+    assert agent["review_status"] == ""
+    assert json.loads(agent["review_history"]) == []
+
+
+def test_unversioned_agent_sheet_cannot_be_mixed_with_revised_owner_evidence(
+    tmp_path: Path,
+) -> None:
+    manifest = run_masks_audit(
+        _candidates(tmp_path),
+        _thresholds(),
+        ColorThresholdBackend(),
+        tmp_path / "audit",
+        PROTECTED,
+        sample_count=12,
+        owner_count=6,
+    )
+    audit_dir = tmp_path / "audit"
+    _fill_ratings(manifest, audit_dir)
+    with (audit_dir / "agent.csv").open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    with (audit_dir / "agent.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle, fieldnames=("audit_id", "overlay_path", "mask_quality")
+        )
+        writer.writeheader()
+        writer.writerows({key: row[key] for key in writer.fieldnames} for row in rows)
+
+    with pytest.raises(ValueError, match="agent.*provenance|columns must be"):
+        evaluate_masks_audit(
+            manifest,
+            audit_dir / "agent.csv",
+            audit_dir / "owner.csv",
+            resamples=200,
+            agent_rater={"name": "fixture-agent", "version": "test"},
+        )
+
+
+def test_agent_unresolved_review_history_blocks_evaluation(tmp_path: Path) -> None:
+    manifest = run_masks_audit(
+        _candidates(tmp_path),
+        _thresholds(),
+        ColorThresholdBackend(),
+        tmp_path / "audit",
+        PROTECTED,
+        sample_count=12,
+        owner_count=6,
+    )
+    audit_dir = tmp_path / "audit"
+    _fill_ratings(manifest, audit_dir)
+    with (audit_dir / "agent.csv").open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    rows[0]["review_status"] = "open"
+    rows[0]["review_history"] = json.dumps([{"action": "flagged", "kind": "target"}])
+    with (audit_dir / "agent.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=AGENT_PROVENANCE_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    with pytest.raises(ValueError, match="unresolved mask agent review"):
+        evaluate_masks_audit(
+            manifest,
+            audit_dir / "agent.csv",
+            audit_dir / "owner.csv",
+            resamples=200,
+            agent_rater={"name": "fixture-agent", "version": "test"},
+        )
+
+
+def test_agent_resolved_review_history_keeps_full_sample_denominator(
+    tmp_path: Path,
+) -> None:
+    manifest = run_masks_audit(
+        _candidates(tmp_path),
+        _thresholds(),
+        ColorThresholdBackend(),
+        tmp_path / "audit",
+        PROTECTED,
+        sample_count=12,
+        owner_count=6,
+    )
+    audit_dir = tmp_path / "audit"
+    _fill_ratings(manifest, audit_dir)
+    with (audit_dir / "agent.csv").open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    rows[0]["review_status"] = "resolved"
+    rows[0]["review_history"] = json.dumps(
+        [
+            {"action": "flagged", "kind": "target"},
+            {
+                "action": "resolved",
+                "kind": "target",
+                "note": "Synthetic target identification from the overlay.",
+            },
+        ]
+    )
+    with (audit_dir / "agent.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=AGENT_PROVENANCE_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    report = evaluate_masks_audit(
+        manifest,
+        audit_dir / "agent.csv",
+        audit_dir / "owner.csv",
+        resamples=200,
+        agent_rater={"name": "fixture-agent", "version": "test"},
+    )
+
+    assert sum(report["rating_counts"]["agent_mask"].values()) == 12
+    assert report["mask_quality"]["fail_rate"]["sampled"] == 12
+
+
+def test_revised_manifest_cannot_drop_owner_review_fields_to_bypass_flags(
+    tmp_path: Path,
+) -> None:
+    manifest = run_masks_audit(
+        _candidates(tmp_path),
+        _thresholds(),
+        ColorThresholdBackend(),
+        tmp_path / "audit",
+        PROTECTED,
+        sample_count=12,
+        owner_count=6,
+    )
+    audit_dir = tmp_path / "audit"
+    _fill_ratings(manifest, audit_dir)
+    with (audit_dir / "owner.csv").open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    rows[0]["review_status"] = "open"
+    rows[0]["review_history"] = json.dumps([{"action": "flagged", "kind": "target"}])
+    with (audit_dir / "owner.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=("audit_id", "overlay_path", "mask_quality", "scene_tag"),
+        )
+        writer.writeheader()
+        writer.writerows({key: row[key] for key in writer.fieldnames} for row in rows)
+
+    with pytest.raises(ValueError, match="owner.*provenance|columns must be"):
+        evaluate_masks_audit(
+            manifest,
+            audit_dir / "agent.csv",
+            audit_dir / "owner.csv",
+            resamples=200,
+            agent_rater={"name": "fixture-agent", "version": "test"},
+        )
+
+
+def test_explicit_v1_manifest_preserves_legacy_only_evaluator_path(
+    tmp_path: Path,
+) -> None:
+    from jute_disease.data.masks import MASK_RUBRIC as LEGACY_MASK_RUBRIC
+
+    manifest = run_masks_audit(
+        _candidates(tmp_path),
+        _thresholds(),
+        ColorThresholdBackend(),
+        tmp_path / "audit",
+        PROTECTED,
+        sample_count=12,
+        owner_count=6,
+    )
+    audit_dir = tmp_path / "audit"
+    manifest["schema"] = LEGACY_AUDIT_SCHEMA
+    manifest["mask_rubric"] = LEGACY_MASK_RUBRIC
+    manifest.pop("rubric_provenance", None)
+    _fill_ratings(manifest, audit_dir)
+    with (audit_dir / "agent.csv").open(newline="", encoding="utf-8") as handle:
+        agent_rows = list(csv.DictReader(handle))
+    with (audit_dir / "agent.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle, fieldnames=("audit_id", "overlay_path", "mask_quality")
+        )
+        writer.writeheader()
+        writer.writerows(
+            {key: row[key] for key in writer.fieldnames} for row in agent_rows
+        )
+    with (audit_dir / "owner.csv").open(newline="", encoding="utf-8") as handle:
+        owner_rows = list(csv.DictReader(handle))
+    with (audit_dir / "owner.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=("audit_id", "overlay_path", "mask_quality", "scene_tag"),
+        )
+        writer.writeheader()
+        writer.writerows(
+            {key: row[key] for key in writer.fieldnames} for row in owner_rows
+        )
+
+    report = evaluate_masks_audit(
+        manifest,
+        audit_dir / "agent.csv",
+        audit_dir / "owner.csv",
+        resamples=200,
+        agent_rater={"name": "fixture-agent", "version": "test"},
+    )
+
+    assert report["rating_counts"]["agent_mask"]
+    assert report["rating_counts"]["owner_mask"]
+
+
+def test_save_mask_artifacts_keeps_legacy_v1_default_metadata(tmp_path: Path) -> None:
+    from jute_disease.data.masks import MASK_RUBRIC as LEGACY_MASK_RUBRIC
+
+    image = Image.new("RGB", (4, 4), "white")
+    prediction = MaskPrediction(
+        np.ones((4, 4), dtype=bool),
+        ColorThresholdBackend.model,
+        {"threshold": 0.5},
+    )
+    artifacts = save_mask_artifacts(
+        image,
+        prediction,
+        tmp_path / "legacy-artifacts",
+        image_id="legacy-synthetic",
+        model_version="1",
+    )
+
+    metadata = artifacts.read_metadata()
+    assert metadata["rubric_version"] == "leaf-mask-v1"
+    assert metadata["rubric"] == LEGACY_MASK_RUBRIC
 
 
 @pytest.mark.parametrize("rating", ["", "invalid"])
@@ -199,9 +495,7 @@ def test_evaluation_rejects_invalid_unpaired_agent_rating(
         if row["audit_id"] == unpaired_id:
             row["mask_quality"] = rating
     with agent_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(
-            handle, fieldnames=("audit_id", "overlay_path", "mask_quality")
-        )
+        writer = csv.DictWriter(handle, fieldnames=AGENT_PROVENANCE_COLUMNS)
         writer.writeheader()
         writer.writerows(rows)
 
@@ -332,9 +626,7 @@ def _rate(manifest: dict, tmp_path: Path, fails: int) -> dict:
     for index, row in enumerate(rows):
         row["mask_quality"] = "fail" if index < fails else "pass"
     with (out / "agent.csv").open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(
-            handle, fieldnames=("audit_id", "overlay_path", "mask_quality")
-        )
+        writer = csv.DictWriter(handle, fieldnames=AGENT_PROVENANCE_COLUMNS)
         writer.writeheader()
         writer.writerows(rows)
     return evaluate_masks_audit(

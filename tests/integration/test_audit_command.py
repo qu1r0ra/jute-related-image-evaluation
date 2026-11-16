@@ -80,6 +80,10 @@ def rate_pairs(cohort: dict[str, Any], flip_every: int = 4) -> dict[str, str]:
         row["agent_rating"] = (
             "near-duplicate" if row["algorithm_merge"] else "different"
         )
+        row["agent_rubric_version"] = cohort["rubric_version"]
+        row["agent_instrument_version"] = cohort["instrument_version"]
+        row["agent_review_status"] = ""
+        row["agent_review_history"] = "[]"
         flipped = int(row["pair_id"]) % flip_every == 0
         merge = row["algorithm_merge"] != flipped
         owner[row["pair_id"]] = "near-duplicate" if merge else "different"
@@ -179,7 +183,14 @@ def test_cohort_records_grouping_version_and_agent_rater(
     )
     owner = read_sheet(cohort_dir / "owner.csv")
     assert len(owner) == len(cohort["pairs"])
-    assert list(owner[0]) == ["pair_id", "image_a", "image_b", "rating"]
+    assert list(owner[0]) == [
+        "pair_id",
+        "image_a",
+        "image_b",
+        "rating",
+        "rubric_version",
+        "instrument_version",
+    ]
 
     with pytest.raises(SystemExit):
         cli.main(
@@ -261,6 +272,120 @@ def test_evaluation_refuses_a_cohort_without_grouping_version_or_agent(
         path.write_text(json.dumps(broken), encoding="utf-8")
         with pytest.raises(SystemExit, match=missing):
             cli.main(["data", "audit-evaluate", str(path), str(sheet)])
+
+
+def test_public_evaluator_requires_compatible_rubric_and_resolved_reviews(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    cohort_dir, cohort = make_cohort(capsys, tmp_path)
+    ratings = rate_pairs(cohort)
+    cohort["pairs"][0]["agent_review_status"] = "resolved"
+    cohort["pairs"][0]["agent_review_history"] = json.dumps(
+        [
+            {"action": "flagged", "kind": "identity"},
+            {
+                "action": "resolved",
+                "kind": "identity",
+                "note": "Synthetic resolution from distinctive overlap.",
+            },
+        ]
+    )
+    source = cohort_dir / "agent.json"
+    source.write_text(json.dumps(cohort), encoding="utf-8")
+    sheet = cohort_dir / "owner.csv"
+    rows = read_sheet(sheet)
+    for row in rows:
+        row["rating"] = ratings[row["pair_id"]]
+        row["review_status"] = ""
+        row["review_history"] = "[]"
+    write_sheet(sheet, rows)
+
+    rows[0]["rubric_version"] = "related-image-v1"
+    write_sheet(sheet, rows)
+    original = sheet.read_bytes()
+    with pytest.raises(SystemExit, match="incompatible"):
+        cli.main(["data", "audit-evaluate", str(source), str(sheet)])
+    assert sheet.read_bytes() == original
+
+    rows[0]["rubric_version"] = cohort["rubric_version"]
+    rows[0]["review_status"] = "open"
+    rows[0]["review_history"] = json.dumps([{"action": "flagged", "kind": "identity"}])
+    write_sheet(sheet, rows)
+    with pytest.raises(SystemExit, match="unresolved review"):
+        cli.main(["data", "audit-evaluate", str(source), str(sheet)])
+
+    rows[0]["review_status"] = "resolved"
+    write_sheet(sheet, rows)
+    with pytest.raises(SystemExit, match="review status does not match its history"):
+        cli.main(["data", "audit-evaluate", str(source), str(sheet)])
+
+    rows[0]["rubric_version"] = "legacy-unversioned"
+    rows[0]["review_history"] = json.dumps(
+        [
+            {"action": "flagged", "kind": "identity"},
+            {
+                "action": "resolved",
+                "kind": "identity",
+                "note": "Synthetic resolution note.",
+            },
+        ]
+    )
+    write_sheet(sheet, rows)
+    before_adoption = sheet.read_bytes()
+    report = run(
+        capsys,
+        "audit-evaluate",
+        str(source),
+        str(sheet),
+        "--adopt-rubric",
+        "Synthetic pass explicitly adopted after owner review; source CSV retained.",
+    )
+    assert report["rubric_version"] == cohort["rubric_version"]
+    assert report["source_rubric_versions"] == [
+        "legacy-unversioned",
+        cohort["rubric_version"],
+    ]
+    assert report["source_instrument_versions"] == [cohort["instrument_version"]]
+    assert report["rubric_adoption"]["note"].startswith(
+        "Synthetic pass explicitly adopted"
+    )
+    assert report["pair_label_mapping"] == {
+        "exact": 1,
+        "near-duplicate": 1,
+        "very similar": 0,
+        "different": 0,
+    }
+    assert sheet.read_bytes() == before_adoption
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("agent_rubric_version", "related-image-v1", "agent pass provenance"),
+        ("agent_instrument_version", "rating-bundle-v1", "agent pass provenance"),
+        ("agent_review_status", "open", "unresolved agent review"),
+    ],
+)
+def test_public_evaluator_rejects_incompatible_or_unresolved_agent_evidence(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    field: str,
+    value: str,
+    message: str,
+) -> None:
+    cohort_dir, cohort = make_cohort(capsys, tmp_path)
+    rate_pairs(cohort)
+    cohort["pairs"][0][field] = value
+    source = cohort_dir / "agent.json"
+    source.write_text(json.dumps(cohort), encoding="utf-8")
+    owner = cohort_dir / "owner.csv"
+    rows = read_sheet(owner)
+    for row in rows:
+        row["rating"] = "near-duplicate"
+    write_sheet(owner, rows)
+
+    with pytest.raises(SystemExit, match=message):
+        cli.main(["data", "audit-evaluate", str(source), str(owner)])
 
 
 def test_retry_is_bound_to_the_cohort_and_escalates(

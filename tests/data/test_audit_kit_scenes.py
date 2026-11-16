@@ -6,8 +6,12 @@ from pathlib import Path
 import pytest
 
 from jute_disease.cli import main
-from jute_disease.data import build_audit_kit, collect_audit_kit, next_audit_sitting
-from jute_disease.data.masks import SCENE_RUBRIC
+from jute_disease.data import (
+    SCENE_RUBRIC,
+    build_audit_kit,
+    collect_audit_kit,
+    next_audit_sitting,
+)
 
 HIDDEN = ("poolA", "disease-label", "held-out-source", "reserve", "predicted")
 
@@ -105,7 +109,11 @@ def test_kit_without_a_held_out_set_is_unchanged(tmp_path: Path) -> None:
     summary = build_audit_kit(cohort, masks, tmp_path / "kit")
 
     kit = json.loads((tmp_path / "kit" / "kit.json").read_text("utf-8"))
-    assert kit["schema"] == "jute-audit-kit-v1"
+    assert kit["schema"] == "jute-audit-kit-v3"
+    assert kit["rubric_version"] == "rating-bundle-v2"
+    assert kit["pair_rubric_version"] == "related-image-v2"
+    assert kit["mask_rubric_version"] == "leaf-mask-v2"
+    assert kit["scene_rubric_version"] == "scene-tag-v2"
     assert [item["kind"] for item in kit["items"]] == ["mask"] * 3 + ["pair"] * 3
     assert {item["pool"] for item in kit["items"] if item["kind"] == "pair"} == {"A"}
     assert summary["scene_items"] == 0
@@ -129,7 +137,7 @@ def test_kit_carries_one_blind_scene_item_per_held_out_image(tmp_path: Path) -> 
 
     text = (tmp_path / "kit" / "kit.json").read_text("utf-8")
     kit = json.loads(text)
-    assert kit["schema"] == "jute-audit-kit-v2"
+    assert kit["schema"] == "jute-audit-kit-v4"
     assert kit["scene_rubric"] == SCENE_RUBRIC
     assert summary["scene_items"] == 5
     kinds = [item["kind"] for item in kit["items"]]
@@ -187,6 +195,34 @@ def test_scene_items_round_trip_to_their_own_owner_sheet(tmp_path: Path) -> None
         == ["clean-background"] * 3 + ["field"] * 2
     )
     assert len(_rows(collected["mask_sheet"])) == 3
+
+
+def test_legacy_scene_rating_is_preserved_without_new_provenance(
+    tmp_path: Path,
+) -> None:
+    cohort, masks, held_out, ids = _sources(tmp_path, scenes=1)
+    kit_dir = tmp_path / "kit"
+    build_audit_kit(cohort, masks, kit_dir, held_out=held_out)
+    sitting = next_audit_sitting(kit_dir)
+    _fill(sitting["sheet"])
+    rows = _rows(sitting["sheet"])
+    scene = next(row for row in rows if row["kind"] == "scene")
+    scene["rubric_version"] = ""
+    scene["scene_rubric_version"] = ""
+    scene["instrument_version"] = ""
+    with Path(sitting["sheet"]).open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    collected = collect_audit_kit(kit_dir)
+
+    owner_scene = next(
+        row for row in _rows(collected["scene_sheet"]) if row["image_id"] == ids[0]
+    )
+    assert owner_scene["scene_tag"] == "field"
+    assert owner_scene["rubric_version"] == ""
+    assert owner_scene["instrument_version"] == ""
 
 
 @pytest.mark.parametrize(

@@ -156,36 +156,36 @@ def _inventory(work: Path, name: str) -> Path:
 
 def _rate_all_pass(audit: Path) -> tuple[Path, Path, Path]:
     manifest = json.loads((audit / "audit.json").read_text(encoding="utf-8"))
-    with (audit / "agent.csv").open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(
-            handle, fieldnames=("audit_id", "overlay_path", "mask_quality")
-        )
-        writer.writeheader()
-        for row in manifest["records"]:
-            writer.writerow(
-                {
-                    "audit_id": row["audit_id"],
-                    "overlay_path": row["overlay_path"],
-                    "mask_quality": "pass",
-                }
-            )
     by_id = {row["audit_id"]: row for row in manifest["records"]}
-    with (audit / "owner.csv").open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(
-            handle,
-            fieldnames=("audit_id", "overlay_path", "mask_quality", "scene_tag"),
-        )
+
+    agent_path = audit / "agent.csv"
+    with agent_path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        agent_fields = reader.fieldnames
+        agent_rows = list(reader)
+    assert agent_fields is not None
+    for row in agent_rows:
+        row["mask_quality"] = "pass"
+    with agent_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=agent_fields)
         writer.writeheader()
-        for audit_id in manifest["owner_audit_ids"]:
-            writer.writerow(
-                {
-                    "audit_id": audit_id,
-                    "overlay_path": by_id[audit_id]["overlay_path"],
-                    "mask_quality": "pass",
-                    "scene_tag": by_id[audit_id]["predicted_scene"],
-                }
-            )
-    return audit / "audit.json", audit / "agent.csv", audit / "owner.csv"
+        writer.writerows(agent_rows)
+
+    owner_path = audit / "owner.csv"
+    with owner_path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        owner_fields = reader.fieldnames
+        owner_rows = list(reader)
+    assert owner_fields is not None
+    for row in owner_rows:
+        row["mask_quality"] = "pass"
+        row["scene_tag"] = by_id[row["audit_id"]]["predicted_scene"]
+    with owner_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=owner_fields)
+        writer.writeheader()
+        writer.writerows(owner_rows)
+
+    return audit / "audit.json", agent_path, owner_path
 
 
 def test_checkpoint_option_is_removed_from_both_mask_commands(

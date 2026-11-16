@@ -421,6 +421,7 @@ def _audit_evaluate(args: argparse.Namespace) -> None:
             round_number=2 if previous else 1,
             previous=previous,
             revision=args.revision,
+            rubric_adoption=getattr(args, "adopt_rubric", None),
         )
         if previous is not None:
             report["revision"] = args.revision
@@ -1337,6 +1338,13 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_audit.add_argument("sheet", type=Path)
     evaluate_audit.add_argument("--previous", type=Path)
     evaluate_audit.add_argument("--revision")
+    evaluate_audit.add_argument(
+        "--adopt-rubric",
+        help=(
+            "Documentation note explicitly adopting an incompatible or legacy "
+            "owner pass under the cohort rubric."
+        ),
+    )
     evaluate_audit.add_argument(
         "--gate-output", type=Path, help="Write a new freeze-compatible gate record."
     )

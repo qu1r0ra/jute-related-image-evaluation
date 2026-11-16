@@ -2,10 +2,66 @@ import csv
 import hashlib
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from jute_disease.data import AGENT_INSTRUCTIONS, SCENE_RUBRIC
 from jute_disease.rating_applet import create_app
+
+
+def _adopted_client(sheet: Path) -> Any:
+    """Create a synthetic sitting client after explicit rubric adoption."""
+    client = create_app(sheet).test_client()
+    sitting = client.get("/api/sitting").json
+    rubric = client.get("/api/rubric").json
+    if not sitting["rubric_adopted"]:
+        response = client.post(
+            "/api/adopt-rubric",
+            json={
+                "revision": sitting["revision"],
+                "rubric_version": rubric["version"],
+            },
+        )
+        assert response.status_code == 200
+    return client
+
+
+def _reaffirm_existing_pair_and_mask_choices(client: Any, sheet: Path) -> Any:
+    """Reaffirm synthetic pair/mask values and return the current revision."""
+    with sheet.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    revision = client.get("/api/sitting").json["revision"]
+    for position, row in enumerate(rows, start=1):
+        fields = (
+            ("rating",)
+            if row["kind"] == "pair"
+            else ("mask_quality", "scene_tag")
+            if row["kind"] == "mask"
+            else ()
+        )
+        for field in fields:
+            if row[field]:
+                response = client.post(
+                    f"/api/items/{position}",
+                    json={"revision": revision, "field": field, "value": row[field]},
+                )
+                assert response.status_code == 200
+                revision = response.json["revision"]
+    return revision
+
+
+def _adopt_in_browser(page: Any) -> None:
+    """Adopt the synthetic sitting rubric using its keyboard-accessible control."""
+    page.locator(".choice button").first.wait_for(state="visible")
+    page.wait_for_function("document.querySelector('#progress').textContent.length > 0")
+    adopt = page.get_by_role("button", name="Adopt this rubric")
+    adopt.wait_for(state="visible")
+    adopt.focus()
+    assert page.evaluate("document.activeElement.id") == "adopt-rubric"
+    page.keyboard.press("Enter")
+    page.get_by_text("Rubric adoption recorded.", exact=False).wait_for()
+    assert page.get_by_role("button", name="Adopt this rubric").is_hidden()
 
 
 def test_load_resumes_first_incomplete_item_without_exposing_identity(
@@ -66,12 +122,24 @@ def test_load_resumes_first_incomplete_item_without_exposing_identity(
         )
     original = sheet.read_bytes()
 
-    response = create_app(sheet).test_client().get("/api/sitting")
+    client = create_app(sheet).test_client()
+    response = client.get("/api/sitting")
 
     assert response.status_code == 200
-    assert response.json["position"] == 2
-    assert response.json["completed"] == 1
+    assert response.json["position"] == 1
+    assert response.json["completed"] == 0
     assert b"secret" not in response.data
+    assert sheet.read_bytes() == original
+    rubric = client.get("/api/rubric").json
+    adopted = client.post(
+        "/api/adopt-rubric",
+        json={
+            "revision": response.json["revision"],
+            "rubric_version": rubric["version"],
+        },
+    )
+    assert adopted.status_code == 200
+    assert client.get("/api/sitting").json["position"] == 2
     assert sheet.read_bytes() == original
 
 
@@ -82,7 +150,7 @@ def test_save_survives_restart_and_preserves_other_values(tmp_path: Path) -> Non
         "private,mask,,,overlays/a.png,,pass,,keep\n",
         encoding="utf-8",
     )
-    client = create_app(sheet).test_client()
+    client = _adopted_client(sheet)
     revision = client.get("/api/sitting").json["revision"]
 
     saved = client.post(
@@ -92,6 +160,15 @@ def test_save_survives_restart_and_preserves_other_values(tmp_path: Path) -> Non
 
     assert saved.status_code == 200
     reopened = create_app(sheet).test_client().get("/api/sitting").json
+    assert reopened["completed"] == 0
+    client = _adopted_client(sheet)
+    revision = client.get("/api/sitting").json["revision"]
+    reaffirmed = client.post(
+        "/api/items/1",
+        json={"revision": revision, "field": "mask_quality", "value": "pass"},
+    )
+    assert reaffirmed.status_code == 200
+    reopened = create_app(sheet).test_client().get("/api/sitting").json
     assert reopened["completed"] == 1
     assert "private,mask,,,overlays/a.png,,pass,field,keep" in sheet.read_text()
 
@@ -100,7 +177,7 @@ def test_unchanged_choice_preserves_sheet_bytes(tmp_path: Path) -> None:
     sheet = tmp_path / "sitting-001.csv"
     original = b"item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\nprivate,scene,scenes/a.png,,,,,field\n"
     sheet.write_bytes(original)
-    client = create_app(sheet).test_client()
+    client = _adopted_client(sheet)
     revision = client.get("/api/sitting").json["revision"]
     response = client.post(
         "/api/items/1",
@@ -153,7 +230,7 @@ def test_null_choice_is_refused_without_changing_sheet(tmp_path: Path) -> None:
     sheet = tmp_path / "sitting-001.csv"
     original = b"item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\nprivate,scene,scenes/a.png,,,,,field\n"
     sheet.write_bytes(original)
-    client = create_app(sheet).test_client()
+    client = _adopted_client(sheet)
     revision = client.get("/api/sitting").json["revision"]
 
     response = client.post(
@@ -172,7 +249,7 @@ def test_finish_requires_completion_and_protects_sitting(tmp_path: Path) -> None
         "private,scene,scenes/a.png,,,,,\n",
         encoding="utf-8",
     )
-    client = create_app(sheet).test_client()
+    client = _adopted_client(sheet)
     revision = client.get("/api/sitting").json["revision"]
     assert client.post("/api/finish", json={"revision": revision}).status_code == 409
     saved = client.post(
@@ -209,7 +286,7 @@ def test_interrupted_replacement_recovers_confirmed_revision(
     sheet = tmp_path / "sitting-001.csv"
     original = b"item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\nprivate,scene,scenes/a.png,,,,,\n"
     sheet.write_bytes(original)
-    client = create_app(sheet).test_client()
+    client = _adopted_client(sheet)
     revision = client.get("/api/sitting").json["revision"]
     with monkeypatch.context() as patch:
         patch.setattr(
@@ -232,7 +309,7 @@ def test_external_edit_requires_recovery(tmp_path: Path) -> None:
     sheet.write_bytes(
         b"item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\nprivate,scene,scenes/a.png,,,,,\n"
     )
-    client = create_app(sheet).test_client()
+    client = _adopted_client(sheet)
     revision = client.get("/api/sitting").json["revision"]
     sheet.write_bytes(sheet.read_bytes().replace(b"a.png", b"b.png"))
     assert (
@@ -254,7 +331,7 @@ def test_save_interrupted_after_replacement_recovers_as_committed(
     sheet.write_bytes(
         b"item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\nprivate,scene,scenes/a.png,,,,,\n"
     )
-    client = create_app(sheet).test_client()
+    client = _adopted_client(sheet)
     revision = client.get("/api/sitting").json["revision"]
     replace = os.replace
 
@@ -282,7 +359,7 @@ def test_reopening_requires_explicit_reason_and_is_recorded(tmp_path: Path) -> N
     sheet.write_bytes(
         b"item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\nprivate,scene,scenes/a.png,,,,,field\n"
     )
-    client = create_app(sheet).test_client()
+    client = _adopted_client(sheet)
     revision = client.get("/api/sitting").json["revision"]
     assert client.post("/api/finish", json={"revision": revision}).status_code == 200
     with pytest.raises(ValueError):
@@ -333,7 +410,8 @@ def test_two_processes_cannot_both_write_same_revision(tmp_path: Path) -> None:
     sheet.write_bytes(
         b"item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\nprivate,scene,scenes/a.png,,,,,\n"
     )
-    revision = create_app(sheet).test_client().get("/api/sitting").json["revision"]
+    client = _adopted_client(sheet)
+    revision = client.get("/api/sitting").json["revision"]
     context = multiprocessing.get_context("spawn")
     ready, results, start = context.Queue(), context.Queue(), context.Event()
     processes = [
@@ -367,9 +445,13 @@ def test_synthetic_pair_mask_scene_roundtrip_through_collector(
     from jute_disease.data import collect_audit_kit, next_audit_sitting
 
     kit = {
-        "schema": "jute-audit-kit-v2",
+        "schema": "jute-audit-kit-v4",
         "grouping_version": "test",
         "agent": {},
+        "rubric_version": "rating-bundle-v2",
+        "pair_rubric_version": "related-image-v2",
+        "mask_rubric_version": "leaf-mask-v2",
+        "scene_rubric_version": "scene-tag-v2",
         "items": [
             {
                 "item_id": "mask:m",
@@ -389,7 +471,7 @@ def test_synthetic_pair_mask_scene_roundtrip_through_collector(
     }
     (tmp_path / "kit.json").write_text(json.dumps(kit), encoding="utf-8")
     sheet = Path(next_audit_sitting(tmp_path)["sheet"])
-    client = create_app(sheet).test_client()
+    client = _adopted_client(sheet)
     revision = client.get("/api/sitting").json["revision"]
     for position, field, value in [
         (1, "mask_quality", "pass"),
@@ -417,6 +499,10 @@ def test_synthetic_pair_mask_scene_roundtrip_through_collector(
         "image_a": "a.png",
         "image_b": "b.png",
         "rating": "near-duplicate",
+        "rubric_version": "related-image-v2",
+        "instrument_version": "rating-bundle-v2",
+        "review_status": "",
+        "review_history": "[]",
     }
     assert (
         client.post(
@@ -425,6 +511,275 @@ def test_synthetic_pair_mask_scene_roundtrip_through_collector(
         ).status_code
         == 403
     )
+
+
+def test_versioned_adoption_and_durable_review_flags_roundtrip_to_collector(
+    tmp_path: Path,
+) -> None:
+    from jute_disease.data import collect_audit_kit
+
+    kit = tmp_path / "kit"
+    kit.mkdir()
+    (kit / "kit.json").write_text(
+        json.dumps(
+            {
+                "schema": "jute-audit-kit-v1",
+                "grouping_version": "dhash-v2",
+                "agent": {"name": "synthetic-agent", "version": "v1"},
+                "items": [
+                    {
+                        "item_id": "pair:synthetic",
+                        "kind": "pair",
+                        "image_a": "synthetic/a.png",
+                        "image_b": "synthetic/b.png",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    sheet = kit / "sitting-001.csv"
+    sheet.write_text(
+        "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\n"
+        "pair:synthetic,pair,synthetic/a.png,synthetic/b.png,,exact,,\n",
+        encoding="utf-8",
+    )
+    original = sheet.read_bytes()
+    client = create_app(sheet).test_client()
+
+    sitting = client.get("/api/sitting").json
+    item = client.get("/api/items/1").json
+    canonical_rubric = client.get("/api/rubric").json
+    assert sitting["rubric_adopted"] is False
+    assert canonical_rubric["scene"] == SCENE_RUBRIC
+    assert canonical_rubric["scene"]["anchors"]["field"] == (
+        "The background contains substantial outdoor or field structure, "
+        "including other leaves or plants."
+    )
+    assert canonical_rubric["scene"]["anchors"]["unknown"] == (
+        "The image provides insufficient readable background, for example "
+        "because of a tight crop or blur."
+    )
+    assert all(
+        anchor in AGENT_INSTRUCTIONS for anchor in SCENE_RUBRIC["anchors"].values()
+    )
+    assert canonical_rubric["mask"]["labels"]["minor"] == "Minor defect"
+    assert "**Minor defect** (`minor`)" in AGENT_INSTRUCTIONS
+    assert [choice["label"] for choice in item["rubric"]["categories"]] == [
+        "Visually identical",
+        "Near-duplicate",
+        "Visually similar",
+        "Visually dissimilar",
+    ]
+    assert item["rating"] == "exact"
+    assert (
+        client.post(
+            "/api/items/1/review",
+            json={
+                "revision": sitting["revision"],
+                "action": "flag",
+                "kind": "identity",
+            },
+        ).status_code
+        == 409
+    )
+
+    adopted = client.post(
+        "/api/adopt-rubric",
+        json={
+            "revision": sitting["revision"],
+            "rubric_version": client.get("/api/rubric").json["version"],
+        },
+    )
+    assert adopted.status_code == 200
+    revision = adopted.json["revision"]
+    assert sheet.read_bytes() == original
+    events = [
+        json.loads(line)
+        for line in (kit / ".rating-applet" / sheet.name / "events.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    rubric_adoption = next(
+        event for event in events if event["type"] == "rubric_adoption"
+    )
+    assert rubric_adoption["rubric_version"] == "rating-bundle-v2"
+    assert rubric_adoption["instrument_version"] == "rating-bundle-v2"
+    assert rubric_adoption["applet_version"] == "2.0.0"
+    assert rubric_adoption["original_rubric_provenance"]["pair:synthetic"] == {
+        "rubric_version": "legacy-unversioned",
+        "scene_rubric_version": "legacy-unversioned",
+        "instrument_version": "legacy-unversioned",
+    }
+    reaffirmed = client.post(
+        "/api/items/1",
+        json={"revision": revision, "field": "rating", "value": "exact"},
+    )
+    assert reaffirmed.status_code == 200
+    revision = reaffirmed.json["revision"]
+
+    flagged = client.post(
+        "/api/items/1/review",
+        json={"revision": revision, "action": "flag", "kind": "identity"},
+    )
+    assert flagged.status_code == 200
+    reopened = create_app(sheet).test_client()
+    review = reopened.get("/api/items/1").json["review"]
+    assert review["status"] == "open"
+    assert review["history"][-1]["action"] == "flagged"
+    status = reopened.get("/api/sitting").json
+    assert status["unresolved_reviews"] == 1
+    assert (
+        reopened.post("/api/finish", json={"revision": status["revision"]}).status_code
+        == 409
+    )
+    with pytest.raises(ValueError, match="unresolved review"):
+        collect_audit_kit(kit)
+
+    resolved = reopened.post(
+        "/api/items/1/review",
+        json={
+            "revision": status["revision"],
+            "action": "resolve",
+            "note": "Synthetic evidence distinguishes the captures.",
+        },
+    )
+    assert resolved.status_code == 200
+    review = create_app(sheet).test_client().get("/api/items/1").json["review"]
+    assert review["status"] == "resolved"
+    assert [entry["action"] for entry in review["history"]] == [
+        "flagged",
+        "resolved",
+    ]
+    assert (
+        review["history"][-1]["note"]
+        == "Synthetic evidence distinguishes the captures."
+    )
+    finished = create_app(sheet).test_client()
+    status = finished.get("/api/sitting").json
+    assert (
+        finished.post("/api/finish", json={"revision": status["revision"]}).status_code
+        == 200
+    )
+    collected = collect_audit_kit(kit)
+    assert collected["pair_ratings"] == 1
+    with (kit / "owner.csv").open(newline="", encoding="utf-8") as handle:
+        owner = next(csv.DictReader(handle))
+    assert owner["rating"] == "exact"
+    assert owner["rubric_version"] == item["rubric"]["version"]
+    assert owner["instrument_version"] == "rating-bundle-v2"
+    assert json.loads(owner["review_history"])[-1]["action"] == "resolved"
+
+
+def test_scene_save_preserves_legacy_mask_provenance_until_reaffirmed(
+    tmp_path: Path,
+) -> None:
+    sheet = tmp_path / "sitting-001.csv"
+    sheet.write_text(
+        "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag,"
+        "rubric_version,scene_rubric_version,instrument_version,review_status,"
+        "review_history\n"
+        "mask:synthetic,mask,,,,,pass,clean-background,leaf-mask-v1,"
+        "scene-tag-v1,legacy-tool-v1,,[]\n",
+        encoding="utf-8",
+    )
+    client = _adopted_client(sheet)
+    revision = client.get("/api/sitting").json["revision"]
+
+    scene = client.post(
+        "/api/items/1",
+        json={"revision": revision, "field": "scene_tag", "value": "field"},
+    )
+    assert scene.status_code == 200
+    row = next(csv.DictReader(sheet.open(newline="", encoding="utf-8")))
+    assert row["mask_quality"] == "pass"
+    assert row["rubric_version"] == "leaf-mask-v1"
+    assert row["instrument_version"] == "legacy-tool-v1"
+    assert row["scene_rubric_version"] == "scene-tag-v2"
+    assert client.get("/api/sitting").json["completed"] == 0
+
+    reaffirmed = client.post(
+        "/api/items/1",
+        json={
+            "revision": scene.json["revision"],
+            "field": "mask_quality",
+            "value": "pass",
+        },
+    )
+    assert reaffirmed.status_code == 200
+    row = next(csv.DictReader(sheet.open(newline="", encoding="utf-8")))
+    assert row["rubric_version"] == "leaf-mask-v2"
+    assert row["instrument_version"] == "rating-bundle-v2"
+    assert client.get("/api/sitting").json["completed"] == 1
+
+
+def test_revised_scene_guidance_overrides_historical_kit_anchors_without_rewriting(
+    tmp_path: Path,
+) -> None:
+    kit = tmp_path / "kit"
+    kit.mkdir()
+    kit_manifest = {
+        "schema": "jute-audit-kit-v2",
+        "scene_rubric": {
+            "version": "scene-tag-v1",
+            "anchors": {
+                "clean-background": "Legacy clean anchor.",
+                "field": "Legacy field anchor.",
+                "unknown": "Legacy unknown anchor.",
+            },
+        },
+        "items": [{"item_id": "scene:synthetic", "kind": "scene"}],
+    }
+    kit_path = kit / "kit.json"
+    kit_path.write_text(json.dumps(kit_manifest), encoding="utf-8")
+    original_kit = kit_path.read_bytes()
+    sheet = kit / "sitting-001.csv"
+    sheet.write_text(
+        "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\n"
+        "scene:synthetic,scene,scenes/a.png,,,,,\n",
+        encoding="utf-8",
+    )
+    client = create_app(sheet).test_client()
+    sitting = client.get("/api/sitting").json
+    adopted = client.post(
+        "/api/adopt-rubric",
+        json={
+            "revision": sitting["revision"],
+            "rubric_version": client.get("/api/rubric").json["version"],
+        },
+    )
+
+    assert adopted.status_code == 200
+    item = client.get("/api/items/1").json
+    assert item["scene_anchors"] == SCENE_RUBRIC["anchors"]
+    assert item["scene_anchors"]["field"] != "Legacy field anchor."
+    assert kit_path.read_bytes() == original_kit
+
+
+@pytest.mark.parametrize("kind", [None, "omitted"])
+def test_scene_review_flags_are_rejected_without_history_changes(
+    tmp_path: Path, kind: str | None
+) -> None:
+    (tmp_path / "kit.json").write_text(
+        json.dumps({"scene_rubric": {"anchors": {}}}), encoding="utf-8"
+    )
+    sheet = tmp_path / "sitting-001.csv"
+    sheet.write_text(
+        "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\n"
+        "scene:synthetic,scene,scenes/a.png,,,,,field\n",
+        encoding="utf-8",
+    )
+    client = _adopted_client(sheet)
+    sitting = client.get("/api/sitting").json
+    payload = {"revision": sitting["revision"], "action": "flag"}
+    if kind != "omitted":
+        payload["kind"] = kind
+
+    response = client.post("/api/items/1/review", json=payload)
+
+    assert response.status_code == 400
+    review = client.get("/api/items/1").json["review"]
+    assert review == {"status": "", "history": []}
 
 
 def test_ambiguous_interrupted_save_blocks_reopening(
@@ -436,7 +791,7 @@ def test_ambiguous_interrupted_save_blocks_reopening(
     sheet.write_bytes(
         b"item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\nprivate,scene,scenes/a.png,,,,,\n"
     )
-    client = create_app(sheet).test_client()
+    client = _adopted_client(sheet)
     revision = client.get("/api/sitting").json["revision"]
 
     def external_change(source, destination) -> None:
@@ -460,7 +815,7 @@ def test_old_revision_is_stale_even_after_values_return_to_original(
     sheet.write_bytes(
         b"item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\r\nprivate,scene,scenes/a.png,,,,,field\r\n"
     )
-    client = create_app(sheet).test_client()
+    client = _adopted_client(sheet)
     old = client.get("/api/sitting").json["revision"]
     changed = client.post(
         "/api/items/1", json={"revision": old, "field": "scene_tag", "value": "unknown"}
@@ -537,6 +892,7 @@ def test_browser_navigation_disables_old_choices_until_new_item_is_loaded(
                 ),
             )
             page.goto(f"http://127.0.0.1:{server.server_port}/")
+            _adopt_in_browser(page)
             page.get_by_role("button", name="Unknown").wait_for()
             page.wait_for_function(
                 "document.querySelector('#image-frame img')?.complete "
@@ -630,6 +986,7 @@ def test_browser_save_refuses_a_revision_changed_before_refresh(
             browser = playwright.chromium.launch()
             page = browser.new_page()
             page.goto(f"http://127.0.0.1:{server.server_port}/")
+            _adopt_in_browser(page)
             page.get_by_role("button", name="Field").wait_for()
             page.wait_for_function(
                 "document.querySelector('#image-frame img')?.complete "
@@ -683,6 +1040,7 @@ def test_browser_scene_shortcuts_do_not_submit_mask_fields(tmp_path: Path) -> No
                 ),
             )
             page.goto(f"http://127.0.0.1:{server.server_port}/")
+            _adopt_in_browser(page)
             page.get_by_role("button", name="Field").wait_for()
             page.wait_for_function(
                 "document.querySelector('#image-frame img')?.complete "
@@ -871,6 +1229,7 @@ def test_browser_rates_and_finishes_synthetic_scene(tmp_path: Path) -> None:
             browser = playwright.chromium.launch()
             page = browser.new_page()
             page.goto(f"http://127.0.0.1:{server.server_port}/")
+            _adopt_in_browser(page)
             page.get_by_role("button", name="Field").click()
             page.get_by_text("Saved", exact=True).wait_for()
             page.get_by_role("button", name="Finish sitting").click()
@@ -936,6 +1295,7 @@ def test_browser_delayed_save_blocks_more_input_until_confirmed(tmp_path: Path) 
             browser = playwright.chromium.launch()
             page = browser.new_page()
             page.goto(f"http://127.0.0.1:{server.server_port}/")
+            _adopt_in_browser(page)
             page.get_by_role("button", name="Field").click()
             assert save_started.wait(10)
             page.get_by_text("Saving…", exact=True).wait_for()
@@ -999,6 +1359,7 @@ def test_browser_failed_save_is_not_claimed_saved_and_can_resume(
             browser = playwright.chromium.launch()
             page = browser.new_page()
             page.goto(f"http://127.0.0.1:{server.server_port}/")
+            _adopt_in_browser(page)
             page.get_by_text("Item 2 of 2", exact=True).wait_for()
             page.get_by_role("button", name="Previous").click()
             page.get_by_text("Item 1 of 2", exact=True).wait_for()
@@ -1133,7 +1494,9 @@ def test_browser_mask_keyboard_undo_and_unreadable_image(tmp_path: Path) -> None
             browser = playwright.chromium.launch()
             page = browser.new_page(viewport={"width": 1200, "height": 900})
             page.goto(f"http://127.0.0.1:{server.server_port}/")
+            _adopt_in_browser(page)
             page.get_by_role("button", name="Pass").wait_for()
+            page.get_by_role("button", name="Minor defect").wait_for()
             page.get_by_role("img", name="Image for this item").wait_for()
             page.keyboard.press("1")
             page.get_by_text("Saved", exact=True).wait_for()
@@ -1221,8 +1584,8 @@ def test_pair_sitting_can_be_finished_with_existing_rating(tmp_path: Path) -> No
         "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\nprivate,pair,a.png,b.png,,exact,,\n",
         encoding="utf-8",
     )
-    client = create_app(sheet).test_client()
-    revision = client.get("/api/sitting").json["revision"]
+    client = _adopted_client(sheet)
+    revision = _reaffirm_existing_pair_and_mask_choices(client, sheet)
     assert client.get("/api/items/1").json["kind"] == "pair"
     response = client.post("/api/finish", json={"revision": revision})
     assert response.status_code == 200
@@ -1274,10 +1637,14 @@ def test_pair_http_api_exposes_blind_choices_and_opaque_allowlisted_images(
         "very similar",
         "different",
     ]
-    assert item.json["pair_boundary"]["near_duplicate"] == (
-        "the same physical leaf or scene captured again, such as a burst frame, "
-        "a small shift or zoom, a crop or a re-save"
-    )
+    assert [category["label"] for category in item.json["rubric"]["categories"]] == [
+        "Visually identical",
+        "Near-duplicate",
+        "Visually similar",
+        "Visually dissimilar",
+    ]
+    assert item.json["rubric"]["categories"][0]["value"] == "exact"
+    assert item.json["rubric"]["categories"][1]["value"] == "near-duplicate"
     assert "private-pair" not in item.get_data(as_text=True)
     assert "pool" not in item.get_data(as_text=True)
 
@@ -1289,21 +1656,29 @@ def test_pair_http_api_exposes_blind_choices_and_opaque_allowlisted_images(
     assert client.get("/images/1/c/original").status_code == 404
     assert client.get("/images/2/a/preview").status_code == 404
 
+    adopted = client.post(
+        "/api/adopt-rubric",
+        json={
+            "revision": sitting["revision"],
+            "rubric_version": client.get("/api/rubric").json["version"],
+        },
+    )
+    assert adopted.status_code == 200
+    revision = adopted.json["revision"]
     invalid = client.post(
         "/api/items/1",
-        json={"revision": sitting["revision"], "field": "scene_tag", "value": "field"},
+        json={"revision": revision, "field": "scene_tag", "value": "field"},
     )
     assert invalid.status_code == 400
     invalid_value = client.post(
         "/api/items/1",
         json={
-            "revision": sitting["revision"],
+            "revision": revision,
             "field": "rating",
             "value": "not a rubric value",
         },
     )
     assert invalid_value.status_code == 400
-    revision = sitting["revision"]
     for rating in ("exact", "near-duplicate", "very similar", "different"):
         saved = client.post(
             "/api/items/1",
@@ -1382,6 +1757,7 @@ def test_browser_rates_pair_with_keyboard_zoom_swap_and_finish(tmp_path: Path) -
             requests: list[str] = []
             page.on("request", lambda request: requests.append(request.url))
             page.goto(f"http://127.0.0.1:{server.server_port}/")
+            _adopt_in_browser(page)
             page.get_by_role("button", name="Near-duplicate").wait_for()
             page.locator("#zoom").focus()
             assert page.evaluate("document.activeElement.id") == "zoom"
@@ -1629,6 +2005,21 @@ def test_browser_rates_pair_with_keyboard_zoom_swap_and_finish(tmp_path: Path) -
                 .evaluate("shortcut => getComputedStyle(shortcut).color")
                 == "rgb(255, 255, 255)"
             )
+            flag = page.get_by_role(
+                "button", name="Flag identity uncertainty for review"
+            )
+            flag.focus()
+            page.keyboard.press("Enter")
+            page.get_by_text(
+                "Open review: resolve this case before finishing.", exact=True
+            ).wait_for()
+            assert page.get_by_role("button", name="Resolve review").is_visible()
+            resolution_note = page.get_by_role("textbox", name="Resolution note")
+            resolution_note.fill("Synthetic details distinguish these captures.")
+            resolve = page.get_by_role("button", name="Resolve review")
+            resolve.focus()
+            page.keyboard.press("Enter")
+            page.get_by_text("Review resolved.", exact=True).wait_for()
             page.get_by_role("button", name="Undo last choice").click()
             page.get_by_text("Saved", exact=True).wait_for()
             assert (
@@ -1659,7 +2050,7 @@ def test_browser_rates_pair_with_keyboard_zoom_swap_and_finish(tmp_path: Path) -
                 "button", name="Inspect full resolution"
             ).is_visible()
             assert page.locator("#scale").input_value() == "1"
-            page.get_by_role("button", name="Exact").click()
+            page.get_by_role("button", name="Visually identical").click()
             page.get_by_text("Saved", exact=True).wait_for()
             page.get_by_role("button", name="Next").click()
             page.get_by_text("Item 3 of 4", exact=True).wait_for()
@@ -1677,6 +2068,7 @@ def test_browser_rates_pair_with_keyboard_zoom_swap_and_finish(tmp_path: Path) -
             page.get_by_role("button", name="Next").click()
             page.get_by_text("Item 4 of 4", exact=True).wait_for()
             page.get_by_role("group", name="Mask quality").wait_for()
+            page.get_by_role("button", name="Minor defect").wait_for()
             assert (
                 page.locator("#pair-frames").evaluate(
                     "frames => getComputedStyle(frames).display"

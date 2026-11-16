@@ -6,6 +6,7 @@ from typing import Any, NamedTuple
 import pytest
 
 from jute_disease import cli
+from jute_disease.data.masks_audit import evaluate_masks_audit
 
 SHEET_COLUMNS = [
     "item_id",
@@ -16,6 +17,11 @@ SHEET_COLUMNS = [
     "rating",
     "mask_quality",
     "scene_tag",
+    "rubric_version",
+    "scene_rubric_version",
+    "instrument_version",
+    "review_status",
+    "review_history",
 ]
 HIDDEN = (
     "agent_rating",
@@ -98,6 +104,18 @@ def test_kit_combines_pairs_with_mask_overlays_and_omits_agent_ratings(
     assert kit["grouping_version"] == "dhash-v1" and kit["hamming_threshold"] == 4
     assert kit["agent"] == inputs.cohort["agent"]
     mask_audit = json.loads((inputs.mask_audit / "audit.json").read_text("utf-8"))
+    assert (
+        kit["mask_rubric_version"]
+        == mask_audit["rubric_provenance"]["mask_rubric_version"]
+    )
+    assert kit["mask_rubric"] == mask_audit["mask_rubric"]
+    assert (
+        kit["rubric_version"] == mask_audit["rubric_provenance"]["instrument_version"]
+    )
+    assert (
+        kit["scene_rubric_version"]
+        == mask_audit["rubric_provenance"]["scene_rubric_version"]
+    )
     mask_ids = {item["item_id"].removeprefix("mask:") for item in kit["items"][:120]}
     assert mask_ids == set(mask_audit["owner_audit_ids"])
     for item in kit["items"][:120]:
@@ -106,6 +124,12 @@ def test_kit_combines_pairs_with_mask_overlays_and_omits_agent_ratings(
     assert pair_ids == {f"pair:{p['pair_id']}" for p in inputs.cohort["pairs"]}
 
     run(capsys, "audit-sitting", str(tmp_path / "kit"), "--limit", "5")
+    first_sitting = read_sheet(tmp_path / "kit" / "sitting-001.csv")
+    assert all(
+        row["rubric_version"] == kit["mask_rubric_version"]
+        and row["instrument_version"] == kit["rubric_version"]
+        for row in first_sitting
+    )
     text = "".join(
         path.read_text(encoding="utf-8")
         for path in (tmp_path / "kit").iterdir()
@@ -183,6 +207,18 @@ def test_finished_sittings_collect_into_owner_sheets_that_evaluate(
         rows = read_sheet(Path(step["sheet"]))
         for row in rows:
             rate(row, inputs.cohort)
+            if row["item_id"] == "pair:0":
+                row["review_status"] = "resolved"
+                row["review_history"] = json.dumps(
+                    [
+                        {"action": "flagged", "kind": "identity"},
+                        {
+                            "action": "resolved",
+                            "kind": "identity",
+                            "note": "Synthetic resolution based on distinctive details.",
+                        },
+                    ]
+                )
         write_sheet(Path(step["sheet"]), rows)
     collected = run(capsys, "audit-collect", str(kit_dir))
 
@@ -192,11 +228,33 @@ def test_finished_sittings_collect_into_owner_sheets_that_evaluate(
         len(inputs.cohort["pairs"]),
         120,
     )
-    assert list(pairs[0]) == ["pair_id", "image_a", "image_b", "rating"]
-    assert list(masks[0]) == ["audit_id", "overlay_path", "mask_quality", "scene_tag"]
+    assert list(pairs[0]) == [
+        "pair_id",
+        "image_a",
+        "image_b",
+        "rating",
+        "rubric_version",
+        "instrument_version",
+        "review_status",
+        "review_history",
+    ]
+    assert list(masks[0]) == [
+        "audit_id",
+        "overlay_path",
+        "mask_quality",
+        "scene_tag",
+        "rubric_version",
+        "scene_rubric_version",
+        "instrument_version",
+        "review_status",
+        "review_history",
+    ]
     mask_audit = json.loads((inputs.mask_audit / "audit.json").read_text("utf-8"))
     sources = {r["audit_id"]: r["overlay_path"] for r in mask_audit["records"]}
     assert all(row["overlay_path"] == sources[row["audit_id"]] for row in masks)
+    resolved_pair = next(row for row in pairs if row["pair_id"] == "0")
+    assert resolved_pair["review_status"] == "resolved"
+    assert json.loads(resolved_pair["review_history"])[-1]["action"] == "resolved"
     report = run(
         capsys,
         "audit-evaluate",
@@ -206,3 +264,88 @@ def test_finished_sittings_collect_into_owner_sheets_that_evaluate(
     assert report["agent"] == inputs.cohort["agent"]
     assert report["grouping_version"] == "dhash-v1"
     assert report["pass"] is True
+    mask_manifest = json.loads((inputs.mask_audit / "audit.json").read_text("utf-8"))
+    mask_report = evaluate_masks_audit(
+        mask_manifest,
+        inputs.mask_audit / "agent.csv",
+        kit_dir / "owner-masks.csv",
+        resamples=200,
+    )
+    assert mask_report["fixture_mode"] is True
+
+    # Previously collected mask sheets have provenance and review history, but
+    # no separate status column. Their status is recoverable from the history.
+    history_only_path = kit_dir / "owner-masks-history-only.csv"
+    history_only = [
+        {key: value for key, value in row.items() if key != "review_status"}
+        for row in read_sheet(kit_dir / "owner-masks.csv")
+    ]
+    history_only[0]["review_history"] = json.dumps(
+        [
+            {"action": "flagged", "kind": "target"},
+            {
+                "action": "resolved",
+                "kind": "target",
+                "note": "Synthetic resolution from the overlay evidence.",
+            },
+        ]
+    )
+    with history_only_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(history_only[0]))
+        writer.writeheader()
+        writer.writerows(history_only)
+    history_only_report = evaluate_masks_audit(
+        mask_manifest,
+        inputs.mask_audit / "agent.csv",
+        history_only_path,
+        resamples=200,
+    )
+    assert history_only_report["fixture_mode"] is True
+
+    history_only[0]["review_history"] = json.dumps(
+        [{"action": "flagged", "kind": "target"}]
+    )
+    with history_only_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(history_only[0]))
+        writer.writeheader()
+        writer.writerows(history_only)
+    with pytest.raises(ValueError, match="unresolved mask review"):
+        evaluate_masks_audit(
+            mask_manifest,
+            inputs.mask_audit / "agent.csv",
+            history_only_path,
+            resamples=200,
+        )
+
+    mask_path = kit_dir / "owner-masks.csv"
+    extended_masks = read_sheet(mask_path)
+    extended_masks[0]["review_status"] = "open"
+    extended_masks[0]["review_history"] = json.dumps(
+        [{"action": "flagged", "kind": "target"}]
+    )
+    with mask_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(extended_masks[0]))
+        writer.writeheader()
+        writer.writerows(extended_masks)
+    with pytest.raises(ValueError, match="unresolved mask review"):
+        evaluate_masks_audit(
+            mask_manifest,
+            inputs.mask_audit / "agent.csv",
+            mask_path,
+            resamples=200,
+        )
+
+    extended_masks[0]["review_status"] = ""
+    extended_masks[0]["review_history"] = "[]"
+    extended_masks[0]["rubric_version"] = "leaf-mask-v1"
+    with mask_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(extended_masks[0]))
+        writer.writeheader()
+        writer.writerows(extended_masks)
+    with pytest.raises(ValueError, match="provenance is incompatible"):
+        evaluate_masks_audit(
+            mask_manifest,
+            inputs.mask_audit / "agent.csv",
+            mask_path,
+            resamples=200,
+        )
