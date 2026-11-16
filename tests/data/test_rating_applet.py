@@ -160,6 +160,15 @@ def test_save_survives_restart_and_preserves_other_values(tmp_path: Path) -> Non
 
     assert saved.status_code == 200
     reopened = create_app(sheet).test_client().get("/api/sitting").json
+    assert reopened["completed"] == 0
+    client = _adopted_client(sheet)
+    revision = client.get("/api/sitting").json["revision"]
+    reaffirmed = client.post(
+        "/api/items/1",
+        json={"revision": revision, "field": "mask_quality", "value": "pass"},
+    )
+    assert reaffirmed.status_code == 200
+    reopened = create_app(sheet).test_client().get("/api/sitting").json
     assert reopened["completed"] == 1
     assert "private,mask,,,overlays/a.png,,pass,field,keep" in sheet.read_text()
 
@@ -492,6 +501,7 @@ def test_synthetic_pair_mask_scene_roundtrip_through_collector(
         "rating": "near-duplicate",
         "rubric_version": "related-image-v2",
         "instrument_version": "rating-bundle-v2",
+        "review_status": "",
         "review_history": "[]",
     }
     assert (
@@ -542,6 +552,14 @@ def test_versioned_adoption_and_durable_review_flags_roundtrip_to_collector(
     canonical_rubric = client.get("/api/rubric").json
     assert sitting["rubric_adopted"] is False
     assert canonical_rubric["scene"] == SCENE_RUBRIC
+    assert canonical_rubric["scene"]["anchors"]["field"] == (
+        "The background contains substantial outdoor or field structure, "
+        "including other leaves or plants."
+    )
+    assert canonical_rubric["scene"]["anchors"]["unknown"] == (
+        "The image provides insufficient readable background, for example "
+        "because of a tight crop or blur."
+    )
     assert all(
         anchor in AGENT_INSTRUCTIONS for anchor in SCENE_RUBRIC["anchors"].values()
     )
@@ -651,6 +669,74 @@ def test_versioned_adoption_and_durable_review_flags_roundtrip_to_collector(
     assert owner["rubric_version"] == item["rubric"]["version"]
     assert owner["instrument_version"] == "rating-bundle-v2"
     assert json.loads(owner["review_history"])[-1]["action"] == "resolved"
+
+
+def test_scene_save_preserves_legacy_mask_provenance_until_reaffirmed(
+    tmp_path: Path,
+) -> None:
+    sheet = tmp_path / "sitting-001.csv"
+    sheet.write_text(
+        "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag,"
+        "rubric_version,scene_rubric_version,instrument_version,review_status,"
+        "review_history\n"
+        "mask:synthetic,mask,,,,,pass,clean-background,leaf-mask-v1,"
+        "scene-tag-v1,legacy-tool-v1,,[]\n",
+        encoding="utf-8",
+    )
+    client = _adopted_client(sheet)
+    revision = client.get("/api/sitting").json["revision"]
+
+    scene = client.post(
+        "/api/items/1",
+        json={"revision": revision, "field": "scene_tag", "value": "field"},
+    )
+    assert scene.status_code == 200
+    row = next(csv.DictReader(sheet.open(newline="", encoding="utf-8")))
+    assert row["mask_quality"] == "pass"
+    assert row["rubric_version"] == "leaf-mask-v1"
+    assert row["instrument_version"] == "legacy-tool-v1"
+    assert row["scene_rubric_version"] == "scene-tag-v2"
+    assert client.get("/api/sitting").json["completed"] == 0
+
+    reaffirmed = client.post(
+        "/api/items/1",
+        json={
+            "revision": scene.json["revision"],
+            "field": "mask_quality",
+            "value": "pass",
+        },
+    )
+    assert reaffirmed.status_code == 200
+    row = next(csv.DictReader(sheet.open(newline="", encoding="utf-8")))
+    assert row["rubric_version"] == "leaf-mask-v2"
+    assert row["instrument_version"] == "rating-bundle-v2"
+    assert client.get("/api/sitting").json["completed"] == 1
+
+
+@pytest.mark.parametrize("kind", [None, "omitted"])
+def test_scene_review_flags_are_rejected_without_history_changes(
+    tmp_path: Path, kind: str | None
+) -> None:
+    (tmp_path / "kit.json").write_text(
+        json.dumps({"scene_rubric": {"anchors": {}}}), encoding="utf-8"
+    )
+    sheet = tmp_path / "sitting-001.csv"
+    sheet.write_text(
+        "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\n"
+        "scene:synthetic,scene,scenes/a.png,,,,,field\n",
+        encoding="utf-8",
+    )
+    client = _adopted_client(sheet)
+    sitting = client.get("/api/sitting").json
+    payload = {"revision": sitting["revision"], "action": "flag"}
+    if kind != "omitted":
+        payload["kind"] = kind
+
+    response = client.post("/api/items/1/review", json=payload)
+
+    assert response.status_code == 400
+    review = client.get("/api/items/1").json["review"]
+    assert review == {"status": "", "history": []}
 
 
 def test_ambiguous_interrupted_save_blocks_reopening(

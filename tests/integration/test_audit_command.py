@@ -80,6 +80,10 @@ def rate_pairs(cohort: dict[str, Any], flip_every: int = 4) -> dict[str, str]:
         row["agent_rating"] = (
             "near-duplicate" if row["algorithm_merge"] else "different"
         )
+        row["agent_rubric_version"] = cohort["rubric_version"]
+        row["agent_instrument_version"] = cohort["instrument_version"]
+        row["agent_review_status"] = ""
+        row["agent_review_history"] = "[]"
         flipped = int(row["pair_id"]) % flip_every == 0
         merge = row["algorithm_merge"] != flipped
         owner[row["pair_id"]] = "near-duplicate" if merge else "different"
@@ -275,6 +279,17 @@ def test_public_evaluator_requires_compatible_rubric_and_resolved_reviews(
 ) -> None:
     cohort_dir, cohort = make_cohort(capsys, tmp_path)
     ratings = rate_pairs(cohort)
+    cohort["pairs"][0]["agent_review_status"] = "resolved"
+    cohort["pairs"][0]["agent_review_history"] = json.dumps(
+        [
+            {"action": "flagged", "kind": "identity"},
+            {
+                "action": "resolved",
+                "kind": "identity",
+                "note": "Synthetic resolution from distinctive overlap.",
+            },
+        ]
+    )
     source = cohort_dir / "agent.json"
     source.write_text(json.dumps(cohort), encoding="utf-8")
     sheet = cohort_dir / "owner.csv"
@@ -341,6 +356,36 @@ def test_public_evaluator_requires_compatible_rubric_and_resolved_reviews(
         "different": 0,
     }
     assert sheet.read_bytes() == before_adoption
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("agent_rubric_version", "related-image-v1", "agent pass provenance"),
+        ("agent_instrument_version", "rating-bundle-v1", "agent pass provenance"),
+        ("agent_review_status", "open", "unresolved agent review"),
+    ],
+)
+def test_public_evaluator_rejects_incompatible_or_unresolved_agent_evidence(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    field: str,
+    value: str,
+    message: str,
+) -> None:
+    cohort_dir, cohort = make_cohort(capsys, tmp_path)
+    rate_pairs(cohort)
+    cohort["pairs"][0][field] = value
+    source = cohort_dir / "agent.json"
+    source.write_text(json.dumps(cohort), encoding="utf-8")
+    owner = cohort_dir / "owner.csv"
+    rows = read_sheet(owner)
+    for row in rows:
+        row["rating"] = "near-duplicate"
+    write_sheet(owner, rows)
+
+    with pytest.raises(SystemExit, match=message):
+        cli.main(["data", "audit-evaluate", str(source), str(owner)])
 
 
 def test_retry_is_bound_to_the_cohort_and_escalates(

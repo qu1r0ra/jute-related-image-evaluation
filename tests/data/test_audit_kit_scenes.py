@@ -6,8 +6,12 @@ from pathlib import Path
 import pytest
 
 from jute_disease.cli import main
-from jute_disease.data import build_audit_kit, collect_audit_kit, next_audit_sitting
-from jute_disease.data.masks import SCENE_RUBRIC
+from jute_disease.data import (
+    SCENE_RUBRIC,
+    build_audit_kit,
+    collect_audit_kit,
+    next_audit_sitting,
+)
 
 HIDDEN = ("poolA", "disease-label", "held-out-source", "reserve", "predicted")
 

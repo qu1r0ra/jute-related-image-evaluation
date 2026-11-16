@@ -16,6 +16,7 @@ import numpy as np
 from PIL import Image
 from scipy.stats import beta
 
+from jute_disease.data.audit import validate_review_record
 from jute_disease.data.manifest import load_protected_test_manifest
 from jute_disease.data.masks import (
     MASK_QUALITY_RATINGS,
@@ -33,6 +34,11 @@ from jute_disease.data.masks import (
     require_colour_threshold,
     save_mask_artifacts,
 )
+from jute_disease.data.rating_rubric import (
+    MASK_RUBRIC_VERSION,
+    RATING_RUBRIC_VERSION,
+    SCENE_RUBRIC_VERSION,
+)
 from jute_disease.evaluation import agreement_gate
 
 AUDIT_SCHEMA = "jute-mask-audit-v2"
@@ -44,6 +50,21 @@ MASK_FAIL_RATE_LIMIT = 0.10
 FAIL_RATE_CONFIDENCE = 0.95
 AGENT_COLUMNS = ("audit_id", "overlay_path", "mask_quality")
 OWNER_COLUMNS = ("audit_id", "overlay_path", "mask_quality", "scene_tag")
+OWNER_PROVENANCE_COLUMNS = (
+    *OWNER_COLUMNS,
+    "rubric_version",
+    "scene_rubric_version",
+    "instrument_version",
+    "review_status",
+    "review_history",
+)
+OWNER_HISTORY_COLUMNS = (
+    *OWNER_COLUMNS,
+    "rubric_version",
+    "scene_rubric_version",
+    "instrument_version",
+    "review_history",
+)
 
 
 @dataclass(frozen=True)
@@ -412,12 +433,48 @@ def evaluate_masks_audit(
         by_id,
         {"mask_quality": MASK_QUALITY_RATINGS},
     )
-    owner = _read_rating_sheet(
-        Path(owner_sheet),
-        OWNER_COLUMNS,
-        {key: by_id[key] for key in owner_ids},
-        {"mask_quality": MASK_QUALITY_RATINGS, "scene_tag": SCENE_TAGS},
-    )
+    owner_path = Path(owner_sheet)
+    with owner_path.open(newline="", encoding="utf-8-sig") as handle:
+        owner_reader = csv.DictReader(handle)
+        owner_columns = tuple(owner_reader.fieldnames or ())
+    if owner_columns == OWNER_COLUMNS:
+        owner = _read_rating_sheet(
+            owner_path,
+            OWNER_COLUMNS,
+            {key: by_id[key] for key in owner_ids},
+            {"mask_quality": MASK_QUALITY_RATINGS, "scene_tag": SCENE_TAGS},
+        )
+    elif owner_columns in {OWNER_HISTORY_COLUMNS, OWNER_PROVENANCE_COLUMNS}:
+        owner = _read_rating_sheet(
+            owner_path,
+            owner_columns,
+            {key: by_id[key] for key in owner_ids},
+            {"mask_quality": MASK_QUALITY_RATINGS, "scene_tag": SCENE_TAGS},
+        )
+        has_review_status = owner_columns == OWNER_PROVENANCE_COLUMNS
+        for audit_id, row in owner.items():
+            review_status = (
+                row["review_status"]
+                if has_review_status
+                else _status_from_review_history(row["review_history"])
+            )
+            if review_status == "open":
+                raise ValueError("unresolved mask review flags block audit evaluation")
+            validate_review_record("mask", review_status, row["review_history"])
+            if (
+                row["rubric_version"] != MASK_RUBRIC_VERSION
+                or row["scene_rubric_version"] != SCENE_RUBRIC_VERSION
+                or row["instrument_version"] != RATING_RUBRIC_VERSION
+            ):
+                raise ValueError(
+                    f"mask owner evidence provenance is incompatible for {audit_id}"
+                )
+    else:
+        raise ValueError(
+            f"{owner_path.name} columns must be {', '.join(OWNER_COLUMNS)} or "
+            f"{', '.join(OWNER_HISTORY_COLUMNS)} or "
+            f"{', '.join(OWNER_PROVENANCE_COLUMNS)}"
+        )
     agent_mask = [agent[key]["mask_quality"] for key in owner_ids]
     owner_mask = [owner[key]["mask_quality"] for key in owner_ids]
     mask_agreement = _agreement_report(
@@ -753,6 +810,23 @@ def _read_rating_sheet(
     if set(indexed) != set(expected):
         raise ValueError("rating IDs do not match the required audit subset")
     return indexed
+
+
+def _status_from_review_history(history_json: str) -> str:
+    """Recover status for collected sheets written before status was exported."""
+    try:
+        history = json.loads(history_json or "[]")
+    except json.JSONDecodeError as exc:
+        raise ValueError("invalid review history") from exc
+    if not isinstance(history, list) or any(
+        not isinstance(event, dict) for event in history
+    ):
+        return ""
+    if not history:
+        return ""
+    return {"flagged": "open", "resolved": "resolved"}.get(
+        history[-1].get("action"), ""
+    )
 
 
 def _agreement_report(
