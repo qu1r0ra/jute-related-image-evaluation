@@ -1383,7 +1383,7 @@ def test_browser_rates_pair_with_keyboard_zoom_swap_and_finish(tmp_path: Path) -
             page.on("request", lambda request: requests.append(request.url))
             page.goto(f"http://127.0.0.1:{server.server_port}/")
             page.get_by_role("button", name="Near-duplicate").wait_for()
-            page.keyboard.press("Tab")
+            page.locator("#zoom").focus()
             assert page.evaluate("document.activeElement.id") == "zoom"
             assert (
                 page.locator("#zoom").evaluate(
@@ -1410,6 +1410,30 @@ def test_browser_rates_pair_with_keyboard_zoom_swap_and_finish(tmp_path: Path) -
             page.wait_for_function(
                 "[...document.querySelectorAll('#pair-frames img')].length === 2 "
                 "&& [...document.querySelectorAll('#pair-frames img')].every(i => i.complete && i.naturalWidth > 0)"
+            )
+            image_a = page.locator(".pair-panel[data-side='a'] img")
+            image_b = page.locator(".pair-panel[data-side='b'] img")
+            page.get_by_role("button", name="Rotate 90° image A").click()
+            after = image_a.bounding_box()
+            assert after and after["height"] > after["width"]
+            assert "rotate(90deg)" in image_a.get_attribute("style")
+            assert "rotate(0deg)" in image_b.get_attribute("style")
+            page.get_by_role("button", name="Flip horizontal image A").click()
+            assert (
+                page.get_by_role(
+                    "button", name="Flip horizontal image A"
+                ).get_attribute("aria-pressed")
+                == "true"
+            )
+            page.get_by_role("button", name="Flip vertical image A").click()
+            assert "scale(-1, -1)" in image_a.get_attribute("style")
+            page.get_by_role("button", name="Reset image A").click()
+            assert "rotate(0deg)" in image_a.get_attribute("style")
+            assert (
+                page.get_by_role(
+                    "button", name="Flip horizontal image A"
+                ).get_attribute("aria-pressed")
+                == "false"
             )
             assert (
                 page.locator("#image-frame").evaluate(
@@ -1556,8 +1580,18 @@ def test_browser_rates_pair_with_keyboard_zoom_swap_and_finish(tmp_path: Path) -
             page.wait_for_function(
                 "[...document.querySelectorAll('#pair-frames img')].every(i => i.complete && i.naturalWidth > 0)"
             )
+            page.get_by_role("button", name="Rotate 90° image A").click()
+            page.get_by_role("button", name="Flip vertical image B").click()
+            page.evaluate("document.activeElement.blur()")
             page.keyboard.press("2")
             page.get_by_text("Saved", exact=True).wait_for()
+            assert "rotate(0deg)" in image_a.get_attribute("style")
+            assert (
+                page.get_by_role("button", name="Flip vertical image B").get_attribute(
+                    "aria-pressed"
+                )
+                == "false"
+            )
             assert (
                 page.get_by_role("button", name="Near-duplicate").get_attribute(
                     "aria-pressed"

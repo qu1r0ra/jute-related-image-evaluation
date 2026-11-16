@@ -19,7 +19,7 @@ from PIL import Image, ImageOps
 
 from jute_disease.data import MASK_RUBRIC, audit_row_complete, validate_audit_row
 
-_VERSION = "1.2.0"
+_VERSION = "1.3.0"
 _PREVIEW_SIZE = (1400, 1400)
 _PAIR_RATINGS = ("exact", "near-duplicate", "very similar", "different")
 _PAIR_BOUNDARY = {

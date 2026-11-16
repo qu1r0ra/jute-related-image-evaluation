@@ -28,6 +28,11 @@ p { margin: .4rem 0 1rem; }
 .pair-panel { min-width: 0; margin: 0; }
 .pair-panel figcaption { font-weight: 600; margin: 0 0 .35rem; }
 .pair-image-frame { width: 100%; height: min(56vh, 660px); min-height: 320px; }
+.pair-image-wrapper { position: relative; flex: none; }
+.pair-image-wrapper img { position: absolute; top: 50%; left: 50%; }
+.pair-transform { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .5rem; }
+.pair-transform button { padding: .4rem .5rem; font-size: .9rem; }
+.orientation-status { flex-basis: 100%; font-size: .85rem; }
 .pair-image-frame img:not(.full) { object-fit: contain; }
 .zoom, nav { display: flex; align-items: center; flex-wrap: wrap; gap: .75rem; margin: 1rem 0; }
 .zoom-note { color: #444; font-size: .9rem; margin: -.55rem 0 .75rem; }
