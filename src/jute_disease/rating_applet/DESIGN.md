@@ -46,6 +46,8 @@ The values below are a snapshot extracted from `static/style.css`. That styleshe
 - System UI typography and compact heading hierarchy.
 - Equal-sized pair panels with synchronized scrolling.
 - Visible keyboard focus and selected-choice state.
+- A quiet rubric-adoption band before the sitting workspace, with the full rubric available in a native disclosure.
+- A separate review-status area for identity or target flags, note-backed resolution, and retained history.
 
 ## Colors
 
@@ -78,7 +80,7 @@ The stylesheet uses neutral surfaces and text, with a blue focus outline as its 
 
 ## Layout
 
-The main region is centered up to `1900px` with `1.5rem` padding. Above `1050px`, the workspace gives the image region more width with `1.7fr` images and a `minmax(22rem, 1fr)` choice column separated by `1.5rem`. Pair frames remain equal-width and use `min(56vh, 660px)` height so more of the viewport is available for image inspection. Between `961px` and `1050px`, a compact two-column workspace keeps image panels and rating buttons visible together; below `961px`, choices move beneath the images. Pair panels stack below `640px`. At `1000 × 700`, each pair panel remains at least `260px` high, all four rating buttons fit above the sticky navigation, and the definitions can continue below the viewport. Image wells scroll when scaled content exceeds the frame; pair scrolling is synchronized, and zoom keeps the approximate scroll position when the image bounds change. Sitting navigation stays sticky at the bottom when needed.
+The main region is centered up to `1900px` with `1.5rem` padding. Above `1050px`, the workspace gives the image region more width with `1.7fr` images and a `minmax(22rem, 1fr)` choice column separated by `1.5rem`. Pair frames remain equal-width and use `min(56vh, 660px)` height so more of the viewport is available for image inspection. Between `961px` and `1050px`, a compact two-column workspace keeps image panels and rating buttons visible together; the rubric adoption band also uses two columns and reduced vertical spacing at this width. Below `961px`, choices move beneath the images. Pair panels stack below `640px`. At `1000 × 700`, each pair panel remains at least `260px` high, all four rating buttons fit above the sticky navigation, and the definitions can continue below the viewport. Image wells scroll when scaled content exceeds the frame; pair scrolling is synchronized, and zoom keeps the approximate scroll position when the image bounds change. Sitting navigation stays sticky at the bottom when needed.
 
 ## Elevation & Depth
 
@@ -95,6 +97,8 @@ Buttons use a `0.25rem` corner radius and a thin border. Image panels are rectan
 - **Selected:** Charcoal background with white text.
 - **Disabled:** Reduced opacity and default cursor.
 - **Focus:** `3px` solid blue outline with `3px` offset.
+- **Rubric adoption:** A bordered, neutral band identifies the current version. The explicit adoption action appears before rating controls; a native `details` disclosure keeps the complete canonical rubric available without preferring a rating.
+- **Review status:** A divider separates review metadata from rating choices. Open flags expose a labeled text area and a separate resolution button. An ordered history records flag and resolution events; no color encodes a rating judgment.
 
 ### Image panels
 - **Pair layout:** Two equal-width panels at wide sizes, each sized to the available image column and viewport height.
@@ -108,6 +112,8 @@ Buttons use a `0.25rem` corner radius and a thin border. Image panels are rectan
 - **Do** preserve equal pair-panel sizing and the image aspect ratio.
 - **Do** keep keyboard focus visible with the stylesheet's focus outline.
 - **Do** keep selected choices visibly distinct from default choices.
+- **Do** preserve native button, label, textarea, disclosure, and heading semantics for the adoption and review controls.
+- **Do** keep the focus outline visible on every interactive control, including disclosure summaries and resolution notes.
 
 ### Don't:
 - **Don't** add decorative shadows or motion that are absent from the current interface.
