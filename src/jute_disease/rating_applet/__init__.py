@@ -523,10 +523,7 @@ def create_app(sheet: Path, pool_roots: dict[str, Path] | None = None) -> Flask:
                     )
                 if row["kind"] not in {"mask", "scene"}:
                     return jsonify(error="Unsupported item."), 400
-                rubric = json.loads(
-                    (sheet.parent / "kit.json").read_text(encoding="utf-8")
-                )
-                anchors = rubric.get("scene_rubric", {}).get("anchors", {})
+                anchors = SCENE_RUBRIC["anchors"]
                 return jsonify(
                     kind=row["kind"],
                     mask_quality=row["mask_quality"],

@@ -23,7 +23,7 @@ from jute_disease.data.masks import (
     MASK_QUALITY_RATINGS,
     SCENE_TAGS,
 )
-from jute_disease.data.masks_audit import AUDIT_SCHEMA as MASK_AUDIT_SCHEMA
+from jute_disease.data.masks_audit import AUDIT_SCHEMAS as MASK_AUDIT_SCHEMAS
 from jute_disease.data.rating_rubric import (
     MASK_RUBRIC,
     MASK_RUBRIC_VERSION,
@@ -146,8 +146,8 @@ def build_audit_kit(
     if not all(str(agent.get(key, "")).strip() for key in ("name", "version")):
         raise ValueError("the cohort does not name the agent rater")
     masks = _read_json(mask_audit_dir / "audit.json")
-    if masks.get("schema") != MASK_AUDIT_SCHEMA:
-        raise ValueError(f"mask audit schema must be {MASK_AUDIT_SCHEMA}")
+    if masks.get("schema") not in MASK_AUDIT_SCHEMAS:
+        raise ValueError(f"mask audit schema must be one of {list(MASK_AUDIT_SCHEMAS)}")
     records = {record["audit_id"]: record for record in masks["records"]}
     owner_ids = list(masks["owner_audit_ids"])
     if unknown := sorted(set(owner_ids) - set(records)):

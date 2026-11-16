@@ -104,6 +104,18 @@ def test_kit_combines_pairs_with_mask_overlays_and_omits_agent_ratings(
     assert kit["grouping_version"] == "dhash-v1" and kit["hamming_threshold"] == 4
     assert kit["agent"] == inputs.cohort["agent"]
     mask_audit = json.loads((inputs.mask_audit / "audit.json").read_text("utf-8"))
+    assert (
+        kit["mask_rubric_version"]
+        == mask_audit["rubric_provenance"]["mask_rubric_version"]
+    )
+    assert kit["mask_rubric"] == mask_audit["mask_rubric"]
+    assert (
+        kit["rubric_version"] == mask_audit["rubric_provenance"]["instrument_version"]
+    )
+    assert (
+        kit["scene_rubric_version"]
+        == mask_audit["rubric_provenance"]["scene_rubric_version"]
+    )
     mask_ids = {item["item_id"].removeprefix("mask:") for item in kit["items"][:120]}
     assert mask_ids == set(mask_audit["owner_audit_ids"])
     for item in kit["items"][:120]:
@@ -112,6 +124,12 @@ def test_kit_combines_pairs_with_mask_overlays_and_omits_agent_ratings(
     assert pair_ids == {f"pair:{p['pair_id']}" for p in inputs.cohort["pairs"]}
 
     run(capsys, "audit-sitting", str(tmp_path / "kit"), "--limit", "5")
+    first_sitting = read_sheet(tmp_path / "kit" / "sitting-001.csv")
+    assert all(
+        row["rubric_version"] == kit["mask_rubric_version"]
+        and row["instrument_version"] == kit["rubric_version"]
+        for row in first_sitting
+    )
     text = "".join(
         path.read_text(encoding="utf-8")
         for path in (tmp_path / "kit").iterdir()

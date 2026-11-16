@@ -713,6 +713,49 @@ def test_scene_save_preserves_legacy_mask_provenance_until_reaffirmed(
     assert client.get("/api/sitting").json["completed"] == 1
 
 
+def test_revised_scene_guidance_overrides_historical_kit_anchors_without_rewriting(
+    tmp_path: Path,
+) -> None:
+    kit = tmp_path / "kit"
+    kit.mkdir()
+    kit_manifest = {
+        "schema": "jute-audit-kit-v2",
+        "scene_rubric": {
+            "version": "scene-tag-v1",
+            "anchors": {
+                "clean-background": "Legacy clean anchor.",
+                "field": "Legacy field anchor.",
+                "unknown": "Legacy unknown anchor.",
+            },
+        },
+        "items": [{"item_id": "scene:synthetic", "kind": "scene"}],
+    }
+    kit_path = kit / "kit.json"
+    kit_path.write_text(json.dumps(kit_manifest), encoding="utf-8")
+    original_kit = kit_path.read_bytes()
+    sheet = kit / "sitting-001.csv"
+    sheet.write_text(
+        "item_id,kind,image_a,image_b,overlay_path,rating,mask_quality,scene_tag\n"
+        "scene:synthetic,scene,scenes/a.png,,,,,\n",
+        encoding="utf-8",
+    )
+    client = create_app(sheet).test_client()
+    sitting = client.get("/api/sitting").json
+    adopted = client.post(
+        "/api/adopt-rubric",
+        json={
+            "revision": sitting["revision"],
+            "rubric_version": client.get("/api/rubric").json["version"],
+        },
+    )
+
+    assert adopted.status_code == 200
+    item = client.get("/api/items/1").json
+    assert item["scene_anchors"] == SCENE_RUBRIC["anchors"]
+    assert item["scene_anchors"]["field"] != "Legacy field anchor."
+    assert kit_path.read_bytes() == original_kit
+
+
 @pytest.mark.parametrize("kind", [None, "omitted"])
 def test_scene_review_flags_are_rejected_without_history_changes(
     tmp_path: Path, kind: str | None

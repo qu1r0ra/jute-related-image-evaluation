@@ -20,9 +20,7 @@ from jute_disease.data.audit import validate_review_record
 from jute_disease.data.manifest import load_protected_test_manifest
 from jute_disease.data.masks import (
     MASK_QUALITY_RATINGS,
-    MASK_RUBRIC,
     MAX_DEVELOPMENT_IMAGES,
-    SCENE_RUBRIC,
     SCENE_TAGS,
     ColorThresholdBackend,
     MaskBackend,
@@ -34,21 +32,36 @@ from jute_disease.data.masks import (
     require_colour_threshold,
     save_mask_artifacts,
 )
+from jute_disease.data.masks import (
+    MASK_RUBRIC_VERSION as LEGACY_MASK_RUBRIC_VERSION,
+)
 from jute_disease.data.rating_rubric import (
+    MASK_RUBRIC,
     MASK_RUBRIC_VERSION,
     RATING_RUBRIC_VERSION,
+    SCENE_RUBRIC,
     SCENE_RUBRIC_VERSION,
 )
 from jute_disease.evaluation import agreement_gate
 
-AUDIT_SCHEMA = "jute-mask-audit-v2"
+LEGACY_AUDIT_SCHEMA = "jute-mask-audit-v2"
+AUDIT_SCHEMA = "jute-mask-audit-v3"
+AUDIT_SCHEMAS = (LEGACY_AUDIT_SCHEMA, AUDIT_SCHEMA)
 EVALUATION_SCHEMA = "jute-mask-audit-evaluation-v2"
 AUDIT_COUNT = 300
 OWNER_COUNT = 120
 KAPPA_THRESHOLD = 0.6
 MASK_FAIL_RATE_LIMIT = 0.10
 FAIL_RATE_CONFIDENCE = 0.95
-AGENT_COLUMNS = ("audit_id", "overlay_path", "mask_quality")
+LEGACY_AGENT_COLUMNS = ("audit_id", "overlay_path", "mask_quality")
+AGENT_PROVENANCE_COLUMNS = (
+    *LEGACY_AGENT_COLUMNS,
+    "rubric_version",
+    "instrument_version",
+    "review_status",
+    "review_history",
+)
+AGENT_COLUMNS = AGENT_PROVENANCE_COLUMNS
 OWNER_COLUMNS = ("audit_id", "overlay_path", "mask_quality", "scene_tag")
 OWNER_PROVENANCE_COLUMNS = (
     *OWNER_COLUMNS,
@@ -319,6 +332,8 @@ def run_masks_audit(
             artifact_dir,
             image_id=candidate.image_id,
             model_version=backend.version,
+            rubric_version=MASK_RUBRIC_VERSION,
+            rubric=MASK_RUBRIC,
         )
         audit_id = f"MASK-{index:04d}"
         population = populations[row["predicted_scene"]]
@@ -362,6 +377,11 @@ def run_masks_audit(
             "with an exact Clopper-Pearson upper bound per stratum",
         },
         "mask_backend": {"model": backend.model, "version": backend.version},
+        "rubric_provenance": {
+            "mask_rubric_version": MASK_RUBRIC_VERSION,
+            "scene_rubric_version": SCENE_RUBRIC_VERSION,
+            "instrument_version": RATING_RUBRIC_VERSION,
+        },
         "partition_check": {
             "target_manifest_digests": list(protected.manifest_digests),
             "test_image_count": len(protected.image_ids),
@@ -375,8 +395,10 @@ def run_masks_audit(
         "scene_thresholds": thresholds.to_dict(),
         "records": records,
         "instructions": {
-            "agent": "Rate each overlay independently using the mask rubric; "
-            "enter pass, minor, or fail.",
+            "agent": f"Rate each overlay independently using the declared "
+            f"{MASK_RUBRIC_VERSION} mask rubric in this manifest; enter pass, "
+            "minor, or fail. Flag ambiguous target leaves for review and retain "
+            "the review history in the agent sheet.",
             "owner": "In one blind sitting, rate mask quality and scene tag for "
             "each selected overlay. Do not view model outputs or agent ratings first.",
             "sequence": "Complete this owner sitting before opening the grouping-pair "
@@ -384,9 +406,60 @@ def run_masks_audit(
         },
     }
     _write_json_new(output_dir / "audit.json", manifest)
-    _write_rating_sheet(output_dir / "agent.csv", AGENT_COLUMNS, records)
-    _write_rating_sheet(output_dir / "owner.csv", OWNER_COLUMNS, owner_records)
+    _write_rating_sheet(
+        output_dir / "agent.csv",
+        AGENT_COLUMNS,
+        records,
+        {
+            "rubric_version": MASK_RUBRIC_VERSION,
+            "instrument_version": RATING_RUBRIC_VERSION,
+            "review_status": "",
+            "review_history": "[]",
+        },
+    )
+    _write_rating_sheet(
+        output_dir / "owner.csv",
+        OWNER_PROVENANCE_COLUMNS,
+        owner_records,
+        {
+            "rubric_version": MASK_RUBRIC_VERSION,
+            "scene_rubric_version": SCENE_RUBRIC_VERSION,
+            "instrument_version": RATING_RUBRIC_VERSION,
+            "review_status": "",
+            "review_history": "[]",
+        },
+    )
     return manifest
+
+
+def _manifest_rubric_status(manifest: dict[str, Any]) -> tuple[bool, bool]:
+    """Return whether a manifest is explicit legacy or revised mask evidence."""
+    schema = manifest.get("schema")
+    mask_rubric = manifest.get("mask_rubric")
+    scene_rubric = manifest.get("scene_rubric")
+    mask_version = mask_rubric.get("version") if isinstance(mask_rubric, dict) else None
+    scene_version = (
+        scene_rubric.get("version") if isinstance(scene_rubric, dict) else None
+    )
+    provenance = manifest.get("rubric_provenance")
+    legacy = (
+        schema == LEGACY_AUDIT_SCHEMA
+        and mask_version == LEGACY_MASK_RUBRIC_VERSION
+        and scene_version == SCENE_RUBRIC_VERSION
+    )
+    revised = (
+        schema == AUDIT_SCHEMA
+        and isinstance(provenance, dict)
+        and provenance
+        == {
+            "mask_rubric_version": MASK_RUBRIC_VERSION,
+            "scene_rubric_version": SCENE_RUBRIC_VERSION,
+            "instrument_version": RATING_RUBRIC_VERSION,
+        }
+        and mask_version == MASK_RUBRIC_VERSION
+        and scene_version == SCENE_RUBRIC_VERSION
+    )
+    return legacy, revised
 
 
 def evaluate_masks_audit(
@@ -399,8 +472,22 @@ def evaluate_masks_audit(
     agent_rater: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Evaluate mask agreement, the exact fail-rate bound and scene agreement."""
-    if manifest.get("schema") != AUDIT_SCHEMA:
+    if manifest.get("schema") not in AUDIT_SCHEMAS:
         raise ValueError("unsupported mask audit manifest")
+    legacy_manifest, revised_manifest = _manifest_rubric_status(manifest)
+    mask_rubric = manifest.get("mask_rubric")
+    scene_rubric = manifest.get("scene_rubric")
+    mask_rubric_version = (
+        mask_rubric.get("version") if isinstance(mask_rubric, dict) else None
+    )
+    scene_rubric_version = (
+        scene_rubric.get("version") if isinstance(scene_rubric, dict) else None
+    )
+    if not legacy_manifest and not revised_manifest:
+        raise ValueError(
+            "mask audit rubric provenance is missing or incompatible; "
+            "legacy evidence requires an explicitly v1 manifest"
+        )
     backend_record = manifest.get("mask_backend")
     if not isinstance(backend_record, dict):
         raise ValueError("mask audit manifest records no mask backend")
@@ -427,17 +514,39 @@ def evaluate_masks_audit(
     if not set(owner_ids).issubset(by_id):
         raise ValueError("owner subset contains IDs outside the audit sample")
 
+    agent_path = Path(agent_sheet)
+    agent_columns = _sheet_columns(agent_path)
+    expected_agent_columns = (
+        LEGACY_AGENT_COLUMNS if legacy_manifest else AGENT_PROVENANCE_COLUMNS
+    )
+    if agent_columns != expected_agent_columns:
+        raise ValueError(
+            f"{agent_path.name} columns must be "
+            f"{', '.join(expected_agent_columns)} for the declared mask rubric"
+        )
     agent = _read_rating_sheet(
-        Path(agent_sheet),
-        AGENT_COLUMNS,
+        agent_path,
+        expected_agent_columns,
         by_id,
         {"mask_quality": MASK_QUALITY_RATINGS},
     )
+    if revised_manifest:
+        for audit_id, row in agent.items():
+            if (
+                row["rubric_version"] != MASK_RUBRIC_VERSION
+                or row["instrument_version"] != RATING_RUBRIC_VERSION
+            ):
+                raise ValueError(
+                    f"mask agent evidence provenance is incompatible for {audit_id}"
+                )
+            if row["review_status"] == "open":
+                raise ValueError(
+                    "unresolved mask agent review flags block audit evaluation"
+                )
+            validate_review_record("mask", row["review_status"], row["review_history"])
     owner_path = Path(owner_sheet)
-    with owner_path.open(newline="", encoding="utf-8-sig") as handle:
-        owner_reader = csv.DictReader(handle)
-        owner_columns = tuple(owner_reader.fieldnames or ())
-    if owner_columns == OWNER_COLUMNS:
+    owner_columns = _sheet_columns(owner_path)
+    if legacy_manifest and owner_columns == OWNER_COLUMNS:
         owner = _read_rating_sheet(
             owner_path,
             OWNER_COLUMNS,
@@ -461,19 +570,27 @@ def evaluate_masks_audit(
             if review_status == "open":
                 raise ValueError("unresolved mask review flags block audit evaluation")
             validate_review_record("mask", review_status, row["review_history"])
-            if (
-                row["rubric_version"] != MASK_RUBRIC_VERSION
-                or row["scene_rubric_version"] != SCENE_RUBRIC_VERSION
-                or row["instrument_version"] != RATING_RUBRIC_VERSION
-            ):
+            if legacy_manifest:
+                compatible_provenance = (
+                    row["rubric_version"] == LEGACY_MASK_RUBRIC_VERSION
+                    and row["scene_rubric_version"] == SCENE_RUBRIC_VERSION
+                    and bool(row["instrument_version"])
+                    and row["instrument_version"] != RATING_RUBRIC_VERSION
+                )
+            else:
+                compatible_provenance = (
+                    row["rubric_version"] == MASK_RUBRIC_VERSION
+                    and row["scene_rubric_version"] == SCENE_RUBRIC_VERSION
+                    and row["instrument_version"] == RATING_RUBRIC_VERSION
+                )
+            if not compatible_provenance:
                 raise ValueError(
                     f"mask owner evidence provenance is incompatible for {audit_id}"
                 )
     else:
         raise ValueError(
-            f"{owner_path.name} columns must be {', '.join(OWNER_COLUMNS)} or "
-            f"{', '.join(OWNER_HISTORY_COLUMNS)} or "
-            f"{', '.join(OWNER_PROVENANCE_COLUMNS)}"
+            f"{owner_path.name} columns are incompatible with the declared "
+            "mask rubric; revised evidence requires provenance and review history"
         )
     agent_mask = [agent[key]["mask_quality"] for key in owner_ids]
     owner_mask = [owner[key]["mask_quality"] for key in owner_ids]
@@ -516,6 +633,14 @@ def evaluate_masks_audit(
             "model": str(backend_record["model"]),
             "version": str(backend_record["version"]),
         },
+        "rubric_provenance": manifest.get(
+            "rubric_provenance",
+            {
+                "mask_rubric_version": mask_rubric_version,
+                "scene_rubric_version": scene_rubric_version,
+                "instrument_version": "legacy-unversioned",
+            },
+        ),
         "audit_manifest_digest": _canonical_digest(manifest),
         "partition_check": check,
         "mask_quality": {
@@ -611,8 +736,10 @@ def audit_report_outcome(
     """
     if not isinstance(report, dict) or report.get("schema") != EVALUATION_SCHEMA:
         raise ValueError("unsupported mask audit evaluation report")
-    if not isinstance(manifest, dict) or manifest.get("schema") != AUDIT_SCHEMA:
+    if not isinstance(manifest, dict) or manifest.get("schema") not in AUDIT_SCHEMAS:
         raise ValueError("unsupported mask audit manifest")
+    if not any(_manifest_rubric_status(manifest)):
+        raise ValueError("mask audit manifest rubric provenance is incompatible")
     if report.get("fixture_mode") or manifest.get("fixture_mode"):
         raise ValueError(
             "a fixture mask audit is not evidence and cannot be bound to a freeze"
@@ -762,23 +889,32 @@ def _balanced_allocation(populations: dict[str, int], target: int) -> dict[str, 
 
 
 def _write_rating_sheet(
-    path: Path, columns: Sequence[str], records: Iterable[dict[str, Any]]
+    path: Path,
+    columns: Sequence[str],
+    records: Iterable[dict[str, Any]],
+    defaults: dict[str, str] | None = None,
 ) -> None:
     with Path(path).open("x", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(columns))
         writer.writeheader()
         for record in records:
-            writer.writerow(
-                {
-                    "audit_id": record["audit_id"],
-                    "overlay_path": record["overlay_path"],
-                    **{
-                        column: ""
-                        for column in columns
-                        if column not in {"audit_id", "overlay_path"}
-                    },
-                }
-            )
+            values = {
+                "audit_id": record["audit_id"],
+                "overlay_path": record["overlay_path"],
+                **{
+                    column: ""
+                    for column in columns
+                    if column not in {"audit_id", "overlay_path"}
+                },
+                **(defaults or {}),
+            }
+            writer.writerow(values)
+
+
+def _sheet_columns(path: Path) -> tuple[str, ...]:
+    with Path(path).open(newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        return tuple(reader.fieldnames or ())
 
 
 def _read_rating_sheet(
@@ -1011,11 +1147,15 @@ def _fill_fixture_ratings(
                     "audit_id": row["audit_id"],
                     "overlay_path": row["overlay_path"],
                     "mask_quality": rating,
+                    "rubric_version": MASK_RUBRIC_VERSION,
+                    "instrument_version": RATING_RUBRIC_VERSION,
+                    "review_status": "",
+                    "review_history": "[]",
                 }
             )
     rng = random.Random(seed + 29)
     with owner_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(OWNER_COLUMNS))
+        writer = csv.DictWriter(handle, fieldnames=list(OWNER_PROVENANCE_COLUMNS))
         writer.writeheader()
         for row in records:
             if row["audit_id"] not in owner_ids:
@@ -1039,5 +1179,10 @@ def _fill_fixture_ratings(
                     "overlay_path": row["overlay_path"],
                     "mask_quality": mask_rating,
                     "scene_tag": scene_tag,
+                    "rubric_version": MASK_RUBRIC_VERSION,
+                    "scene_rubric_version": SCENE_RUBRIC_VERSION,
+                    "instrument_version": RATING_RUBRIC_VERSION,
+                    "review_status": "",
+                    "review_history": "[]",
                 }
             )

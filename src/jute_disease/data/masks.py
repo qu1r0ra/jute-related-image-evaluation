@@ -414,10 +414,14 @@ def save_mask_artifacts(
     image_id: str,
     model_version: str,
     rubric_version: str = MASK_RUBRIC_VERSION,
+    rubric: dict[str, Any] | None = None,
 ) -> MaskArtifacts:
     """Write an image mask, red overlay and provenance sidecar without clobbering."""
     if not image_id or not model_version or not rubric_version:
         raise ValueError("image ID, model version and rubric version are required")
+    artifact_rubric = MASK_RUBRIC if rubric is None else rubric
+    if artifact_rubric.get("version") != rubric_version:
+        raise ValueError("mask rubric content does not match its declared version")
     rgb = image.convert("RGB")
     if result.mask.shape != (rgb.height, rgb.width):
         raise ValueError("mask dimensions must match the source image")
@@ -456,7 +460,7 @@ def save_mask_artifacts(
             "model": result.model,
             "model_version": model_version,
             "rubric_version": rubric_version,
-            "rubric": MASK_RUBRIC,
+            "rubric": artifact_rubric,
             "diagnostics": result.diagnostics,
             "mask_sha256": hashlib.sha256(paths.mask_path.read_bytes()).hexdigest(),
             "overlay_sha256": hashlib.sha256(
