@@ -17,21 +17,34 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from jute_disease.data.audit import cohort_digest
+from jute_disease.data.audit import cohort_digest, validate_review_record
 from jute_disease.data.audit_sampling import grouping_threshold
 from jute_disease.data.masks import (
     MASK_QUALITY_RATINGS,
+    MASK_RUBRIC,
+    MASK_RUBRIC_VERSION,
     SCENE_RUBRIC,
     SCENE_RUBRIC_VERSION,
     SCENE_TAGS,
 )
 from jute_disease.data.masks_audit import AUDIT_SCHEMA as MASK_AUDIT_SCHEMA
+from jute_disease.data.rating_rubric import (
+    PAIR_RUBRIC,
+    PAIR_RUBRIC_VERSION,
+    RATING_RUBRIC_VERSION,
+)
 from jute_disease.data.scene_sets import read_scene_set
 
-KIT_SCHEMA = "jute-audit-kit-v1"
-# Written only when the kit carries scene items; older kits stay readable.
-SCENE_KIT_SCHEMA = "jute-audit-kit-v2"
-KIT_SCHEMAS = (KIT_SCHEMA, SCENE_KIT_SCHEMA)
+LEGACY_KIT_SCHEMA = "jute-audit-kit-v1"
+LEGACY_SCENE_KIT_SCHEMA = "jute-audit-kit-v2"
+KIT_SCHEMA = "jute-audit-kit-v3"
+SCENE_KIT_SCHEMA = "jute-audit-kit-v4"
+KIT_SCHEMAS = (
+    LEGACY_KIT_SCHEMA,
+    LEGACY_SCENE_KIT_SCHEMA,
+    KIT_SCHEMA,
+    SCENE_KIT_SCHEMA,
+)
 KIT_FILE = "kit.json"
 RATING_VALUES = ("exact", "near-duplicate", "very similar", "different")
 SHEET_COLUMNS = (
@@ -43,11 +56,39 @@ SHEET_COLUMNS = (
     "rating",
     "mask_quality",
     "scene_tag",
+    "rubric_version",
+    "scene_rubric_version",
+    "instrument_version",
+    "review_status",
+    "review_history",
 )
-PAIR_COLUMNS = ("pair_id", "image_a", "image_b", "rating")
-MASK_COLUMNS = ("audit_id", "overlay_path", "mask_quality", "scene_tag")
+PAIR_COLUMNS = (
+    "pair_id",
+    "image_a",
+    "image_b",
+    "rating",
+    "rubric_version",
+    "instrument_version",
+    "review_history",
+)
+MASK_COLUMNS = (
+    "audit_id",
+    "overlay_path",
+    "mask_quality",
+    "scene_tag",
+    "rubric_version",
+    "scene_rubric_version",
+    "instrument_version",
+    "review_history",
+)
 OWNER_PAIR_SHEET = "owner.csv"
-SCENE_COLUMNS = ("image_id", "scene_tag", "rubric_version")
+SCENE_COLUMNS = (
+    "image_id",
+    "scene_tag",
+    "rubric_version",
+    "instrument_version",
+    "review_history",
+)
 OWNER_MASK_SHEET = "owner-masks.csv"
 OWNER_SCENE_SHEET = "owner-scenes.csv"
 
@@ -168,11 +209,16 @@ def build_audit_kit(
         "hamming_threshold": threshold,
         "agent": {"name": agent["name"], "version": agent["version"]},
         "cohort_digest": cohort_digest(cohort),
+        "rubric_version": RATING_RUBRIC_VERSION,
+        "pair_rubric_version": PAIR_RUBRIC_VERSION,
+        "pair_rubric": PAIR_RUBRIC,
+        "mask_rubric_version": MASK_RUBRIC_VERSION,
+        "mask_rubric": MASK_RUBRIC,
+        "scene_rubric_version": SCENE_RUBRIC_VERSION,
+        "scene_rubric": SCENE_RUBRIC,
         "seed": seed,
         "items": items,
     }
-    if scene_items:
-        kit["scene_rubric"] = SCENE_RUBRIC
     (output / KIT_FILE).write_text(json.dumps(kit, indent=2) + "\n", encoding="utf-8")
     return {
         "output": str(output),
@@ -209,6 +255,9 @@ def validate_audit_row(row: dict[str, str]) -> None:
     for column, allowed in values.items():
         if row[column] and row[column] not in allowed:
             raise ValueError(f"{row['item_id']}: invalid {column} {row[column]!r}")
+    validate_review_record(
+        row["kind"], row.get("review_status", ""), row.get("review_history", "")
+    )
 
 
 def _load_kit(kit_dir: Path) -> dict[str, Any]:
@@ -225,23 +274,70 @@ def _ratings(
     items = {item["item_id"] for item in kit["items"]}
     sheets = sorted(Path(kit_dir).glob("sitting-*.csv"))
     rated: dict[str, dict[str, str]] = {}
+    review_history: dict[str, list[dict[str, Any]]] = {}
+    required_rubrics = {
+        "pair": kit.get("pair_rubric_version"),
+        "mask": kit.get("mask_rubric_version"),
+        "scene": kit.get("scene_rubric_version"),
+    }
     for sheet in sheets:
         with sheet.open(newline="", encoding="utf-8") as handle:
             for row in csv.DictReader(handle):
                 if row["item_id"] not in items:
                     raise ValueError(f"{sheet.name}: unknown item {row['item_id']}")
                 validate_audit_row(row)
+                events = json.loads(row.get("review_history") or "[]")
+                review_history.setdefault(row["item_id"], []).extend(events)
+                if row.get("review_status") == "open":
+                    raise ValueError(
+                        f"{row['item_id']} has an unresolved review flag; "
+                        "resolve it before collection"
+                    )
                 if not audit_row_complete(row):
                     continue
+                required_rubric = required_rubrics.get(row["kind"])
+                if required_rubric and row.get("rubric_version") != required_rubric:
+                    legacy_unchanged_scene = (
+                        row["kind"] == "scene"
+                        and not row.get("rubric_version")
+                        and not row.get("scene_rubric_version")
+                    )
+                    if not legacy_unchanged_scene:
+                        raise ValueError(
+                            f"{row['item_id']} uses rubric "
+                            f"{row.get('rubric_version') or 'legacy-unversioned'}; "
+                            f"explicitly rate it under {required_rubric} "
+                            "before collection"
+                        )
+                if (
+                    required_rubric
+                    and row["kind"] in {"pair", "mask"}
+                    and row.get("instrument_version") != kit.get("rubric_version")
+                ):
+                    raise ValueError(
+                        f"{row['item_id']} uses instrument "
+                        f"{row.get('instrument_version') or 'legacy-unversioned'}; "
+                        f"explicitly adopt {kit.get('rubric_version')} "
+                        "before collection"
+                    )
                 kept = {
                     "rating": row["rating"],
                     "mask_quality": row["mask_quality"],
                     "scene_tag": row["scene_tag"],
+                    "rubric_version": row.get("rubric_version", ""),
+                    "scene_rubric_version": row.get("scene_rubric_version", ""),
+                    "instrument_version": row.get("instrument_version", ""),
                 }
-                if rated.setdefault(row["item_id"], kept) != kept:
+                existing = rated.setdefault(row["item_id"], kept)
+                if {key: existing[key] for key in kept} != kept:
                     raise ValueError(
                         f"{row['item_id']} is rated differently in two sittings"
                     )
+                existing["review_history"] = json.dumps(
+                    review_history[row["item_id"]], ensure_ascii=True
+                )
+    for item_id, row in rated.items():
+        row["review_history"] = json.dumps(review_history[item_id], ensure_ascii=True)
     return rated, len(sheets)
 
 
@@ -274,6 +370,15 @@ def next_audit_sitting(kit_dir: Path, limit: int | None = None) -> dict[str, Any
                 "rating": "",
                 "mask_quality": "",
                 "scene_tag": "",
+                "rubric_version": {
+                    "pair": kit.get("pair_rubric_version", ""),
+                    "mask": kit.get("mask_rubric_version", ""),
+                    "scene": kit.get("scene_rubric_version", ""),
+                }[item["kind"]],
+                "scene_rubric_version": kit.get("scene_rubric_version", ""),
+                "instrument_version": kit.get("rubric_version", ""),
+                "review_status": "",
+                "review_history": "[]",
             }
             for item in chosen
         ],
@@ -294,9 +399,6 @@ def collect_audit_kit(kit_dir: Path) -> dict[str, Any]:
             f"{len(missing)} kit items are still unrated; resume a sitting"
         )
     pairs, masks, scenes = [], [], []
-    rubric_version = (kit.get("scene_rubric") or {}).get(
-        "version", SCENE_RUBRIC_VERSION
-    )
     for item in kit["items"]:
         rating = rated[item["item_id"]]
         if item["kind"] == "pair":
@@ -306,6 +408,9 @@ def collect_audit_kit(kit_dir: Path) -> dict[str, Any]:
                     "image_a": item["image_a"],
                     "image_b": item["image_b"],
                     "rating": rating["rating"],
+                    "rubric_version": rating["rubric_version"],
+                    "instrument_version": rating["instrument_version"],
+                    "review_history": rating["review_history"],
                 }
             )
         elif item["kind"] == "scene":
@@ -313,7 +418,10 @@ def collect_audit_kit(kit_dir: Path) -> dict[str, Any]:
                 {
                     "image_id": item["item_id"].removeprefix("scene:"),
                     "scene_tag": rating["scene_tag"],
-                    "rubric_version": rubric_version,
+                    "rubric_version": rating["scene_rubric_version"]
+                    or (rating["rubric_version"] if item["kind"] == "scene" else ""),
+                    "instrument_version": rating["instrument_version"],
+                    "review_history": rating["review_history"],
                 }
             )
         else:
@@ -323,6 +431,10 @@ def collect_audit_kit(kit_dir: Path) -> dict[str, Any]:
                     "overlay_path": item["source_overlay_path"],
                     "mask_quality": rating["mask_quality"],
                     "scene_tag": rating["scene_tag"],
+                    "rubric_version": rating["rubric_version"],
+                    "scene_rubric_version": rating["scene_rubric_version"],
+                    "instrument_version": rating["instrument_version"],
+                    "review_history": rating["review_history"],
                 }
             )
     sheets = [
@@ -347,5 +459,5 @@ def collect_audit_kit(kit_dir: Path) -> dict[str, Any]:
     }
     if scenes:
         summary["scene_sheet"] = str(kit_dir / OWNER_SCENE_SHEET)
-        summary["scene_rubric_version"] = rubric_version
+        summary["scene_rubric_version"] = kit.get("scene_rubric_version")
     return summary

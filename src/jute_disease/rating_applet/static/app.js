@@ -15,20 +15,21 @@ let syncingPan = false;
 let focusEpoch = 0;
 let pendingPan = null;
 let transforms = {};
+let rubric;
 
 const groups = {
   rating: {
     title: 'Pair rating',
     options: [
-      ['exact', 'Exact', '1'],
+      ['exact', 'Visually identical', '1'],
       ['near-duplicate', 'Near-duplicate', '2'],
-      ['very similar', 'Very similar', '3'],
-      ['different', 'Different', '4']
+      ['very similar', 'Visually similar', '3'],
+      ['different', 'Visually dissimilar', '4']
     ]
   },
   mask_quality: {
     title: 'Mask quality',
-    options: [['pass', 'Pass', '1'], ['minor', 'Minor', '2'], ['fail', 'Fail', '3']]
+    options: [['pass', 'Pass', '1'], ['minor', 'Minor defect', '2'], ['fail', 'Fail', '3']]
   },
   scene_tag: {
     title: 'Scene',
@@ -49,10 +50,18 @@ async function refresh(expected) {
   state = latest;
   $('progress').textContent = `${state.completed} completed · ${state.total - state.completed} remaining`;
   $('mode').textContent = state.read_only ? 'Read-only' : '';
+  syncRubricAdoption();
 }
 
 function complete() {
   if (!item) return false;
+  if (!state.rubric_adopted || item.review?.status === 'open') return false;
+  if (item.kind === 'scene') {
+    if (item.rubric_version && item.rubric_version !== item.current_rubric_version) return false;
+  } else if (
+    item.rubric_version !== item.current_rubric_version ||
+    item.instrument_version !== state.rubric_version
+  ) return false;
   if (item.kind === 'pair') return Boolean(item.rating);
   return Boolean(item.scene_tag && (item.kind !== 'mask' || item.mask_quality));
 }
@@ -74,6 +83,10 @@ function controls() {
   $('confirm-finish').disabled = busy || failed || !readable || state.read_only || !finishArmed;
   $('cancel-finish').disabled = busy;
   $('undo').disabled = busy || failed || state.read_only || !history.length;
+  $('adopt-rubric').disabled = busy || failed || state.read_only || state.rubric_adopted;
+  document.querySelectorAll('.review-action').forEach(button => {
+    button.disabled = busy || failed || state.read_only || !state.rubric_adopted;
+  });
 }
 
 function rememberFocus() {
@@ -97,15 +110,208 @@ function addPairRubric(container) {
   const heading = document.createElement('h3');
   heading.textContent = 'Pair rating definitions';
   rubric.append(heading);
-  const near = document.createElement('p');
-  near.textContent = `Near-duplicate: “${item.pair_boundary.near_duplicate}.”`;
-  const similar = document.createElement('p');
-  similar.textContent = `Very similar: “${item.pair_boundary.very_similar}.”`;
-  const merge = document.createElement('p');
-  merge.textContent = item.pair_boundary.merge;
-  rubric.append(near, similar, merge);
+  const list = document.createElement('ol');
+  for (const category of item.rubric.categories) {
+    const entry = document.createElement('li');
+    const label = document.createElement('strong');
+    label.textContent = `${category.label}: `;
+    entry.append(label, document.createTextNode(category.definition));
+    list.append(entry);
+  }
+  rubric.append(list);
+  const semantics = document.createElement('p');
+  semantics.textContent = 'Visually identical and Near-duplicate mean merge; Visually similar and Visually dissimilar mean no merge.';
+  const caveat = document.createElement('p');
+  caveat.textContent = item.rubric.scale_note;
+  rubric.append(semantics, caveat);
   container.append(rubric);
 }
+
+function addMaskRubric(container) {
+  const section = document.createElement('section');
+  section.className = 'item-rubric';
+  section.setAttribute('aria-label', 'Mask rating definitions');
+  const heading = document.createElement('h3');
+  heading.textContent = 'Mask rating definitions';
+  section.append(heading);
+  for (const [label, value] of [
+    ['Target leaf', item.mask_rubric.target_leaf],
+    ['Background', item.mask_rubric.background],
+    ['Assessment', item.mask_rubric.rule]
+  ]) {
+    const paragraph = document.createElement('p');
+    const title = document.createElement('strong');
+    title.textContent = `${label}: `;
+    paragraph.append(title, document.createTextNode(value));
+    section.append(paragraph);
+  }
+  container.append(section);
+}
+
+function reviewControls() {
+  const container = $('review-controls');
+  container.replaceChildren();
+  if (item.kind === 'scene') return;
+  const heading = document.createElement('h3');
+  heading.textContent = 'Review status';
+  container.append(heading);
+  const status = document.createElement('p');
+  status.setAttribute('role', 'status');
+  status.textContent = item.review?.status === 'open'
+    ? 'Open review: resolve this case before finishing.'
+    : item.review?.status === 'resolved' ? 'Review resolved.' : 'No review flag.';
+  container.append(status);
+  if (item.review?.status === 'open') {
+    const label = document.createElement('label');
+    label.htmlFor = 'review-note';
+    label.textContent = 'Resolution note';
+    const note = document.createElement('textarea');
+    note.id = 'review-note';
+    note.rows = 2;
+    note.required = true;
+    container.append(label, note);
+    const resolve = document.createElement('button');
+    resolve.type = 'button';
+    resolve.className = 'review-action';
+    resolve.textContent = 'Resolve review';
+    resolve.addEventListener('click', () => persistReview('resolve', note.value));
+    container.append(resolve);
+  } else {
+    const flag = document.createElement('button');
+    flag.type = 'button';
+    flag.className = 'review-action';
+    flag.textContent = item.kind === 'pair'
+      ? 'Flag identity uncertainty for review'
+      : 'Flag ambiguous target leaf for review';
+    flag.addEventListener('click', () => persistReview('flag', ''));
+    container.append(flag);
+  }
+  if (item.review?.history?.length) {
+    const list = document.createElement('ol');
+    list.setAttribute('aria-label', 'Review history');
+    for (const entry of item.review.history) {
+      const line = document.createElement('li');
+      const label = entry.action === 'flagged' ? 'Flagged' : 'Resolved';
+      line.textContent = entry.note ? `${label}: ${entry.note}` : label;
+      list.append(line);
+    }
+    container.append(list);
+  }
+}
+
+function renderCanonicalRubric() {
+  $('rubric-version').textContent = `Version ${rubric.version}`;
+  const root = $('canonical-rubric');
+  root.replaceChildren();
+  const pairHeading = document.createElement('h3');
+  pairHeading.textContent = 'Pair identity and resemblance';
+  const pairList = document.createElement('ol');
+  for (const category of rubric.pair.categories) {
+    const line = document.createElement('li');
+    const title = document.createElement('strong');
+    title.textContent = `${category.label}: `;
+    line.append(title, document.createTextNode(category.definition));
+    pairList.append(line);
+  }
+  root.append(pairHeading, pairList);
+  for (const text of [
+    rubric.pair.scale_note,
+    rubric.pair.file_hash_identity,
+    rubric.pair.review_rule
+  ]) {
+    const paragraph = document.createElement('p');
+    paragraph.textContent = text;
+    root.append(paragraph);
+  }
+  const maskHeading = document.createElement('h3');
+  maskHeading.textContent = `Mask quality (${rubric.mask.version})`;
+  root.append(maskHeading);
+  for (const text of [rubric.mask.target_leaf, rubric.mask.background, rubric.mask.rule]) {
+    const paragraph = document.createElement('p');
+    paragraph.textContent = text;
+    root.append(paragraph);
+  }
+  const maskList = document.createElement('ul');
+  for (const [value, definition] of Object.entries(rubric.mask.anchors)) {
+    const line = document.createElement('li');
+    line.textContent = `${rubric.mask.labels[value]} (${value}): ${definition}`;
+    maskList.append(line);
+  }
+  root.append(maskList);
+  const sceneHeading = document.createElement('h3');
+  sceneHeading.textContent = `Scene (${rubric.scene.version})`;
+  const sceneList = document.createElement('ul');
+  for (const [value, definition] of Object.entries(rubric.scene.anchors)) {
+    const line = document.createElement('li');
+    line.textContent = `${value}: ${definition}`;
+    sceneList.append(line);
+  }
+  root.append(sceneHeading, sceneList);
+}
+
+function syncRubricAdoption() {
+  if (!state) return;
+  $('adopt-rubric').hidden = state.rubric_adopted;
+  $('adoption-status').textContent = state.rubric_adopted
+    ? `Adopted ${state.rubric_version}. Reaffirm prior pair and mask choices; unchanged scene tags remain valid.`
+    : 'Adopt this version explicitly before making or reaffirming ratings.';
+  controls();
+}
+
+async function persistReview(action, note, kind = null) {
+  if (busy || failed || !item || !state.rubric_adopted) return;
+  const focus = rememberFocus();
+  busy = true;
+  controls();
+  try {
+    const result = await json(`/api/items/${position}/review`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        revision: state.revision,
+        action,
+        kind: kind || (item.kind === 'pair' ? 'identity' : 'target'),
+        note
+      })
+    });
+    item.review = result.review;
+    await refresh(result.revision);
+    reviewControls();
+    $('save').textContent = action === 'flag' ? 'Review flag saved' : 'Review resolution saved';
+    $('notice').textContent = '';
+  } catch (error) {
+    $('notice').textContent = `Couldn't save the review status: ${friendlyError(error)} Reload to verify.`;
+  }
+  busy = false;
+  controls();
+  restoreFocus(focus, $('position'));
+}
+
+$('adopt-rubric').addEventListener('click', async () => {
+  if (busy || failed || state.read_only || state.rubric_adopted) return;
+  const focus = rememberFocus();
+  let adopted = false;
+  busy = true;
+  controls();
+  try {
+    const result = await json('/api/adopt-rubric', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ revision: state.revision, rubric_version: rubric.version })
+    });
+    await refresh(result.revision);
+    adopted = true;
+  } catch (error) {
+    $('notice').textContent = `Couldn't adopt the rubric: ${friendlyError(error)} Reload to check its state.`;
+  }
+  busy = false;
+  controls();
+  if (adopted) {
+    await show(state.position);
+    $('notice').textContent = 'Rubric adoption recorded. Existing choices are preserved; reaffirm revised pair and mask choices. Unchanged scene tags remain valid.';
+  }
+  restoreFocus(focus, $('position'));
+});
 
 function choices() {
   const container = $('choices');
@@ -146,6 +352,8 @@ function choices() {
     container.append(set);
   }
   if (item.kind === 'pair') addPairRubric(container);
+  if (item.kind === 'mask') addMaskRubric(container);
+  reviewControls();
   controls();
 }
 
@@ -378,7 +586,9 @@ async function show(nextPosition) {
     $('finish').setAttribute('aria-expanded', 'false');
     $('confirm-finish').hidden = true;
     $('cancel-finish').hidden = true;
-    $('notice').textContent = state.finished
+    $('notice').textContent = !state.rubric_adopted
+      ? 'Adopt the displayed rubric before rating. Existing choices remain visible and unchanged.'
+      : state.finished
       ? 'This sitting is finished and read-only.'
       : state.read_only ? 'This sitting is read-only; no changes can be saved.' : '';
     choices();
@@ -404,7 +614,10 @@ function friendlyError(error) {
 }
 
 async function save(field, value, undo = false) {
-  if (busy || failed || !readable || state.read_only || value === item[field]) return;
+  if (
+    busy || failed || !readable || state.read_only || !state.rubric_adopted ||
+    (value === item[field] && item.rubric_version === rubric.version)
+  ) return;
   disarmFinish();
   const focus = rememberFocus();
   const oldValue = item[field];
@@ -419,6 +632,9 @@ async function save(field, value, undo = false) {
     });
     state.revision = result.revision;
     item[field] = value;
+    item.rubric_version = item.current_rubric_version;
+    item.instrument_version = state.rubric_version;
+    if (field === 'scene_tag') item.scene_rubric_version = item.current_rubric_version;
     if (!undo) history.push({ field, value: oldValue });
     await refresh(result.revision);
     if (item.kind === 'pair') resetTransforms();
@@ -432,7 +648,7 @@ async function save(field, value, undo = false) {
   }
   busy = false;
   controls();
-  const fallback = focus.element === document.body
+  const fallback = focus.element === document.body || focus.element === $('position')
     ? [...document.querySelectorAll('.choice button')].find(button =>
       button.dataset.field === field && button.dataset.value === value)
     : null;
@@ -591,6 +807,7 @@ document.addEventListener('keydown', event => {
     const choice = groups[field].options.find(option => option[2].toLowerCase() === event.key.toLowerCase());
     if (choice) {
       event.preventDefault();
+      if (target === $('position')) target.blur();
       save(field, choice[0]);
       return;
     }
@@ -599,6 +816,8 @@ document.addEventListener('keydown', event => {
 
 (async () => {
   try {
+    rubric = await json('/api/rubric');
+    renderCanonicalRubric();
     await refresh();
     const recoveryPosition = Number(
       sessionStorage.getItem('rating-applet-recovery-position')

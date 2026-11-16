@@ -12,6 +12,17 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from jute_disease.data.rating_rubric import (
+    MASK_RUBRIC as _VERSIONED_MASK_RUBRIC,
+)
+from jute_disease.data.rating_rubric import (
+    MASK_RUBRIC_VERSION,
+    SCENE_RUBRIC_VERSION,
+)
+from jute_disease.data.rating_rubric import (
+    SCENE_RUBRIC as _VERSIONED_SCENE_RUBRIC,
+)
+
 SCENE_TAGS = ("clean-background", "field", "unknown")
 REQUIRED_DEVELOPMENT_TAGS = ("clean-background", "field")
 MAX_DEVELOPMENT_IMAGES = 100
@@ -20,34 +31,9 @@ TWO_TAG_METHOD = (
     "grid search maximizing two-tag scene macro-F1; "
     "no unknown development image, background cutoff fixed at 0"
 )
-MASK_RUBRIC_VERSION = "leaf-mask-v1"
-SCENE_RUBRIC_VERSION = "scene-tag-v2"
 MASK_QUALITY_RATINGS = ("pass", "minor", "fail")
-MASK_RUBRIC: dict[str, Any] = {
-    "version": MASK_RUBRIC_VERSION,
-    "categories": list(MASK_QUALITY_RATINGS),
-    "criteria": ["leaf coverage", "clipped lesions", "background leakage"],
-    "anchors": {
-        "pass": "Leaf and visible lesions are covered; "
-        "background leakage is negligible.",
-        "minor": "Some edge clipping or leakage is visible, but most leaf tissue "
-        "and lesions remain covered.",
-        "fail": "Substantial leaf or lesion clipping, or substantial background "
-        "leakage, is present.",
-    },
-}
-SCENE_RUBRIC: dict[str, Any] = {
-    "version": SCENE_RUBRIC_VERSION,
-    "categories": list(SCENE_TAGS),
-    "anchors": {
-        "clean-background": "Most visible background is a uniform, uncluttered "
-        "surface.",
-        "field": "The background contains substantial outdoor or field structure. "
-        "A leaf photographed against other leaves or plants is field.",
-        "unknown": "Only for a tight crop, a blurred image, or an image with no "
-        "readable background.",
-    },
-}
+MASK_RUBRIC: dict[str, Any] = _VERSIONED_MASK_RUBRIC
+SCENE_RUBRIC: dict[str, Any] = _VERSIONED_SCENE_RUBRIC
 
 
 @dataclass(frozen=True)

@@ -37,6 +37,7 @@ This repository now holds the pipeline for a revised jute related-image evaluati
   - [3.3. Installation](#33-installation)
 - [4. Reproducing the Original Results](#4-reproducing-the-original-results)
 - [5. Current Tooling and Readiness](#5-current-tooling-and-readiness)
+  - [5.1. Blind audit rating rubric](#51-blind-audit-rating-rubric)
 - [6. Historical Benchmarked Performance](#6-historical-benchmarked-performance)
 - [7. Citation](#7-citation)
 - [8. License](#8-license)
@@ -163,6 +164,12 @@ uv run --locked python scripts/audit_dependencies.py
 Training runs through a serial, resumable queue declared in `configs/benchmark.json`: `just queue-plan` shows the fits, `just queue-run` runs them, and running it again skips completed fits and resumes an interrupted CNN fit from its last saved epoch. [Architecture](docs/architecture.md#training-queue) defines the identity, retry and resume rules.
 
 This tooling work does not authorize experiment fits or establish readiness of the lab A100. The synthetic freeze and Linux CI checks validate the development environment. The remaining lab pilots and the matrix freeze that authorizes fits are tracked under [issue 222](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/222). See [Tooling](docs/tooling.md) for update cadence, local evidence, audit limits, preprocessing identity, and helper commands.
+
+### 5.1. Blind audit rating rubric
+
+The versioned blind rating instrument uses identity-first pair definitions, separate mask-quality criteria, and explicit review flags with durable resolution history. Pair display labels preserve the existing stored values and merge/no-merge mapping; file-hash grouping remains separate from visual identity. Adopting the instrument records provenance before revised pair or mask entries, preserves earlier values and histories, and leaves unchanged scene tags run-once. Open review flags block finishing, collection and evaluation without removing items from the cohort.
+
+See the [complete `rating-bundle-v2` rubric and future-pass preparation guidance](docs/related-image-rating-rubric-v2.md). Real owner/agent rating, collection, scientific gates, mask rerating scope and policy freezing remain in [issue 172](https://github.com/qu1r0ra/jute-related-image-evaluation/issues/172); this implementation prepared the instrument and did not execute a study pass.
 
 ## 6. Historical Benchmarked Performance
 

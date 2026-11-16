@@ -16,6 +16,11 @@ SHEET_COLUMNS = [
     "rating",
     "mask_quality",
     "scene_tag",
+    "rubric_version",
+    "scene_rubric_version",
+    "instrument_version",
+    "review_status",
+    "review_history",
 ]
 HIDDEN = (
     "agent_rating",
@@ -192,8 +197,25 @@ def test_finished_sittings_collect_into_owner_sheets_that_evaluate(
         len(inputs.cohort["pairs"]),
         120,
     )
-    assert list(pairs[0]) == ["pair_id", "image_a", "image_b", "rating"]
-    assert list(masks[0]) == ["audit_id", "overlay_path", "mask_quality", "scene_tag"]
+    assert list(pairs[0]) == [
+        "pair_id",
+        "image_a",
+        "image_b",
+        "rating",
+        "rubric_version",
+        "instrument_version",
+        "review_history",
+    ]
+    assert list(masks[0]) == [
+        "audit_id",
+        "overlay_path",
+        "mask_quality",
+        "scene_tag",
+        "rubric_version",
+        "scene_rubric_version",
+        "instrument_version",
+        "review_history",
+    ]
     mask_audit = json.loads((inputs.mask_audit / "audit.json").read_text("utf-8"))
     sources = {r["audit_id"]: r["overlay_path"] for r in mask_audit["records"]}
     assert all(row["overlay_path"] == sources[row["audit_id"]] for row in masks)
