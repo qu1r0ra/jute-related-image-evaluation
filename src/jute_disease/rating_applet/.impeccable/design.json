@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-11-15T20:53:35Z",
+  "generatedAt": "2026-11-18T06:46:58Z",
   "title": "Design System: Local blind rating instrument",
   "extensions": {
     "colorMeta": {
@@ -14,7 +14,10 @@
       "focus": { "role": "primary", "displayName": "Focus blue" }
     },
     "typographyMeta": {
-      "body": { "displayName": "System UI", "purpose": "Default interface text and inherited button typography." }
+      "body": {
+        "displayName": "System UI",
+        "purpose": "Default interface text and inherited button typography."
+      }
     },
     "breakpoints": [
       { "name": "image-panel-compact-height", "value": "1050px" },
@@ -29,33 +32,60 @@
       "kind": "button",
       "refersTo": "rating-button",
       "description": "Explicit rating choice with selected, disabled, and visible keyboard-focus states.",
-      "html": "<button class=\"ds-rating-button\" type=\"button\" aria-pressed=\"true\">Exact</button>",
-      "css": ".ds-rating-button { background: #fff; border: 1px solid #555; border-radius: .25rem; padding: .65rem .8rem; color: #222; font: inherit; cursor: pointer; } .ds-rating-button[aria-pressed=\"true\"] { background: #444; color: #fff; } .ds-rating-button:disabled { opacity: .5; cursor: default; } .ds-rating-button:focus-visible { outline: 3px solid #1e4c79; outline-offset: 3px; }"
+      "html": "<button class=\"ds-rating-button\" type=\"button\" aria-pressed=\"true\">Exact <span class=\"ds-shortcut\">1</span></button>",
+      "css": ".ds-rating-button { display: flex; justify-content: space-between; align-items: center; gap: 1rem; width: 100%; text-align: left; background: #fff; border: 1px solid #555; border-radius: .25rem; padding: .65rem .8rem; color: #222; font: inherit; cursor: pointer; } .ds-rating-button[aria-pressed=\"true\"] { background: #444; color: #fff; } .ds-shortcut { color: #555; font-size: .9em; } .ds-rating-button[aria-pressed=\"true\"] .ds-shortcut { color: #fff; } .ds-rating-button:disabled { opacity: .5; cursor: default; } .ds-rating-button:focus-visible { outline: 3px solid #1e4c79; outline-offset: 3px; }"
     },
     {
       "name": "Pair image panel",
       "kind": "custom",
-      "description": "Equal-width panel for one side of a pair comparison, sized for desktop inspection, with synchronized scrolling and shared zoom. The compact 961px–1050px workspace keeps all four rating buttons and sticky navigation visible at 1000 × 700; definitions may continue below the fold.",
-      "html": "<div class=\"ds-image-panel\"><img alt=\"Image A for this item\" src=\"\"></div>",
-      "css": ".ds-workspace { grid-template-columns: minmax(0, 1.7fr) minmax(22rem, 1fr); gap: 1.5rem; } .ds-image-panel { width: 100%; height: min(56vh, 660px); min-height: 320px; overflow: auto; background: #777; display: flex; align-items: safe center; justify-content: safe center; } .ds-image-panel img { display: block; max-width: none; max-height: none; object-fit: contain; flex: none; } @media (max-width: 1050px) { .ds-image-panel { height: min(46vh, 460px); min-height: 260px; } } @media (min-width: 961px) and (max-width: 1050px) { .ds-workspace { grid-template-columns: minmax(0, 1.7fr) minmax(18rem, 1fr); gap: 1rem; } } @media (max-width: 960px) { .ds-workspace { grid-template-columns: 1fr; } } @media (max-width: 640px) { .ds-pair-frames { grid-template-columns: 1fr; } .ds-image-panel { height: 36vh; min-height: 220px; } }"
+      "refersTo": "pair-image-panel",
+      "description": "Equal-size scrollable image well for side-by-side comparison, with compact viewport sizing and a single-column mobile layout.",
+      "html": "<div class=\"ds-pair-frames\"><figure><figcaption>Image A</figcaption><div class=\"ds-pair-image-frame\"><img alt=\"Image A for this item\" src=\"\"></div></figure><figure><figcaption>Image B</figcaption><div class=\"ds-pair-image-frame\"><img alt=\"Image B for this item\" src=\"\"></div></figure></div>",
+      "css": ".ds-pair-frames { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; } .ds-pair-frames figure { min-width: 0; margin: 0; } .ds-pair-frames figcaption { font-weight: 600; margin: 0 0 .35rem; } .ds-pair-image-frame { width: 100%; height: min(56vh, 660px); min-height: 320px; overflow: auto; background: #777; display: flex; align-items: safe center; justify-content: safe center; } .ds-pair-image-frame img { display: block; max-width: none; max-height: none; object-fit: contain; flex: none; } @media (max-width: 1050px) { .ds-pair-image-frame { height: min(46vh, 460px); min-height: 260px; } } @media (max-width: 640px) { .ds-pair-frames { grid-template-columns: 1fr; } .ds-pair-image-frame { height: 36vh; min-height: 220px; } }"
+    },
+    {
+      "name": "Rubric adoption band",
+      "kind": "custom",
+      "refersTo": "rubric-adoption",
+      "description": "Neutral, bordered area that identifies the active rubric and keeps the canonical wording in a native disclosure.",
+      "html": "<section class=\"ds-rubric-adoption\"><h2 class=\"ds-rubric-heading\">Rating rubric</h2><p class=\"ds-rubric-version\">Current version</p><p class=\"ds-rubric-guidance\">Adoption guidance</p><button class=\"ds-adopt-action\" type=\"button\">Adopt rubric</button><p class=\"ds-adoption-status\">Adoption status</p><details><summary>View rubric</summary><p>Canonical rating guidance</p></details></section>",
+      "css": ".ds-rubric-adoption { border-bottom: 1px solid #c9c7c4; margin: 0 0 1.25rem; padding: 0 0 1rem; } .ds-rubric-adoption details { margin-top: .75rem; } .ds-rubric-adoption summary { cursor: pointer; font-weight: 600; } .ds-rubric-adoption summary:focus-visible { outline: 3px solid #1e4c79; outline-offset: 3px; } @media (min-width: 961px) and (max-width: 1050px) { .ds-rubric-adoption { display: grid; grid-template-columns: minmax(0, 1fr) minmax(16rem, .8fr); column-gap: 1rem; margin-bottom: .75rem; padding-bottom: .75rem; } .ds-rubric-adoption p { margin-bottom: .35rem; } .ds-rubric-heading, .ds-rubric-version, .ds-rubric-guidance { grid-column: 1; } .ds-adopt-action { grid-column: 2; grid-row: 1; align-self: start; } .ds-adoption-status { grid-column: 2; grid-row: 2; } .ds-rubric-adoption details { grid-column: 2; grid-row: 3; } }"
+    },
+    {
+      "name": "Review status controls",
+      "kind": "input",
+      "refersTo": "review-status",
+      "description": "Divider-separated review metadata with a labeled note field and visible keyboard focus.",
+      "html": "<section class=\"ds-review-status\"><label for=\"ds-review-note\">Resolution note</label><textarea id=\"ds-review-note\"></textarea><button type=\"button\">Resolve review</button></section>",
+      "css": ".ds-review-status { border-top: 1px solid #c9c7c4; margin-top: 1rem; padding-top: .25rem; } .ds-review-status textarea { display: block; width: min(100%, 36rem); font: inherit; margin: .3rem 0 .7rem; } .ds-review-status textarea:focus-visible { outline: 3px solid #1e4c79; outline-offset: 3px; }"
+    },
+    {
+      "name": "Sticky sitting navigation",
+      "kind": "nav",
+      "refersTo": "sitting-navigation",
+      "description": "Compact navigation remains at the viewport bottom when needed and stays visually separated from the workspace.",
+      "html": "<nav class=\"ds-sitting-navigation\" aria-label=\"Sitting navigation\"><button type=\"button\">Previous</button><button type=\"button\">Next</button></nav>",
+      "css": ".ds-sitting-navigation { position: sticky; bottom: 0; z-index: 2; display: flex; align-items: center; flex-wrap: wrap; gap: .75rem; margin: 1rem 0; padding: .65rem 0; background: #f4f3f1; border-top: 1px solid #c9c7c4; } .ds-sitting-navigation button { background: #fff; border: 1px solid #555; border-radius: .25rem; padding: .65rem .8rem; color: #222; font: inherit; cursor: pointer; } .ds-sitting-navigation button:focus-visible { outline: 3px solid #1e4c79; outline-offset: 3px; }"
     }
   ],
   "narrative": {
     "northStar": "The Quiet Instrument",
-    "overview": "This is an operate interface for one reviewer working through an existing blind sitting. The observed visual system gives the images and explicit choices most of the attention. Neutral page and control colors, system typography, and simple borders support scanning without adding visual cues about an answer.\n\nThe values below are a snapshot extracted from static/style.css. That stylesheet remains the implementation source of truth. The interface currently has no shadow or motion rules.",
+    "overview": "This is an operate interface for one reviewer working through an existing blind sitting. The observed visual system gives the images and explicit choices most of the attention. Neutral page and control colors, system typography, and simple borders support scanning without adding visual cues about an answer.\n\nThe values below are a snapshot extracted from `static/style.css`. That stylesheet remains the implementation source of truth. The interface currently has no shadow or motion rules.",
     "keyCharacteristics": [
       "Neutral page and control surfaces with a gray image well.",
       "System UI typography and compact heading hierarchy.",
-      "Equal-sized pair panels use more desktop width and viewport height, with synchronized scrolling; compact layout keeps choices visible at 1000 × 700.",
-      "Shared zoom scales both previews and original images while preserving the approximate viewed position; preview upscaling adds no image detail.",
-      "Finish confirmation is a separate keyboard-accessible control that Escape or a rating change cancels.",
-      "Visible keyboard focus and selected-choice state."
+      "Equal-sized pair panels with synchronized scrolling.",
+      "Visible keyboard focus and selected-choice state.",
+      "A quiet rubric-adoption band before the sitting workspace, with the full rubric available in a native disclosure.",
+      "A separate review-status area for identity or target flags, note-backed resolution, and retained history."
     ],
     "rules": [],
     "dos": [
       "Do preserve equal pair-panel sizing and the image aspect ratio.",
       "Do keep keyboard focus visible with the stylesheet's focus outline.",
-      "Do keep selected choices visibly distinct from default choices."
+      "Do keep selected choices visibly distinct from default choices.",
+      "Do preserve native button, label, textarea, disclosure, and heading semantics for the adoption and review controls.",
+      "Do keep the focus outline visible on every interactive control, including disclosure summaries and resolution notes."
     ],
     "donts": [
       "Don't add decorative shadows or motion that are absent from the current interface.",
